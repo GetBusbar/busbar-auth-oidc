@@ -9,8 +9,9 @@
 //! All the OIDC logic (JWKS, JWT verification on `ring`, claim policy) lives in the `busbar-auth-oidc`
 //! `lib` crate (which a custom build can also link statically). Here we only adapt the engine's JSON
 //! config into an `OidcModule` — resolving the JWKS url (explicit or via OIDC discovery) with a real
-//! HTTPS fetcher — and hand the trait object to the SDK, which emits the five extern-C symbols the
-//! loader resolves.
+//! HTTPS fetcher — and hand the trait object to the SDK, which emits the six extern-C symbols the
+//! loader resolves (`busbar_abi`, `busbar_plugin_kind`, `busbar_open`, `busbar_call`, `busbar_free`,
+//! `busbar_close`).
 
 use busbar_api::AuthModule;
 use busbar_auth_oidc::{resolve_jwks_url, OidcConfig, OidcModule, ReqwestFetcher};

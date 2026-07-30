@@ -45,7 +45,9 @@ explicitly in production; do not assume they move together.
 
 This repo is a thin adapter (`src/lib.rs`, ~60 lines): it turns the
 engine's JSON config into a real `OidcModule` and hands the trait object
-to the SDK, which emits the five extern-C symbols the loader resolves.
+to the SDK, which emits the six extern-C symbols the loader resolves
+(`busbar_abi`, `busbar_plugin_kind`, `busbar_open`, `busbar_call`,
+`busbar_free`, `busbar_close`).
 All the actual OIDC logic — JWKS fetch/cache, JWT verification, claim
 policy — lives in the `busbar-auth-oidc` library crate this plugin wraps
 (a sibling crate in the `busbarAI` monorepo; see
@@ -134,7 +136,9 @@ for the full `auth.chain` config reference.
 | `issuer` | yes | — | The IdP's OIDC issuer URL. Checked against the JWT's `iss` claim. |
 | `audience` | yes | — | The expected `aud` claim (busbar's registered client/resource identifier at the IdP). |
 | `jwks_url` | no | discovered from `issuer` | The IdP's JWKS endpoint. When omitted, resolved once at `open()` via OIDC discovery (`<issuer>/.well-known/openid-configuration`). |
-| `role_claim` | no | — | The claim (e.g. `groups`) mapped onto the resulting `Principal`'s roles. |
+| `role_claim` | no | `groups` | The claim mapped onto the resulting `Principal`'s roles; set `roles` to use Entra app-roles instead. |
+| `jwks_min_refetch_secs` | no | `60` | JWKS refetch rate-limit (seconds) — the bound on how often a kid-rotation refetch can occur. |
+| `jwks_ttl_secs` | no | `3600` | JWKS cache TTL (seconds). |
 | `ca_cert_pem` | no | — | An extra root CA (PEM) to trust for the JWKS/discovery HTTPS fetch, in addition to the system trust store — for a private CA or a test fixture (this is exactly what `tests/e2e.rs` uses to trust its own self-signed local JWKS server). |
 
 Unknown config fields are rejected (`deny_unknown_fields`) — a typo'd or

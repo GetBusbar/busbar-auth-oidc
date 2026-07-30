@@ -94,7 +94,7 @@ fn missing_jwks_url_with_malformed_issuer_fails_fast_without_network() {
     }"#;
     let err = expect_err(open(cfg));
     assert!(
-        !err.is_empty(),
-        "expected a descriptive discovery failure, got empty string"
+        err.contains("OIDC discovery fetch failed"),
+        "expected a descriptive discovery-failure message naming the failed step, got: {err}"
     );
 }

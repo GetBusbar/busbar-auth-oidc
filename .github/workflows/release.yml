@@ -23,10 +23,20 @@ permissions:
   attestations: write  # record the build-provenance attestation
 
 env:
-  # Which busbar branch to check out as the sibling path dependency — same BUSBAR_REF convention
-  # ci.yml / plugin-ci.yml already established. Update to `main` once busbar 1.5.0 actually ships;
-  # until then the plugin ABI surface this crate depends on only exists on 1.5.0-dev.
-  BUSBAR_REF: 1.5.0-dev
+  # Which busbar commit to check out as the sibling path dependency. Pinned to a SHA on the
+  # 1.5.0-dev branch (NOT the mutable branch name) because this step also builds and runs
+  # busbar-plugin-pack in the same job that holds BUSBAR_SIGN_KEY (with id-token: write) — a
+  # mutable branch ref there would let anyone who can push to 1.5.0-dev reach this repo's signing
+  # key. Resolved 2026-07-30 via `gh api repos/GetBusbar/busbar/branches/1.5.0-dev`, which was also
+  # the tip at the time: ddc97f1e337098d6b3b8f6cba32573cf2d652d5f. Only crates/api, crates/plugin-sdk,
+  # crates/plugin-loader, crates/plugin-abi, and crates/plugin-pack are needed from this checkout
+  # (busbar-auth-oidc's own OIDC logic now lives in this repo's own auth-oidc/ crate, not in
+  # busbarAI/crates/auth-oidc) — all present at this SHA. crates/auth-oidc does NOT exist at this
+  # SHA (an unrelated, separately-tracked extraction issue upstream), but that no longer matters
+  # here since this repo doesn't depend on it. To bump deliberately: verify the new SHA still has
+  # crates/api, crates/plugin-sdk, crates/plugin-loader, crates/plugin-abi, and crates/plugin-pack,
+  # then update the SHA below and this comment.
+  BUSBAR_REF: ddc97f1e337098d6b3b8f6cba32573cf2d652d5f
 
 jobs:
   # Create the Release first so the parallel per-target upload jobs have something to attach to
@@ -39,11 +49,27 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" \
+          set +e
+          create_out=$(gh release create "${GITHUB_REF_NAME}" \
             --repo "${GITHUB_REPOSITORY}" \
             --title "busbar-auth-oidc ${GITHUB_REF_NAME}" \
-            --verify-tag --generate-notes \
-          || gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}"
+            --verify-tag --generate-notes 2>&1)
+          status=$?
+          set -e
+          echo "$create_out"
+          if [ "$status" -eq 0 ]; then
+            exit 0
+          fi
+          # Only swallow the specific "a release already exists for this tag" race (two runs of this
+          # job triggered for the same tag) — any other failure (auth error, --verify-tag rejection,
+          # --generate-notes error, etc.) must fail the job, not be silently papered over by falling
+          # through to `gh release view`.
+          if echo "$create_out" | grep -qi "already exists"; then
+            echo "Release ${GITHUB_REF_NAME} already exists — reusing it (parallel/retried run)."
+            gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}"
+          else
+            exit "$status"
+          fi
 
   # One signed .tar.gz per target: {cdylib + manifest.json}, packed by busbar-plugin-pack and
   # signed with the busbar release PRIVATE key (BUSBAR_SIGN_KEY secret) so it verifies as
@@ -125,11 +151,11 @@ jobs:
           lib="auth-oidc/target/${target}/release/${{ matrix.libprefix }}busbar_auth_oidc_plugin.${{ matrix.libext }}"
           "$pack" pack \
             --lib "$lib" \
-            --name "busbar-auth-oidc" --alias "oidc" --kind auth \
+            --name "busbar-auth-oidc-plugin" --alias "oidc" --kind auth \
             --version "$ver" --publisher busbar \
             --description "The OIDC auth module as a droppable busbar plugin — a cdylib exporting the auth C ABI. Drop it in the plugins folder and add oidc to auth.chain with its settings nested under it." \
             --license Apache-2.0 \
-            --out "${outdir}/busbar-auth-oidc-${ver}-${target}.tar.gz" \
+            --out "${outdir}/busbar-auth-oidc-plugin-${ver}-${target}.tar.gz" \
             $unsigned_flag
           ls -l "$outdir"
         shell: bash
