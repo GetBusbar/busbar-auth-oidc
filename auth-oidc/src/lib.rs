@@ -48,6 +48,24 @@ const DEFAULT_TTL_SECS: u64 = 3600;
 /// Small clock-skew tolerance applied to `exp`/`nbf` (seconds) — standard practice so a few seconds of
 /// clock drift between busbar and the IdP does not spuriously reject a just-issued / near-expiry token.
 const CLOCK_SKEW_SECS: i64 = 60;
+/// Ceiling on the credential-cache TTL this module suggests via `Principal::ttl_secs`. Mirrors the
+/// engine's own `DEFAULT_IDENTIFY_TTL_SECS` (`auth_cache.rs`) — deliberately NOT the engine's higher
+/// `MAX_IDENTIFY_TTL_SECS` (3600s), which exists to bound a module that gives no opinion at all. This
+/// value must only ever SHORTEN that engine default, never lengthen it: a token derives its TTL from
+/// its own remaining `exp`, but a standard access token's `exp` is often itself ~3600s out, and
+/// suggesting that as the cache TTL would take the stale-revocation window from "5 minutes today" to
+/// "up to an hour" — trading a small over-cache bug for a much larger one. `min`-ing against this
+/// keeps the module's whole reason for existing (bound the over-cache window) while still shortening
+/// the TTL for a token that expires sooner than this.
+const MAX_CACHE_TTL_SECS: i64 = 300;
+/// A host clock reading before this instant means the clock cannot be trusted at all — used to make
+/// `now_unix()` fail CLOSED not just on a sub-epoch clock (`SystemTime::now()` returning `Err`), but
+/// on the far more realistic broken-clock states: a dead RTC booting a host at the epoch, or an
+/// NTP/RTC fault landing the clock in 1970-2000. Both of those return `Ok(small_value)`, never hit the
+/// `unwrap_or` fallback, and would otherwise still make `exp` checks pass for virtually any real
+/// token — the exact fail-open failure mode this whole guard exists to close. Updated occasionally is
+/// fine; it only needs to stay behind "now".
+const CLOCK_SANITY_FLOOR_UNIX: i64 = 1_767_225_600; // 2026-01-01T00:00:00Z
 
 /// The operator's `auth.modules.oidc.config` settings, deserialized from the JSON the engine passes to
 /// the plugin's `open`.
@@ -156,11 +174,11 @@ impl OidcVerifier {
         // stop the debug-build overflow panic, not to implement an expiry policy; saturating_add(i64,
         // i64) here can only saturate to i64::MAX, which still compares `>= now_unix` and verifies —
         // consistent with the unbounded-above policy already in effect.
-        match claims.get("exp").and_then(Value::as_i64) {
-            Some(exp) if exp.saturating_add(CLOCK_SKEW_SECS) >= now_unix => {}
+        let exp = match claims.get("exp").and_then(Value::as_i64) {
+            Some(exp) if exp.saturating_add(CLOCK_SKEW_SECS) >= now_unix => exp,
             Some(_) => return Err("token has expired".to_string()),
             None => return Err("token has no 'exp' claim".to_string()),
-        }
+        };
 
         // nbf — optional; if present, must not be in the future (with skew tolerance). Same
         // saturating rationale as `exp` above, opposite direction: `nbf` at i64::MIN saturates to
@@ -193,26 +211,52 @@ impl OidcVerifier {
         // principal is denied downstream by group_map when default:deny); it just yields no groups.
         let groups = extract_string_list(claims.get(&self.role_claim));
 
-        // Subject → stable principal id. Prefer a human-recognizable handle for audit
-        // (`preferred_username` / `upn` / `email`), falling back to `oid` (Entra's stable object id)
-        // or `sub`. Prefixed with the module name so ids never collide with a virtual-key id.
+        // Subject → stable principal id. ONLY the IMMUTABLE identifier (`oid` — Entra's stable object
+        // id — or the generic `sub`, REQUIRED by OIDC Core 1.0 in every ID token) is acceptable here:
+        // audit attribution, the per-principal budget bucket, and the idempotency cache all key on
+        // `principal.id`, so a MUTABLE claim (`preferred_username`/`upn`/`email` — any of which a
+        // rename or a recycled UPN can silently retarget to a different human) must never be allowed
+        // to become the identity of record, not even as a fallback. A spec-compliant IdP always sends
+        // `sub`; one that omits both `oid` and `sub` is itself non-compliant, and this module fails
+        // CLOSED on that rather than quietly downgrading to a spoofable/reassignable identity.
         let subject = claims
-            .get("preferred_username")
+            .get("oid")
             .and_then(Value::as_str)
-            .or_else(|| claims.get("upn").and_then(Value::as_str))
-            .or_else(|| claims.get("email").and_then(Value::as_str))
-            .or_else(|| claims.get("oid").and_then(Value::as_str))
             .or_else(|| claims.get("sub").and_then(Value::as_str))
-            .ok_or("token has no usable subject claim (sub/oid/upn/email)")?;
+            .ok_or(
+                "token has no 'oid' or 'sub' claim (both are absent, so no IMMUTABLE identifier is \
+                 available); refusing to derive identity from a mutable claim like \
+                 preferred_username/upn/email — this IdP is not OIDC Core 1.0 compliant (sub is a \
+                 REQUIRED claim)",
+            )?;
 
+        // Display name: informational only (never used as identity), so the mutable claims ARE an
+        // acceptable fallback chain here — an Entra ACCESS token commonly omits `name` unless the
+        // optional claim is configured, and an audit trail with a bare GUID and no human-readable
+        // handle anywhere is worth avoiding when a mutable-but-still-useful one is available.
         let name = claims
             .get("name")
             .and_then(Value::as_str)
+            .or_else(|| claims.get("preferred_username").and_then(Value::as_str))
+            .or_else(|| claims.get("upn").and_then(Value::as_str))
+            .or_else(|| claims.get("email").and_then(Value::as_str))
             .map(str::to_string);
 
         let mut principal = Principal::from_id(format!("oidc:{subject}"));
         principal.name = name;
         principal.roles = groups;
+        // Bound the engine's credential-cache lifetime to the token's OWN remaining validity instead
+        // of the engine's blanket default (300s): this module is the only component that knows the
+        // real `exp`, and the ABI crosses here, so this is the only place the bound can be set. Without
+        // it, a token cached at T with exp=T+10 keeps authenticating from cache until T+300 — a replay
+        // window that outlives the token by up to five minutes and never re-enters this module's expiry
+        // check. `saturating_sub` + `max(0)`: exp can be within CLOCK_SKEW_SECS in the past and still
+        // pass the check above, which must not underflow into a huge u64. Also `min`-ed against
+        // MAX_CACHE_TTL_SECS: an un-ceilinged suggestion would, for a standard ~3600s-lived access
+        // token, WIDEN the engine's cache window instead of shortening it (its own default is 300s) —
+        // trading a small over-cache bug for a much larger one. This can only ever shorten the cache
+        // lifetime relative to today's fixed 300s, never lengthen it.
+        principal.ttl_secs = Some(exp.saturating_sub(now_unix).clamp(0, MAX_CACHE_TTL_SECS) as u64);
         Ok(principal)
     }
 }
@@ -324,12 +368,24 @@ impl AuthModule for OidcModule {
     }
 }
 
-/// Current UNIX time in seconds.
+/// Current UNIX time in seconds. Fails CLOSED on a clock this module cannot trust: `validate_claims`'s
+/// `exp` check is `exp + skew >= now_unix`, so a `now_unix` that reads too LOW makes every token
+/// appear unexpired (fail OPEN) — the exact failure this guards against. Two cases, both mapped to
+/// `i64::MAX` (which fails `exp`/`nbf` checks for any realistic token):
+///   - `SystemTime::now()` returns `Err` (host clock strictly before the UNIX epoch) — rare.
+///   - The clock IS readable but below [`CLOCK_SANITY_FLOOR_UNIX`] — the realistic broken-clock case
+///     (a dead RTC booting a host at the epoch, or an NTP/RTC fault landing in 1970-2000), which
+///     `duration_since` reports as `Ok(small_value)` and would otherwise sail straight through.
 fn now_unix() -> i64 {
-    std::time::SystemTime::now()
+    let t = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+        .unwrap_or(i64::MAX);
+    if t < CLOCK_SANITY_FLOOR_UNIX {
+        i64::MAX
+    } else {
+        t
+    }
 }
 
 /// Resolve the JWKS url from config: the explicit `jwks_url`, or discovered from the issuer's OIDC
@@ -347,6 +403,27 @@ pub fn resolve_jwks_url(cfg: &OidcConfig, fetcher: &dyn JwksFetcher) -> Result<S
     })?;
     let doc: Value = serde_json::from_str(&body)
         .map_err(|e| format!("OIDC discovery document is not JSON: {e}"))?;
+    // RFC 8414 §3.3 / OIDC Discovery 1.0 §4.3: the document's own `issuer` MUST equal the issuer it
+    // was requested from. Without this check, one poisoned discovery response at `open()` repoints
+    // `jwks_uri` — and therefore every future signature verification — at an attacker-controlled key
+    // set for the process lifetime. `jwks_url` set explicitly bypasses discovery entirely and is
+    // unaffected.
+    match doc.get("issuer").and_then(Value::as_str) {
+        Some(doc_issuer) if doc_issuer == cfg.issuer => {}
+        Some(other) => {
+            return Err(format!(
+                "OIDC discovery document's issuer '{other}' does not match the configured issuer \
+                 '{}' ({discovery_url}); refusing to trust its jwks_uri",
+                cfg.issuer
+            ))
+        }
+        None => {
+            return Err(format!(
+                "OIDC discovery document has no 'issuer' ({discovery_url}); refusing to trust its \
+                 jwks_uri"
+            ))
+        }
+    }
     doc.get("jwks_uri")
         .and_then(Value::as_str)
         .map(str::to_string)

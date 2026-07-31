@@ -199,7 +199,10 @@ fn load_and_exercise_auth_oidc_plugin_success() {
 
     match module.authenticate(Some(&token)) {
         busbar_api::AuthOutcome::Identify(p) => {
-            assert_eq!(p.id, "oidc:alice@contoso.example");
+            // No `oid` claim in this fixture, so the IMMUTABLE `sub` is the identity of record —
+            // `preferred_username` is display-only now, never identity (see lib.rs's subject-claim
+            // precedence: oid/sub only, mutable claims are name-fallback, never id-fallback).
+            assert_eq!(p.id, "oidc:subject-guid");
             assert_eq!(p.name.as_deref(), Some("Alice Example"));
             assert_eq!(p.roles, vec!["11111111-aaaa", "22222222-bbbb"]);
         }

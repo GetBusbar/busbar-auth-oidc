@@ -76,6 +76,13 @@ pub fn split(token: &str) -> Result<Parts<'_>, String> {
 /// matches the key type (RS256↔RSA, ES256↔EC) — the alg-confusion guard. Returns `Ok(())` on a valid
 /// signature, a precise `Err` otherwise. Uses `ring`'s constant-time verifiers.
 pub fn verify_signature(parts: &Parts, key: &Jwk) -> Result<(), String> {
+    // RFC 7517 §4.2 `use`: a key explicitly marked encryption-only must not verify signatures.
+    if key.key_use.as_deref() == Some("enc") {
+        return Err(
+            "JWKS key has \"use\": \"enc\" (encryption-only) and must not verify signatures"
+                .to_string(),
+        );
+    }
     match parts.header.alg.as_str() {
         "RS256" => {
             if key.kty != "RSA" {
@@ -142,4 +149,85 @@ fn b64(field: Option<&str>, what: &str) -> Result<Vec<u8>, String> {
 /// Deserialize the token's claims payload as a JSON object.
 pub fn claims(parts: &Parts) -> Result<Value, String> {
     serde_json::from_slice(&parts.payload).map_err(|e| format!("malformed JWT claims: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// RFC 7517 §4.2: a JWK explicitly marked `"use": "enc"` (encryption-only — e.g. published
+    /// alongside a signing key on the same JWKS endpoint for key-agreement) must never verify a
+    /// signature, no matter how otherwise-valid its key material is.
+    ///
+    /// The key material here (`x`/`y`: `None`) is deliberately incomplete — proving the `use` check
+    /// runs BEFORE any key-material parsing, not as a side effect of the material being unusable. If
+    /// the rejection came from missing coordinates instead, this would pass for the wrong reason; the
+    /// assertion on the error text guards against that.
+    ///
+    /// RED (no `use` check): falls through to "JWKS key missing EC coordinate x" — a key-material
+    /// error, not a use-policy rejection — or, with valid material, would verify the signature outright.
+    /// GREEN: rejected specifically for `use: enc`, before key material is ever inspected.
+    #[test]
+    fn verify_signature_rejects_an_encryption_only_key() {
+        let key = Jwk {
+            kty: "EC".to_string(),
+            kid: None,
+            n: None,
+            e: None,
+            crv: Some("P-256".to_string()),
+            x: None,
+            y: None,
+            key_use: Some("enc".to_string()),
+        };
+        let parts = Parts {
+            header: Header {
+                alg: "ES256".to_string(),
+                kid: None,
+            },
+            payload: Vec::new(),
+            signature: Vec::new(),
+            signing_input: "header.payload",
+        };
+
+        let err = verify_signature(&parts, &key).unwrap_err();
+        assert!(
+            err.contains("enc"),
+            "expected a use-policy rejection mentioning 'enc', got: {err}"
+        );
+        assert!(
+            !err.contains("coordinate"),
+            "rejection must come from the use-policy check, not from missing key material: {err}"
+        );
+    }
+
+    /// A `"use": "sig"` key (the ordinary case) is unaffected by the new check — it still reaches
+    /// (and fails at) key-material parsing exactly as before, not the use-policy rejection.
+    #[test]
+    fn verify_signature_permits_a_signing_key_to_reach_key_material_checks() {
+        let key = Jwk {
+            kty: "EC".to_string(),
+            kid: None,
+            n: None,
+            e: None,
+            crv: Some("P-256".to_string()),
+            x: None,
+            y: None,
+            key_use: Some("sig".to_string()),
+        };
+        let parts = Parts {
+            header: Header {
+                alg: "ES256".to_string(),
+                kid: None,
+            },
+            payload: Vec::new(),
+            signature: Vec::new(),
+            signing_input: "header.payload",
+        };
+
+        let err = verify_signature(&parts, &key).unwrap_err();
+        assert!(
+            err.contains("coordinate"),
+            "a sig-use key must reach key-material validation, not be blocked by the use check: {err}"
+        );
+    }
 }

@@ -32,6 +32,11 @@ pub struct Jwk {
     /// EC public-point Y coordinate (base64url). Present when `kty == "EC"`.
     #[serde(default)]
     pub y: Option<String>,
+    /// Public key use (RFC 7517 §4.2): `"sig"` for signature verification, `"enc"` for encryption.
+    /// `use` is a Rust keyword, hence the field rename. A key explicitly marked encryption-only must
+    /// never be accepted for signature verification — enforced in [`crate::jwt::verify_signature`].
+    #[serde(rename = "use", default)]
+    pub key_use: Option<String>,
 }
 
 /// A parsed JWKS: the provider's current set of signing keys.
@@ -47,12 +52,17 @@ impl JwkSet {
         serde_json::from_str(body).map_err(|e| format!("invalid JWKS document: {e}"))
     }
 
-    /// Find the key whose `kid` matches `kid`. A JWT header names the `kid` that signed it; selecting
-    /// by `kid` (not "try every key") is what makes a KEY-ROTATION refetch meaningful — a token signed
-    /// by a freshly-rotated key misses here, triggering a bounded refetch upstream.
-    pub fn find(&self, kid: &str) -> Option<&Jwk> {
+    /// Find ALL keys whose `kid` matches `kid`. A JWT header names the `kid` that signed it; selecting
+    /// by `kid` (not "try every key in the set") is what makes a KEY-ROTATION refetch meaningful — a
+    /// token signed by a freshly-rotated key misses here, triggering a bounded refetch upstream.
+    ///
+    /// More than one key can share a `kid`: RFC 7517 §4.5 permits distinct keys with the same `kid`
+    /// when `kty` differs (e.g. an RSA key and an EC key coexisting under one `kid` during an
+    /// algorithm migration, or briefly during rotation by provider convention). The caller must try
+    /// every match, not just the first.
+    pub fn find_all<'a>(&'a self, kid: &'a str) -> impl Iterator<Item = &'a Jwk> {
         self.keys
             .iter()
-            .find(|k| k.kid.as_deref() == Some(kid) || (kid.is_empty() && k.kid.is_none()))
+            .filter(move |k| k.kid.as_deref() == Some(kid) || (kid.is_empty() && k.kid.is_none()))
     }
 }

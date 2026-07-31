@@ -10,7 +10,7 @@ itself — see [Versioning](#versioning) below.)
 The first-party, signed `kind: auth` plugin for
 [busbar](https://getbusbar.com): verifies a caller's identity by checking
 a bearer JWT against an OpenID Connect identity provider's JWKS — real
-signature verification (ES256 on [`ring`](https://github.com/briansmith/ring),
+signature verification (RS256 and ES256 on [`ring`](https://github.com/briansmith/ring),
 no `jsonwebtoken`/`rsa`), issuer/audience/expiry/not-before checks, and a
 claim-to-role mapping — then hands busbar a `Principal` it can bind to
 virtual keys and roles.
@@ -43,16 +43,20 @@ explicitly in production; do not assume they move together.
 
 ## Design
 
-This repo is a thin adapter (`src/lib.rs`, ~60 lines): it turns the
+This repo is a same-repo, 2-crate Cargo workspace: `auth-oidc/` (the
+`busbar-auth-oidc` library — the real OIDC logic, no plugin ABI) and
+`auth-oidc-plugin/` (the `busbar-auth-oidc-plugin` cdylib adapter).
+
+`auth-oidc-plugin/src/lib.rs` (~60 lines) is a thin adapter: it turns the
 engine's JSON config into a real `OidcModule` and hands the trait object
 to the SDK, which emits the six extern-C symbols the loader resolves
 (`busbar_abi`, `busbar_plugin_kind`, `busbar_open`, `busbar_call`,
 `busbar_free`, `busbar_close`).
 All the actual OIDC logic — JWKS fetch/cache, JWT verification, claim
-policy — lives in the `busbar-auth-oidc` library crate this plugin wraps
-(a sibling crate in the `busbarAI` monorepo; see
-[Dependencies](#dependencies) below), so a custom build can also link
-that logic statically instead of going through the plugin ABI.
+policy — lives in the `busbar-auth-oidc` library crate (`auth-oidc/`, a
+same-repo sibling crate; see [Dependencies](#dependencies) below), so a
+custom build can also link that logic statically instead of going
+through the plugin ABI.
 
 `jwks_url` in the config is optional: when omitted, it is resolved once
 at `open()` via the issuer's OIDC discovery document, so boot fails
@@ -75,23 +79,30 @@ cargo fmt --all -- --check
 
 ## Dependencies
 
-This crate depends on `busbar-api`, `busbar-plugin-sdk`, and
-`busbar-auth-oidc` (and, as dev-dependencies for the end-to-end test,
-`busbar-plugin-loader` and `busbar-plugin-abi`) from the
-[busbarAI](https://github.com/GetBusbar/busbar) monorepo. Because
-busbarAI is not yet public, `Cargo.toml` points at these as **local path
-dependencies** (`../busbarAI/crates/...`), which means this repo expects
-to be checked out as a sibling of `busbarAI`:
+`busbar-auth-oidc` (`auth-oidc/`) is a same-repo crate now — no external
+checkout is needed for the OIDC logic itself; `auth-oidc-plugin` depends
+on it as a normal workspace path dependency (`../auth-oidc`).
+
+The remaining dependencies still reach into the
+[busbarAI](https://github.com/GetBusbar/busbarAI) monorepo: `busbar-api`
+(needed by both crates), `busbar-plugin-sdk` (`auth-oidc-plugin` only),
+and, as dev-dependencies for the end-to-end test, `busbar-plugin-loader`
+and `busbar-plugin-abi` (`auth-oidc-plugin` only) — the core-engine
+contracts every plugin depends on the same way. Because busbarAI is not
+yet public, both crates' `Cargo.toml` point at these as **local path
+dependencies** (`../../busbarAI/crates/...`), which means this repo
+expects to be checked out as a sibling of `busbarAI`:
 
 ```
 some-parent-dir/
 ├── busbarAI/
-└── auth-oidc/
+└── auth-oidc/          # this repo — the auth-oidc/ + auth-oidc-plugin/ workspace
 ```
 
 This is an interim measure — once busbarAI ships publicly, these should
-become git (pinned rev/tag) or crates.io dependencies instead. Grep
-`Cargo.toml` for the `INTERIM` comments when doing that migration.
+become git (pinned rev/tag) or crates.io dependencies instead. Grep both
+crates' `Cargo.toml` for the `INTERIM` comments when doing that
+migration.
 
 ## Pack and sign
 
@@ -146,11 +157,15 @@ stray key fails loudly at boot instead of being silently ignored.
 
 ## Tests
 
-`cargo test` runs both this crate's own hermetic unit tests (`src/lib.rs`
-— covering `open()`'s config-parsing responsibility: empty/malformed/
-missing-required-field/unknown-field config, and the "explicit
-`jwks_url` skips discovery" and "malformed issuer fails fast" paths, all
-without any network I/O) and the end-to-end test in `tests/e2e.rs`.
+`cargo test` runs both `auth-oidc-plugin`'s own hermetic unit tests
+(`auth-oidc-plugin/src/lib.rs` — covering `open()`'s config-parsing
+responsibility: empty/malformed/missing-required-field/unknown-field
+config, and the "explicit `jwks_url` skips discovery" and "malformed
+issuer fails fast" paths, all without any network I/O) and the
+end-to-end test in `auth-oidc-plugin/tests/e2e.rs`. (`auth-oidc/` has
+its own unit tests too — `auth-oidc/src/tests.rs` — covering the JWT/JWKS
+logic itself; both crates' tests run under a workspace-wide `cargo
+test`.)
 
 The end-to-end test is NOT a stub: it stands up a genuine local HTTPS
 JWKS server (a real self-signed certificate minted with `rcgen`, served

@@ -63,6 +63,13 @@ pub struct JwksCache {
     min_refetch_interval: Duration,
     /// TTL after which the cached set is considered stale and proactively refetched on next use.
     ttl: Duration,
+    /// Absolute ceiling on how long a cached key set may keep serving while every refetch attempt
+    /// fails. `ttl`-staleness alone has no upper bound — a transient blip correctly keeps serving the
+    /// last-known-good keys (see `refresh`'s doc comment), but with no ceiling an IdP outage of days
+    /// would keep validating signatures against a key the provider may have rotated out BECAUSE it was
+    /// compromised. Derived from `ttl` (not a new config field): `max(ttl * 24, 24h)`, so a short-TTL
+    /// deployment gets a generous-but-bounded window and a long-TTL one still has SOME bound.
+    max_stale: Duration,
     /// The cached data. Held for microseconds only — NEVER across a fetch or a signature verify.
     inner: Mutex<Inner>,
     /// The SINGLE-FLIGHT gate. Held by whichever caller is performing a fetch, for the duration of
@@ -88,11 +95,13 @@ impl JwksCache {
         min_refetch_interval: Duration,
         ttl: Duration,
     ) -> Self {
+        let max_stale = std::cmp::max(ttl.saturating_mul(24), Duration::from_secs(24 * 3600));
         Self {
             url: url.into(),
             fetcher,
             min_refetch_interval,
             ttl,
+            max_stale,
             inner: Mutex::new(Inner {
                 keys: None,
                 fetched_at: None,
@@ -112,9 +121,17 @@ impl JwksCache {
         &self,
         kid: &str,
         now: Instant,
-        f: impl FnOnce(&crate::jwks::Jwk) -> Result<T, String>,
+        f: impl Fn(&crate::jwks::Jwk) -> Result<T, String>,
     ) -> Result<T, String> {
-        let (mut keys, stale) = self.snapshot(now);
+        let (mut keys, stale, expired) = self.snapshot(now);
+        // Past the absolute staleness ceiling: treat exactly like a cold cache. `refresh` itself
+        // refuses to fall back to these same keys once they are this old (see its Err branch), so
+        // forcing the "nothing to serve" path here — rather than trying `keys` first — means an
+        // outage this long surfaces the honest "cannot verify" error instead of silently keeping a
+        // possibly-revoked key alive.
+        if expired {
+            keys = None;
+        }
 
         // Ensure we have a (fresh enough) key set. A cold cache has nothing to serve, so it WAITS
         // for the in-flight fetch; a merely TTL-stale one does not — stale keys still verify tokens,
@@ -124,7 +141,8 @@ impl JwksCache {
         }
         // Still nothing: the provider is unreachable AND we are inside the retry bound, so we are
         // deliberately not asking again yet. Say that, rather than the "unknown kid" error below —
-        // which would blame the token for the provider being down.
+        // which would blame the token for the provider being down. Also the path a caller past the
+        // staleness ceiling lands on if the refetch still could not produce a fresh set.
         if keys.is_none() {
             return Err(format!(
                 "no JWKS has been fetched from {} yet (the last fetch attempt failed and the \
@@ -133,10 +151,12 @@ impl JwksCache {
             ));
         }
 
-        // First lookup.
+        // First lookup. More than one key can share `kid` (RFC 7517 §4.5 — e.g. an RSA and an EC key
+        // coexisting under one `kid` during an algorithm migration), so try every match and return the
+        // first that verifies; keep the last error if none do.
         if let Some(set) = &keys {
-            if let Some(k) = set.find(kid) {
-                return f(k);
+            if let Some(result) = Self::try_all(set, kid, &f) {
+                return result;
             }
         }
 
@@ -145,8 +165,8 @@ impl JwksCache {
         // behind another caller's fetch only converts one bad token into a stalled worker.
         let keys = self.refresh(now, /* wait = */ false)?;
         if let Some(set) = &keys {
-            if let Some(k) = set.find(kid) {
-                return f(k);
+            if let Some(result) = Self::try_all(set, kid, &f) {
+                return result;
             }
         }
 
@@ -156,14 +176,39 @@ impl JwksCache {
         ))
     }
 
-    /// Snapshot the cached set and whether it is past TTL. Holds the lock for an `Arc` clone.
-    fn snapshot(&self, now: Instant) -> (Option<Arc<JwkSet>>, bool) {
+    /// Try `f` against every key in `set` matching `kid`, returning the first `Ok`. If at least one
+    /// key matched but all errored, returns the LAST error. Returns `None` when zero keys matched
+    /// `kid` at all, so the caller can distinguish "no key with this kid" from "keys existed but none
+    /// verified" (the latter is a real verification failure worth reporting precisely; the former
+    /// falls through to the caller's own "no JWKS key matches" message).
+    fn try_all<T>(
+        set: &JwkSet,
+        kid: &str,
+        f: &impl Fn(&crate::jwks::Jwk) -> Result<T, String>,
+    ) -> Option<Result<T, String>> {
+        let mut last_err = None;
+        for k in set.find_all(kid) {
+            match f(k) {
+                Ok(v) => return Some(Ok(v)),
+                Err(e) => last_err = Some(e),
+            }
+        }
+        last_err.map(Err)
+    }
+
+    /// Snapshot the cached set, whether it is past TTL, and whether it is past the absolute staleness
+    /// ceiling (`max_stale`). Holds the lock for an `Arc` clone.
+    fn snapshot(&self, now: Instant) -> (Option<Arc<JwkSet>>, bool, bool) {
         let inner = self.lock();
         let stale = match inner.fetched_at {
             None => true,
             Some(t) => now.saturating_duration_since(t) >= self.ttl,
         };
-        (inner.keys.clone(), stale)
+        let expired = match inner.fetched_at {
+            None => false,
+            Some(t) => now.saturating_duration_since(t) >= self.max_stale,
+        };
+        (inner.keys.clone(), stale, expired)
     }
 
     /// Bring the cache up to date if the rate limit allows, and return the current key set.
@@ -235,11 +280,19 @@ impl JwksCache {
                 Ok(inner.keys.clone())
             }
             // Keep the previous keys (a transient provider blip must not blow away a working key
-            // set) and keep serving from them; surface the error only when there is nothing else.
-            Err(e) => match inner.keys.clone() {
-                Some(keys) => Ok(Some(keys)),
-                None => Err(e),
-            },
+            // set) and keep serving from them; surface the error only when there is nothing else —
+            // UNLESS those previous keys are already past the absolute staleness ceiling, in which
+            // case a days-long outage must not keep validating signatures against keys the provider
+            // may have rotated out specifically because they were compromised.
+            Err(e) => {
+                let too_stale = inner
+                    .fetched_at
+                    .is_some_and(|t| now.saturating_duration_since(t) >= self.max_stale);
+                match inner.keys.clone() {
+                    Some(keys) if !too_stale => Ok(Some(keys)),
+                    _ => Err(e),
+                }
+            }
         }
     }
 
@@ -520,6 +573,118 @@ mod tests {
         assert!(
             calls.load(Ordering::SeqCst) >= 2,
             "the refetch was attempted"
+        );
+    }
+
+    /// Two keys sharing a `kid` with different `kty` (RFC 7517 §4.5 — e.g. an RSA/EC pair
+    /// coexisting during an algorithm migration). The first key in the set is the WRONG `kty` for
+    /// what `f` needs; only the second matches. `with_key` must try both, not just the first found.
+    ///
+    /// RED (single-key `find`, `FnOnce` closure): only the first (RSA) key is ever tried, so `f`
+    /// (which only succeeds for an EC key) always fails, and `with_key` returns
+    /// "no JWKS key matches" even though a matching key is right there in the cache.
+    /// GREEN: `with_key` tries every same-`kid` key and succeeds on the second.
+    #[test]
+    fn with_key_tries_every_key_sharing_a_kid_until_one_verifies() {
+        let body = r#"{"keys":[
+            {"kty":"RSA","kid":"shared","n":"AAAA","e":"AQAB"},
+            {"kty":"EC","kid":"shared","crv":"P-256","x":"AAAA","y":"BBBB"}
+        ]}"#
+        .to_string();
+        let (c, _calls) = cache(Ok(body), Duration::ZERO, Duration::from_secs(3600));
+
+        let result = c.with_key("shared", Instant::now(), |key| {
+            if key.kty == "EC" {
+                Ok("verified with the EC key")
+            } else {
+                Err(format!("wrong kty for this token: {}", key.kty))
+            }
+        });
+
+        assert_eq!(
+            result,
+            Ok("verified with the EC key"),
+            "with_key must try every key sharing a kid, not just the first match"
+        );
+    }
+
+    /// All keys sharing a `kid` fail `f`: the LAST error must surface (not silently "no key found").
+    #[test]
+    fn with_key_reports_the_last_error_when_no_key_sharing_a_kid_verifies() {
+        let body = r#"{"keys":[
+            {"kty":"RSA","kid":"shared","n":"AAAA","e":"AQAB"},
+            {"kty":"EC","kid":"shared","crv":"P-256","x":"AAAA","y":"BBBB"}
+        ]}"#
+        .to_string();
+        let (c, _calls) = cache(Ok(body), Duration::ZERO, Duration::from_secs(3600));
+
+        let err = c
+            .with_key("shared", Instant::now(), |key| {
+                Err::<(), _>(format!("rejected: {}", key.kty))
+            })
+            .unwrap_err();
+
+        assert_eq!(
+            err, "rejected: EC",
+            "when every same-kid key fails, the error from the LAST one tried should surface"
+        );
+    }
+
+    /// The absolute staleness ceiling: once every refetch has failed for longer than `max_stale`
+    /// (derived from `ttl`), the cache must stop serving the ancient key set — a days-long IdP outage
+    /// must not keep validating signatures against a key the provider may have rotated out because it
+    /// was compromised.
+    ///
+    /// RED (no ceiling): `with_key` keeps succeeding forever off the primed keys.
+    /// GREEN: once `now` passes the ceiling, `with_key` returns the "cannot verify" error instead.
+    #[test]
+    fn a_permanently_unreachable_provider_stops_serving_keys_past_the_staleness_ceiling() {
+        let ttl = Duration::from_millis(1);
+
+        // A fetcher that succeeds exactly once (priming the cache) and fails on every attempt after
+        // — standing in for an IdP that goes down and stays down.
+        struct FailAfterFirst {
+            first: Mutex<bool>,
+            body: String,
+            calls: Arc<AtomicUsize>,
+        }
+        impl JwksFetcher for FailAfterFirst {
+            fn fetch(&self, _url: &str) -> Result<String, String> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                let mut first = self.first.lock().unwrap();
+                if *first {
+                    *first = false;
+                    return Ok(self.body.clone());
+                }
+                Err("provider unreachable".into())
+            }
+        }
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = JwksCache::new(
+            "https://idp.example/jwks",
+            Box::new(FailAfterFirst {
+                first: Mutex::new(true),
+                body: jwks("k1"),
+                calls: calls.clone(),
+            }),
+            Duration::from_millis(1),
+            ttl,
+        );
+        let t0 = Instant::now();
+        c.with_key("k1", t0, |_| Ok(())).expect("prime");
+
+        // Still within the ceiling (max_stale = max(ttl*24, 24h) = 24h here): stale keys keep serving.
+        let still_within = t0 + Duration::from_secs(3600);
+        c.with_key("k1", still_within, |_| Ok(()))
+            .expect("within the ceiling, a transient-looking outage must keep serving cached keys");
+
+        // Past the 24h ceiling, with every refetch attempt still failing: must now error out rather
+        // than silently keep validating against a key that old.
+        let past_ceiling = t0 + Duration::from_secs(25 * 3600);
+        let err = c.with_key("k1", past_ceiling, |_| Ok(()));
+        assert!(
+            err.is_err(),
+            "a key set this stale (>24h with every refetch failing) must stop being served, got {err:?}"
         );
     }
 }
