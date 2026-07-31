@@ -24,11 +24,11 @@ permissions:
 
 env:
   # Which busbar commit to check out as the sibling path dependency. Pinned to a SHA on the
-  # 1.5.0-dev branch (NOT the mutable branch name) because this step also builds and runs
+  # dev branch (NOT the mutable branch name) because this step also builds and runs
   # busbar-plugin-pack in the same job that holds BUSBAR_SIGN_KEY (with id-token: write) — a
-  # mutable branch ref there would let anyone who can push to 1.5.0-dev reach this repo's signing
-  # key. Resolved 2026-07-30 via `gh api repos/GetBusbar/busbar/branches/1.5.0-dev`, which was also
-  # the tip at the time: ddc97f1e337098d6b3b8f6cba32573cf2d652d5f. Only crates/api, crates/plugin-sdk,
+  # mutable branch ref there would let anyone who can push to dev reach this repo's signing
+  # key. Resolved 2026-07-31 via `gh api repos/GetBusbar/busbar/commits/dev`, which was also
+  # the tip at the time: ad0c60c30ba48511faf9463e6d988d6e49985c7b. Only crates/api, crates/plugin-sdk,
   # crates/plugin-loader, crates/plugin-abi, and crates/plugin-pack are needed from this checkout
   # (busbar-auth-oidc's own OIDC logic now lives in this repo's own auth-oidc/ crate, not in
   # busbarAI/crates/auth-oidc) — all present at this SHA. crates/auth-oidc does NOT exist at this
@@ -36,7 +36,7 @@ env:
   # here since this repo doesn't depend on it. To bump deliberately: verify the new SHA still has
   # crates/api, crates/plugin-sdk, crates/plugin-loader, crates/plugin-abi, and crates/plugin-pack,
   # then update the SHA below and this comment.
-  BUSBAR_REF: ddc97f1e337098d6b3b8f6cba32573cf2d652d5f
+  BUSBAR_REF: ad0c60c30ba48511faf9463e6d988d6e49985c7b
 
 jobs:
   # Create the Release first so the parallel per-target upload jobs have something to attach to

@@ -18,7 +18,7 @@ name: entra-live-check
 env:
   # Same BUSBAR_REF convention ci.yml / release.yml already establish for the sibling path
   # dependency (busbar-api) this crate needs. Update to `main` once busbar 1.5.0 ships.
-  BUSBAR_REF: 1.5.0-dev
+  BUSBAR_REF: dev
 
 on:
   push:
