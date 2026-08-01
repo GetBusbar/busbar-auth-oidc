@@ -225,6 +225,342 @@ fn load_and_exercise_auth_oidc_plugin_success() {
     );
 }
 
+/// The sibling busbarAI checkout's root (same convention `store-postgres`/`store-sqlite`'s own e2e
+/// tests already use for this).
+fn busbarai_root() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../busbarAI")
+        .canonicalize()
+        .expect("sibling busbarAI checkout must exist (see Cargo.toml path deps)")
+}
+
+/// Build (once, cached by cargo) and return the real `busbar` and `busbar-plugin-pack` binaries from
+/// the sibling busbarAI checkout — never a fixture, the exact binaries a real release ships.
+fn build_real_binaries() -> (std::path::PathBuf, std::path::PathBuf) {
+    let root = busbarai_root();
+    let status = std::process::Command::new("cargo")
+        .args([
+            "build",
+            "--release",
+            "-p",
+            "busbar",
+            "-p",
+            "busbar-plugin-pack",
+        ])
+        .current_dir(&root)
+        .status()
+        .expect("run cargo build for busbar + busbar-plugin-pack");
+    assert!(status.success(), "building the real binaries must succeed");
+    (
+        root.join("target/release/busbar"),
+        root.join("target/release/busbar-plugin-pack"),
+    )
+}
+
+/// Pack the built auth-oidc-plugin cdylib into a real signed-shape tarball via the real
+/// `busbar-plugin-pack` tool, `--allow-unsigned` exactly like CI's own unsigned-key fallback.
+fn pack_oidc_tarball(
+    pack_bin: &std::path::Path,
+    so_path: &std::path::Path,
+    out: &std::path::Path,
+) -> Vec<u8> {
+    let status = std::process::Command::new(pack_bin)
+        .args([
+            "pack",
+            "--lib",
+            so_path.to_str().unwrap(),
+            "--name",
+            "busbar-auth-oidc-plugin",
+            "--alias",
+            "oidc",
+            "--kind",
+            "auth",
+            "--version",
+            "0.0.0-e2e",
+            "--publisher",
+            "busbar",
+            "--description",
+            "e2e admin-api install proof",
+            "--license",
+            "Apache-2.0",
+            "--out",
+            out.to_str().unwrap(),
+            "--allow-unsigned",
+        ])
+        .status()
+        .expect("run busbar-plugin-pack");
+    assert!(status.success(), "packing the plugin must succeed");
+    std::fs::read(out).unwrap()
+}
+
+/// An ephemeral local TCP port (bind :0, read back the OS-assigned port, drop the listener before the
+/// real caller binds it — same tiny TOCTOU store-sqlite's own e2e test accepts, fine for a test).
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+/// Poll the admin API's `GET /api/v1/admin/plugins` until it answers (or the child exits early).
+fn wait_for_admin_ready(
+    client: &reqwest::blocking::Client,
+    admin_addr: &str,
+    admin_token: &str,
+    child: &mut std::process::Child,
+) -> bool {
+    for _ in 0..150 {
+        if let Ok(Some(status)) = child.try_wait() {
+            panic!("busbar exited early during admin-readiness poll: {status}");
+        }
+        if client
+            .get(format!(
+                "http://{admin_addr}/api/v1/admin/plugins?type=auth"
+            ))
+            .header("x-admin-token", admin_token)
+            .send()
+            .is_ok_and(|r| r.status().is_success())
+        {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    false
+}
+
+/// THE REAL END-TO-END PROOF Matthew asked for by name: "we called oidc... for EVERY plugin." Not a
+/// direct ABI `load_auth_from_bytes` call (the tests above already cover that seam) and not a
+/// file-drop — an operator installing a NEW auth plugin onto a LIVE gateway does it over the real
+/// Admin API (`POST /api/v1/admin/plugins`), then the auth chain picks it up on the next boot (auth
+/// modules are, like store, restart-to-apply — a fresh process is the real mechanism, not an invented
+/// shortcut). This test: boots a real busbar with the admin listener up, installs the built
+/// auth-oidc-plugin cdylib over that live HTTP API, restarts onto `auth.chain: [oidc]` pointing at a
+/// REAL local HTTPS JWKS fixture (the same `TestKey`/`spawn_https_fixture` helpers the direct-ABI test
+/// above uses — a real self-signed TLS cert, a real ES256 keypair), then drives a REAL data-plane
+/// HTTP request carrying a REAL signed bearer JWT through the live process and confirms it is
+/// authenticated (not 401) — and that a token from the WRONG key is rejected (401), proving the full
+/// real-world path: real admin API install -> real boot pickup -> real JWKS fetch -> real signature
+/// verification -> a real request actually let through.
+#[test]
+fn install_oidc_plugin_via_admin_api_and_authenticate() {
+    let Some(so_path) = plugin_path() else {
+        eprintln!("skip: auth-oidc-plugin cdylib not built");
+        return;
+    };
+    let (busbar_bin, pack_bin) = build_real_binaries();
+
+    let key = TestKey::generate("admin-e2e-kid");
+    let (jwks_url, cert_pem) = spawn_https_fixture(key.jwks());
+    const ISSUER: &str = "https://oidc-admin-e2e.invalid/v2.0";
+    const AUDIENCE: &str = "api://busbar-admin-e2e";
+
+    let work = std::env::temp_dir().join(format!(
+        "busbar-oidc-admin-e2e-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let plugins_dir = work.join("plugins");
+    std::fs::create_dir_all(&plugins_dir).unwrap();
+    const ADMIN_TOKEN: &str = "e2e-oidc-admin-token";
+
+    let providers = work.join("providers.yaml");
+    std::fs::write(
+        &providers,
+        "mock:\n  protocol: anthropic\n  base_url: \"http://127.0.0.1:9\"\n  api_key_env: MOCK_KEY\n",
+    )
+    .unwrap();
+
+    let client = reqwest::blocking::Client::builder()
+        .danger_accept_invalid_certs(false)
+        .build()
+        .unwrap();
+
+    // ── BOOT 1: auth.chain: [], just to reach a live admin listener to install against. ──
+    let data_port1 = free_port();
+    let admin_port1 = free_port();
+    let config1 = work.join("config1.yaml");
+    std::fs::write(
+        &config1,
+        format!(
+            "listen: \"127.0.0.1:{data_port1}\"\n\
+             admin_listen: \"127.0.0.1:{admin_port1}\"\n\
+             plugins:\n  enabled: true\n  dir: {}\n  trust:\n    allow_unsigned: true\n\
+             auth:\n  chain: []\n  admin_auth:\n    - admin-tokens: {{ token: {{ env: BUSBAR_ADMIN_TOKEN }} }}\n\
+             providers:\n  mock:\n    api_key: {{ env: MOCK_KEY }}\n\
+             models:\n  test-model:\n    provider: mock\n",
+            plugins_dir.display()
+        ),
+    )
+    .unwrap();
+    let admin_addr1 = format!("127.0.0.1:{admin_port1}");
+
+    let mut child1 = std::process::Command::new(&busbar_bin)
+        .env("BUSBAR_CONFIG", &config1)
+        .env("BUSBAR_PROVIDERS", &providers)
+        .env("BUSBAR_ADMIN_TOKEN", ADMIN_TOKEN)
+        .env("MOCK_KEY", "unused-mock-provider-key")
+        .env("BUSBAR_STATE_FILE", "")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn boot 1 (empty auth chain, admin listener up)");
+    assert!(
+        wait_for_admin_ready(&client, &admin_addr1, ADMIN_TOKEN, &mut child1),
+        "boot 1's admin API must become ready within 15s"
+    );
+
+    // ── REAL ADMIN-API INSTALL: POST the packed auth-oidc plugin tarball to /api/v1/admin/plugins. ──
+    let tarball_path = work.join("auth-oidc-admin.tar.gz");
+    let tarball = pack_oidc_tarball(&pack_bin, &so_path, &tarball_path);
+    let file = "auth-oidc-admin.tar.gz";
+    use base64::Engine as _;
+    let install_resp = client
+        .post(format!("http://{admin_addr1}/api/v1/admin/plugins"))
+        .header("x-admin-token", ADMIN_TOKEN)
+        .json(&serde_json::json!({
+            "file": file,
+            "tarball_b64": base64::engine::general_purpose::STANDARD.encode(&tarball),
+        }))
+        .send()
+        .expect("POST /api/v1/admin/plugins");
+    assert_eq!(
+        install_resp.status().as_u16(),
+        201,
+        "the real admin API must accept the auth-oidc plugin install: {}",
+        install_resp.text().unwrap_or_default()
+    );
+    let installed: serde_json::Value = install_resp.json().unwrap();
+    assert_eq!(installed["file"], file);
+    assert_eq!(installed["name"], "busbar-auth-oidc-plugin");
+    assert!(
+        plugins_dir.join(file).exists(),
+        "the admin API install must have written the tarball to the real plugins dir"
+    );
+
+    let catalog: serde_json::Value = client
+        .get(format!(
+            "http://{admin_addr1}/api/v1/admin/plugins?type=auth"
+        ))
+        .header("x-admin-token", ADMIN_TOKEN)
+        .send()
+        .unwrap()
+        .json()
+        .unwrap();
+    let listed = catalog["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["target"] == file)
+        .expect("the just-installed auth-oidc plugin appears in the auth catalog");
+    assert_eq!(listed["valid"], true);
+
+    let _ = child1.kill();
+    let _ = child1.wait();
+
+    // ── BOOT 2: auth.chain: [oidc], over the SAME plugins dir the admin API wrote into above.
+    // Restart-to-apply, mirroring store's own documented mechanism. ──
+    let data_port2 = free_port();
+    let admin_port2 = free_port();
+    let config2 = work.join("config2.yaml");
+    std::fs::write(
+        &config2,
+        format!(
+            "listen: \"127.0.0.1:{data_port2}\"\n\
+             admin_listen: \"127.0.0.1:{admin_port2}\"\n\
+             plugins:\n  enabled: true\n  dir: {}\n  trust:\n    allow_unsigned: true\n\
+             auth:\n  admin_auth:\n    - admin-tokens: {{ token: {{ env: BUSBAR_ADMIN_TOKEN }} }}\n\
+             \x20 chain:\n    - oidc:\n        settings:\n          issuer: \"{ISSUER}\"\n          audience: \"{AUDIENCE}\"\n\
+             \x20         jwks_url: \"{jwks_url}\"\n          ca_cert_pem: |\n{}\n\
+             \x20 role_bindings:\n    oidc:\n      \"11111111-aaaa\": {{}}\n\
+             providers:\n  mock:\n    api_key: {{ env: MOCK_KEY }}\n\
+             models:\n  test-model:\n    provider: mock\n",
+            plugins_dir.display(),
+            cert_pem
+                .lines()
+                .map(|l| format!("            {l}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+    )
+    .unwrap();
+    let admin_addr2 = format!("127.0.0.1:{admin_port2}");
+    let data_addr2 = format!("127.0.0.1:{data_port2}");
+
+    let mut child2 = std::process::Command::new(&busbar_bin)
+        .env("BUSBAR_CONFIG", &config2)
+        .env("BUSBAR_PROVIDERS", &providers)
+        .env("BUSBAR_ADMIN_TOKEN", ADMIN_TOKEN)
+        .env("MOCK_KEY", "unused-mock-provider-key")
+        .env("BUSBAR_STATE_FILE", "")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn boot 2 (auth.chain: [oidc], picking up the admin-API-installed tarball)");
+    assert!(
+        wait_for_admin_ready(&client, &admin_addr2, ADMIN_TOKEN, &mut child2),
+        "boot 2's admin API must become ready within 15s (proves the oidc plugin loaded, not just \
+         that the process is alive, since a load failure is a boot-time die())"
+    );
+
+    // ── THE REAL CALL: a genuine signed bearer JWT through the live data plane. ──
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let claims = serde_json::json!({
+        "iss": ISSUER,
+        "aud": AUDIENCE,
+        "exp": now + 3600,
+        "nbf": now - 10,
+        "sub": "admin-e2e-subject",
+        "groups": ["11111111-aaaa"],
+    });
+    let good_token = key.mint(&claims);
+
+    let resp = client
+        .post(format!("http://{data_addr2}/v1/chat/completions"))
+        .bearer_auth(&good_token)
+        .json(&serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}],
+        }))
+        .send()
+        .expect("POST to the real data plane with a real OIDC bearer token");
+    assert_ne!(
+        resp.status().as_u16(),
+        401,
+        "a genuinely valid, real-signed OIDC token must be authenticated by the live installed \
+         plugin, not rejected: {}",
+        resp.text().unwrap_or_default()
+    );
+
+    // A token from the WRONG key (same iss/aud/kid) must be rejected by the live installed plugin.
+    let forged_key = TestKey::generate("admin-e2e-kid");
+    let forged_token = forged_key.mint(&claims);
+    let forged_resp = client
+        .post(format!("http://{data_addr2}/v1/chat/completions"))
+        .bearer_auth(&forged_token)
+        .json(&serde_json::json!({
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "hi"}],
+        }))
+        .send()
+        .expect("POST with a wrong-key-signed token");
+    assert_eq!(
+        forged_resp.status().as_u16(),
+        401,
+        "a token signed by the wrong key must be rejected by the live installed plugin"
+    );
+
+    let _ = child2.kill();
+    let _ = child2.wait();
+    let _ = std::fs::remove_dir_all(&work);
+}
+
 /// End-to-end FAILURE: a plugin `open()` error (malformed config) must surface back across the C ABI
 /// as a clean `Err`, not a panic or a silently-succeeded load.
 #[test]

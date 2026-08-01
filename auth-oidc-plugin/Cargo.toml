@@ -33,3 +33,10 @@ ring = "0.17"
 base64 = "0.22"
 rcgen = "0.14"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+# For the real-server admin-API install + auth-chain e2e test (tests/e2e.rs's
+# install_oidc_plugin_via_admin_api_and_authenticate): packs the plugin cdylib with the real
+# `busbar-plugin-pack` BINARY (spawned as a subprocess, same as store-postgres/store-sqlite's own
+# equivalent e2e tests — no need to link busbar-plugin-sign as a library) and drives real blocking
+# HTTP against a spawned real `busbar` binary (admin API install/restart + a real bearer-token
+# data-plane request).
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "blocking"] }

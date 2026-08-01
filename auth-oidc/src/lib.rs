@@ -381,11 +381,19 @@ fn now_unix() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(i64::MAX);
-    if t < CLOCK_SANITY_FLOOR_UNIX {
-        i64::MAX
-    } else {
+    if is_clock_sane(t) {
         t
+    } else {
+        i64::MAX
     }
+}
+
+/// Whether a UNIX timestamp reading is within the range this module considers a trustworthy clock
+/// (see [`CLOCK_SANITY_FLOOR_UNIX`]). Pulled out of [`now_unix`] as a pure, parameterized function
+/// purely for testability: `now_unix` itself reads the real host clock and cannot be driven with an
+/// injected boundary value from a test.
+fn is_clock_sane(t: i64) -> bool {
+    t >= CLOCK_SANITY_FLOOR_UNIX
 }
 
 /// Resolve the JWKS url from config: the explicit `jwks_url`, or discovered from the issuer's OIDC

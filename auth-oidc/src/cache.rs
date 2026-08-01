@@ -687,4 +687,105 @@ mod tests {
             "a key set this stale (>24h with every refetch failing) must stop being served, got {err:?}"
         );
     }
+
+    /// `snapshot`'s `expired` flag (the absolute staleness ceiling) at its exact boundary:
+    /// `elapsed >= max_stale`. `ttl = 3600s` makes `max_stale = max(3600*24, 24h) = 86400s` exactly
+    /// (both terms tie), so the boundary instant is precisely computable.
+    #[test]
+    fn snapshot_expired_flag_is_true_at_the_exact_max_stale_boundary() {
+        let (c, _calls) = cache(Ok(jwks("k1")), Duration::ZERO, Duration::from_secs(3600));
+        let t0 = Instant::now();
+        c.with_key("k1", t0, |_| Ok(())).expect("prime");
+
+        let (_, _, expired_just_before) = c.snapshot(t0 + Duration::from_secs(86400 - 1));
+        assert!(
+            !expired_just_before,
+            "one second before the max_stale ceiling must not be expired yet"
+        );
+
+        let (_, _, expired_at_boundary) = c.snapshot(t0 + Duration::from_secs(86400));
+        assert!(
+            expired_at_boundary,
+            "exactly at the max_stale ceiling must already be considered expired (>=, not >)"
+        );
+    }
+
+    /// A NON-desperate caller (one that already holds a usable cached key set) that loses the
+    /// `fetch_gate` race — another caller is mid-fetch — must return the cached keys immediately,
+    /// not block waiting for the gate. This is distinct from the existing
+    /// `a_slow_jwks_fetch_does_not_stall_a_caller_that_already_has_the_key` test: that test's second
+    /// caller is turned away by the OUTER rate-limit check (`refresh`'s `!desperate &&
+    /// !self.permits_attempt(...)`, line ~232) and never actually reaches the `fetch_gate`
+    /// contention branch at all.
+    ///
+    /// Getting a real, reliable test onto the actual `fetch_gate` `WouldBlock` arm (not the outer
+    /// rate-limit escape hatch) turned out to be the whole finding: `min_refetch_interval` set to
+    /// ANY positive duration (even 1ms, tried first) lets the winner's `last_attempt = Some(now)`
+    /// write (set the instant it acquires the gate, `refresh` line ~266 -- well before its 1500ms
+    /// fetch even starts) satisfy the loser's OUTER check too, since both threads pass the identical
+    /// fake `now`: `now.saturating_duration_since(now) == 0`, which is `< min_refetch_interval` for
+    /// any positive value, so the loser was ALWAYS being turned away by the outer check first,
+    /// never reaching this test's actual target. Proven empirically: the original version of this
+    /// test (with `min_refetch_interval = 1ms`) PASSED even with the `!desperate` guard manually
+    /// mutated to `false` -- a real "test passes for the wrong reason" bug in the test itself, not
+    /// just an academic concern. `min_refetch_interval = Duration::ZERO` closes it: `0 >= 0` is
+    /// always true, so the outer check never turns anyone away regardless of timing, and the ONLY
+    /// way a second caller can be short-circuited is by genuinely losing the `fetch_gate` race.
+    ///
+    /// Asserts on FETCH COUNT (not just wall-clock time) as the primary, deterministic signal: under
+    /// the real code the loser must never fetch at all (`calls == 1`); under the `if !desperate` ->
+    /// `if false` mutant, the loser instead blocks for the gate then performs its OWN real fetch
+    /// (`calls == 2`) once it acquires it (the inner re-check at line ~261 also always permits under
+    /// `min_refetch_interval = ZERO`, so nothing stops the second fetch). Wall-clock timing is kept
+    /// as a secondary corroborating signal, not the sole one.
+    #[test]
+    fn a_non_desperate_caller_that_loses_the_gate_race_returns_immediately() {
+        const FETCH: Duration = Duration::from_millis(1500);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = JwksCache::new(
+            "https://idp.example/jwks",
+            Box::new(TestFetcher {
+                body: Ok(jwks("k1")),
+                delay: FETCH,
+                calls: calls.clone(),
+            }),
+            Duration::ZERO, // never turns a caller away at the OUTER rate-limit check
+            Duration::from_millis(1), // tiny ttl: stale immediately after priming
+        );
+        let t0 = Instant::now();
+        c.with_key("k1", t0, |_| Ok(())).expect("prime"); // keys now Some — every later caller is non-desperate
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "priming fetch");
+
+        let now = t0 + Duration::from_secs(10); // well past the 1ms ttl
+        let ready = Arc::new(Barrier::new(2));
+
+        std::thread::scope(|s| {
+            let slow = {
+                let (c, ready) = (&c, ready.clone());
+                s.spawn(move || {
+                    ready.wait();
+                    c.with_key("k1", now, |_| Ok(())).expect("gate winner")
+                })
+            };
+            ready.wait();
+            // Give the winner a moment to actually acquire the gate before we race in.
+            std::thread::sleep(Duration::from_millis(100));
+
+            let began = Instant::now();
+            c.with_key("k1", now, |_| Ok(())).expect("gate loser");
+            let waited = began.elapsed();
+            assert!(
+                waited < FETCH / 3,
+                "a non-desperate caller that lost the fetch_gate race waited {waited:?} for the \
+                 winner's fetch ({FETCH:?} long) instead of returning its cached keys immediately"
+            );
+            slow.join().unwrap();
+        });
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2, // 1 priming fetch + 1 winner fetch; the loser must NOT have fetched a third time
+            "the loser must return the winner's cached keys, never perform its own fetch"
+        );
+    }
 }

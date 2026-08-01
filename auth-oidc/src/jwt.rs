@@ -200,6 +200,46 @@ mod tests {
         );
     }
 
+    /// The RS256/RSA-kty guard, mirroring `verify_signature_permits_a_signing_key_to_reach_key_material_checks`
+    /// below for the RSA branch: a token whose `alg` is `RS256` against a JWKS key whose `kty` really
+    /// is `"RSA"` must PASS the kty check and reach key-material parsing (and fail there, on missing
+    /// `n`/`e`) — proving the guard is `key.kty != "RSA"`, not its inverse. A `!=`→`==` mutation would
+    /// instead reject every genuinely-matching RS256/RSA pair with the kty-mismatch error, which this
+    /// test's error-text assertion distinguishes from the key-material error.
+    #[test]
+    fn verify_signature_permits_a_matching_rsa_key_to_reach_key_material_checks() {
+        let key = Jwk {
+            kty: "RSA".to_string(),
+            kid: None,
+            n: None,
+            e: None,
+            crv: None,
+            x: None,
+            y: None,
+            key_use: Some("sig".to_string()),
+        };
+        let parts = Parts {
+            header: Header {
+                alg: "RS256".to_string(),
+                kid: None,
+            },
+            payload: Vec::new(),
+            signature: Vec::new(),
+            signing_input: "header.payload",
+        };
+
+        let err = verify_signature(&parts, &key).unwrap_err();
+        assert!(
+            err.contains("RSA modulus"),
+            "an RS256 token against a real RSA key must reach key-material validation, not be \
+             rejected by the kty check: {err}"
+        );
+        assert!(
+            !err.contains("alg/key-type mismatch"),
+            "must not be rejected as an alg/kty mismatch when the kty genuinely is RSA: {err}"
+        );
+    }
+
     /// A `"use": "sig"` key (the ordinary case) is unaffected by the new check — it still reaches
     /// (and fails at) key-material parsing exactly as before, not the use-policy rejection.
     #[test]

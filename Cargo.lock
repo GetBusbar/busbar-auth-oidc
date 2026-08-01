@@ -156,6 +156,7 @@ dependencies = [
  "busbar-plugin-loader",
  "busbar-plugin-sdk",
  "rcgen",
+ "reqwest",
  "ring",
  "rustls",
  "serde_json",

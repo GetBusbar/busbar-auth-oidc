@@ -66,3 +66,54 @@ impl JwkSet {
             .filter(move |k| k.kid.as_deref() == Some(kid) || (kid.is_empty() && k.kid.is_none()))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn set(body: &str) -> JwkSet {
+        JwkSet::parse(body).unwrap()
+    }
+
+    #[test]
+    fn find_all_matches_by_kid() {
+        let s = set(r#"{"keys":[
+                {"kty":"EC","kid":"a","crv":"P-256","x":"AAAA","y":"BBBB"},
+                {"kty":"EC","kid":"b","crv":"P-256","x":"CCCC","y":"DDDD"}
+            ]}"#);
+        let found: Vec<_> = s.find_all("a").collect();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].kid.as_deref(), Some("a"));
+    }
+
+    /// A non-empty queried `kid` that matches NO key must never fall through to a keyless
+    /// (`kid: None`) key in the set — that is only a valid match when the QUERIED kid is itself
+    /// empty. Directly exercises the `kid.is_empty() && k.kid.is_none()` fallback clause: an
+    /// `&&`→`||` mutation there would wrongly match the keyless key here even though the queried kid
+    /// is non-empty and absent from the set.
+    #[test]
+    fn find_all_does_not_fall_back_to_a_keyless_key_for_a_nonempty_unmatched_kid() {
+        let s = set(r#"{"keys":[
+                {"kty":"EC","kid":"real-kid","crv":"P-256","x":"AAAA","y":"BBBB"},
+                {"kty":"EC","crv":"P-256","x":"CCCC","y":"DDDD"}
+            ]}"#);
+        let found: Vec<_> = s.find_all("no-such-kid").collect();
+        assert!(
+            found.is_empty(),
+            "a nonempty unmatched kid must not match the keyless key in the set, got {} matches",
+            found.len()
+        );
+    }
+
+    /// The mirror case: an EMPTY queried kid (a keyless JWT header) DOES match a keyless key.
+    #[test]
+    fn find_all_matches_a_keyless_key_for_an_empty_queried_kid() {
+        let s = set(r#"{"keys":[
+                {"kty":"EC","kid":"real-kid","crv":"P-256","x":"AAAA","y":"BBBB"},
+                {"kty":"EC","crv":"P-256","x":"CCCC","y":"DDDD"}
+            ]}"#);
+        let found: Vec<_> = s.find_all("").collect();
+        assert_eq!(found.len(), 1);
+        assert!(found[0].kid.is_none());
+    }
+}

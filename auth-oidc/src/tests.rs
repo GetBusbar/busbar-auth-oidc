@@ -639,3 +639,140 @@ fn now_unix_fails_closed_below_the_sanity_floor() {
         .expect_err("a below-sanity-floor clock must fail the exp check, not pass it");
     assert!(err.contains("expired"), "got: {err}");
 }
+
+/// Boundary-tests the pure comparison [`is_clock_sane`] was extracted from `now_unix` for (see its
+/// doc comment): `now_unix` itself reads the real host clock and cannot be driven with an injected
+/// value, so the floor comparison is only directly testable once pulled out.
+#[test]
+fn is_clock_sane_boundary() {
+    assert!(
+        !is_clock_sane(CLOCK_SANITY_FLOOR_UNIX - 1),
+        "one second below the floor must be considered insane"
+    );
+    assert!(
+        is_clock_sane(CLOCK_SANITY_FLOOR_UNIX),
+        "exactly at the floor must be considered sane (the floor itself is a trustworthy reading)"
+    );
+    assert!(
+        is_clock_sane(CLOCK_SANITY_FLOOR_UNIX + 1),
+        "above the floor must be considered sane"
+    );
+}
+
+// ── config defaults (deserialization) ──────────────────────────────────────────────────────────
+
+#[test]
+fn config_defaults_jwks_ttl_secs_to_3600() {
+    let parsed: OidcConfig =
+        serde_json::from_str(r#"{"issuer":"https://i/v2.0","audience":"a"}"#).unwrap();
+    assert_eq!(
+        parsed.jwks_ttl_secs, 3600,
+        "jwks_ttl_secs must default to DEFAULT_TTL_SECS when the operator does not set it"
+    );
+}
+
+// ── audience array rejection ───────────────────────────────────────────────────────────────────
+
+#[test]
+fn audience_array_form_without_configured_audience_is_denied() {
+    // `audience_array_form_accepted` above proves the array form is accepted when the configured
+    // audience IS one of the entries; this proves the mirror case — an array present but NOT
+    // containing it must still be denied, not vacuously accepted just because `aud` was an array.
+    let now = 1_700_000_000;
+    let mut c = base_claims(now);
+    c["aud"] = serde_json::json!(["api://other-1", "api://other-2"]);
+    let err = verifier("groups")
+        .validate_claims(&c, now)
+        .expect_err("an aud array that never contains the configured audience must be denied");
+    assert!(err.contains("audience"), "got: {err}");
+}
+
+// ── nbf skew boundary ───────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn nbf_exactly_at_the_skew_boundary_is_accepted() {
+    // `nbf.saturating_sub(CLOCK_SKEW_SECS) > now_unix` rejects; at exact equality the token must
+    // still be accepted (the skew tolerance is inclusive of its own boundary).
+    let now = 1_700_000_000;
+    let mut c = base_claims(now);
+    c["nbf"] = serde_json::json!(now + CLOCK_SKEW_SECS);
+    assert!(
+        verifier("groups").validate_claims(&c, now).is_ok(),
+        "nbf exactly CLOCK_SKEW_SECS in the future must still be accepted (skew is inclusive)"
+    );
+}
+
+// ── Entra groups-overage marker: full boolean truth table ─────────────────────────────────────────
+
+#[test]
+fn overage_names_marker_alone_is_overage_even_without_claim_sources() {
+    // A = true (_claim_names carries "groups"), B = false (no _claim_sources at all, and the
+    // "groups" claim is itself present) — isolates the `||`: real code must still reject via A
+    // alone. `A && B` (the `||`→`&&` mutant) would wrongly accept here since B is false.
+    let now = 1_700_000_000;
+    let mut c = base_claims(now); // still carries "groups"
+    c["_claim_names"] = serde_json::json!({ "groups": "src1" });
+    let err = verifier("groups")
+        .validate_claims(&c, now)
+        .expect_err("the _claim_names marker alone must trigger the overage rejection");
+    assert!(err.contains("OVERAGE"), "got: {err}");
+}
+
+#[test]
+fn overage_claim_names_present_but_without_groups_key_and_no_claim_sources_is_not_overage() {
+    // A = false (_claim_names present but does NOT carry a "groups" entry), B1 (_claim_sources
+    // present) = false, B2 (groups claim absent) = true, B3 (_claim_names present) = true.
+    // Isolates the first `&&` inside B: real code is `B1 && B2 && B3` = false (B1 is false), so this
+    // must NOT be treated as overage. The `&&`→`||` mutant at that spot would evaluate
+    // `B1 || (B2 && B3)` = true, wrongly rejecting.
+    let now = 1_700_000_000;
+    let mut c = base_claims(now);
+    c.as_object_mut().unwrap().remove("groups");
+    c["_claim_names"] = serde_json::json!({ "unrelated_claim": "src1" });
+    let p = verifier("groups")
+        .validate_claims(&c, now)
+        .expect("no _claim_sources and no groups-in-_claim_names must not be treated as overage");
+    assert!(p.roles.is_empty());
+}
+
+#[test]
+fn overage_claim_sources_present_but_groups_claim_present_is_not_overage() {
+    // A = false, B1 (_claim_sources present) = true, B2 (groups claim absent) = FALSE (groups IS
+    // present), B3 (_claim_names present) = true. Isolates the second `&&` inside B: real code is
+    // `B1 && B2 && B3` = false (B2 is false), so a token that has a real groups list must verify
+    // normally. The `&&`→`||` mutant at that spot would evaluate `B1 && (B2 || B3)` = true, wrongly
+    // rejecting a token that actually carries its groups.
+    let now = 1_700_000_000;
+    let mut c = base_claims(now); // carries "groups"
+    c["_claim_sources"] = serde_json::json!({ "src1": {} });
+    c["_claim_names"] = serde_json::json!({ "unrelated_claim": "src1" });
+    let p = verifier("groups")
+        .validate_claims(&c, now)
+        .expect("a token that actually carries its groups claim must not be treated as overage");
+    assert_eq!(p.roles, vec!["11111111-aaaa", "22222222-bbbb"]);
+}
+
+// ── extract_string_list: scalar-string form ────────────────────────────────────────────────────
+
+#[test]
+fn role_claim_as_a_single_scalar_string_is_accepted() {
+    // extract_string_list accepts a bare string (not just a JSON array) as a single-role claim.
+    let now = 1_700_000_000;
+    let mut c = base_claims(now);
+    c["groups"] = serde_json::json!("single-role");
+    let p = verifier("groups").validate_claims(&c, now).unwrap();
+    assert_eq!(p.roles, vec!["single-role"]);
+}
+
+// ── AuthModule trivia: name/cacheable ──────────────────────────────────────────────────────────
+
+#[test]
+fn module_name_and_cacheable() {
+    let key = TestKey::generate(KID);
+    let m = module_with(&key, "groups");
+    assert_eq!(m.name(), "oidc");
+    assert!(
+        m.cacheable(),
+        "OIDC does real I/O and its verdicts are worth caching"
+    );
+}
