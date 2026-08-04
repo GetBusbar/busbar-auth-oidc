@@ -4,9 +4,9 @@ name: ci
 
 on:
   push:
-    branches: [main, dev]
+    branches: [main, dev, qa]
   pull_request:
-    branches: [main, dev]
+    branches: [main, dev, qa]
 
 jobs:
   ci:
@@ -15,4 +15,5 @@ jobs:
       plugin_crate: busbar-auth-oidc-plugin
       plugin_kind: auth
       plugin_alias: oidc
+      busbar_ref: ${{ github.ref_name }} # same-branch: qa builds core qa, dev builds core dev (no stale main/tag)
       service: none

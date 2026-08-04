@@ -9,10 +9,15 @@
 //! This module is PURE: it verifies a token against an already-fetched key and returns the decoded
 //! claims, or a precise error. iss/aud/exp/nbf policy and JWKS fetching live in [`crate`].
 
-use crate::jwks::Jwk;
+use crate::jwks::{Jwk, KeyMaterial};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde::Deserialize;
 use serde_json::Value;
+
+/// The two JWS algorithms this verifier accepts — the ones OIDC IdPs actually sign ID/access tokens
+/// with. Named once here so the match arms and the error text can't drift apart.
+const ALG_RS256: &str = "RS256";
+const ALG_ES256: &str = "ES256";
 
 /// The decoded JWT header — the fields that select verification.
 #[derive(Debug, Deserialize)]
@@ -25,6 +30,11 @@ pub struct Header {
     /// JWKS key only).
     #[serde(default)]
     pub kid: Option<String>,
+    /// RFC 7515 §4.1.11 `crit`: header parameters the producer marks as critical — a verifier that
+    /// does not understand every one of them MUST reject the token. This verifier implements NO
+    /// critical extensions, so a non-empty `crit` is always a rejection (see [`verify_signature`]).
+    #[serde(default)]
+    pub crit: Option<Vec<String>>,
 }
 
 /// The three base64url segments of a compact JWS, plus the signing input (`header.payload`) the
@@ -76,6 +86,19 @@ pub fn split(token: &str) -> Result<Parts<'_>, String> {
 /// matches the key type (RS256↔RSA, ES256↔EC) — the alg-confusion guard. Returns `Ok(())` on a valid
 /// signature, a precise `Err` otherwise. Uses `ring`'s constant-time verifiers.
 pub fn verify_signature(parts: &Parts, key: &Jwk) -> Result<(), String> {
+    // RFC 7515 §4.1.11 `crit`: a producer can mark header parameters as critical, and a verifier that
+    // does not implement EVERY named extension MUST reject the token rather than silently ignore it.
+    // This verifier implements no critical extensions, so any non-empty `crit` is a rejection —
+    // checked before signature math, since an unimplemented critical param changes how the token must
+    // be processed.
+    if let Some(crit) = &parts.header.crit {
+        if !crit.is_empty() {
+            return Err(format!(
+                "JWT header names critical extension(s) {crit:?} (RFC 7515 §4.1.11) that this \
+                 verifier does not implement; refusing to process the token"
+            ));
+        }
+    }
     // RFC 7517 §4.2 `use`: a key explicitly marked encryption-only must not verify signatures.
     if key.key_use.as_deref() == Some("enc") {
         return Err(
@@ -83,67 +106,67 @@ pub fn verify_signature(parts: &Parts, key: &Jwk) -> Result<(), String> {
                 .to_string(),
         );
     }
-    match parts.header.alg.as_str() {
-        "RS256" => {
-            if key.kty != "RSA" {
-                return Err(format!(
-                    "token alg RS256 but JWKS key kid is {} (alg/key-type mismatch)",
-                    key.kty
-                ));
-            }
-            let n = b64(key.n.as_deref(), "RSA modulus n")?;
-            let e = b64(key.e.as_deref(), "RSA exponent e")?;
-            let pubkey = ring::signature::RsaPublicKeyComponents { n: &n, e: &e };
-            pubkey
-                .verify(
-                    &ring::signature::RSA_PKCS1_2048_8192_SHA256,
-                    parts.signing_input.as_bytes(),
-                    &parts.signature,
-                )
-                .map_err(|_| "JWT signature verification failed".to_string())
+    let alg = parts.header.alg.as_str();
+    if alg == ALG_RS256 {
+        if key.kty != "RSA" {
+            return Err(format!(
+                "token alg {ALG_RS256} but JWKS key kty is {} (alg/key-type mismatch)",
+                key.kty
+            ));
         }
-        "ES256" => {
-            if key.kty != "EC" {
-                return Err(format!(
-                    "token alg ES256 but JWKS key kty is {} (alg/key-type mismatch)",
-                    key.kty
-                ));
+        // Key material is base64url-decoded ONCE and memoised on the key (see `Jwk::material`), so
+        // this hot path never re-decodes `n`/`e` per request.
+        let (n, e) = match key.material() {
+            KeyMaterial::Rsa { n, e } => (n, e),
+            KeyMaterial::Unusable(msg) => return Err(msg.clone()),
+            KeyMaterial::Ec { .. } => {
+                // Unreachable: kty == "RSA" is checked above, so the memoised material is Rsa/Unusable.
+                return Err("JWKS key material does not match its kty".to_string());
             }
-            if key.crv.as_deref() != Some("P-256") {
-                return Err(format!(
-                    "ES256 requires curve P-256, JWKS key has crv {:?}",
-                    key.crv
-                ));
-            }
-            let x = b64(key.x.as_deref(), "EC coordinate x")?;
-            let y = b64(key.y.as_deref(), "EC coordinate y")?;
-            // ring wants the uncompressed SEC1 point: 0x04 || X || Y.
-            let mut point = Vec::with_capacity(1 + x.len() + y.len());
-            point.push(0x04);
-            point.extend_from_slice(&x);
-            point.extend_from_slice(&y);
-            let pubkey = ring::signature::UnparsedPublicKey::new(
-                &ring::signature::ECDSA_P256_SHA256_FIXED,
-                point,
-            );
-            pubkey
-                .verify(parts.signing_input.as_bytes(), &parts.signature)
-                .map_err(|_| "JWT signature verification failed".to_string())
+        };
+        let pubkey = ring::signature::RsaPublicKeyComponents { n, e };
+        pubkey
+            .verify(
+                &ring::signature::RSA_PKCS1_2048_8192_SHA256,
+                parts.signing_input.as_bytes(),
+                &parts.signature,
+            )
+            .map_err(|_| "JWT signature verification failed".to_string())
+    } else if alg == ALG_ES256 {
+        if key.kty != "EC" {
+            return Err(format!(
+                "token alg {ALG_ES256} but JWKS key kty is {} (alg/key-type mismatch)",
+                key.kty
+            ));
         }
+        if key.crv.as_deref() != Some("P-256") {
+            return Err(format!(
+                "{ALG_ES256} requires curve P-256, JWKS key has crv {:?}",
+                key.crv
+            ));
+        }
+        // Point decoded ONCE and memoised (see `Jwk::material`) — no per-request re-decode/alloc.
+        let point = match key.material() {
+            KeyMaterial::Ec { point } => point,
+            KeyMaterial::Unusable(msg) => return Err(msg.clone()),
+            KeyMaterial::Rsa { .. } => {
+                return Err("JWKS key material does not match its kty".to_string());
+            }
+        };
+        let pubkey = ring::signature::UnparsedPublicKey::new(
+            &ring::signature::ECDSA_P256_SHA256_FIXED,
+            point,
+        );
+        pubkey
+            .verify(parts.signing_input.as_bytes(), &parts.signature)
+            .map_err(|_| "JWT signature verification failed".to_string())
+    } else {
         // `none` (unsigned), `HS*` (HMAC — accepting a symmetric alg against an asymmetric JWKS key is
         // the RS256→HS256 key-confusion attack), and any other alg are REFUSED.
-        other => Err(format!(
-            "unsupported/forbidden JWT alg '{other}': only RS256 and ES256 are accepted"
-        )),
+        Err(format!(
+            "unsupported/forbidden JWT alg '{alg}': only {ALG_RS256} and {ALG_ES256} are accepted"
+        ))
     }
-}
-
-/// base64url-decode a required JWK field, with a naming error on absence/format.
-fn b64(field: Option<&str>, what: &str) -> Result<Vec<u8>, String> {
-    let s = field.ok_or_else(|| format!("JWKS key missing {what}"))?;
-    URL_SAFE_NO_PAD
-        .decode(s)
-        .map_err(|_| format!("JWKS key {what} is not base64url"))
 }
 
 /// Deserialize the token's claims payload as a JSON object.
@@ -178,11 +201,13 @@ mod tests {
             x: None,
             y: None,
             key_use: Some("enc".to_string()),
+            decoded: std::sync::OnceLock::new(),
         };
         let parts = Parts {
             header: Header {
                 alg: "ES256".to_string(),
                 kid: None,
+                crit: None,
             },
             payload: Vec::new(),
             signature: Vec::new(),
@@ -217,11 +242,13 @@ mod tests {
             x: None,
             y: None,
             key_use: Some("sig".to_string()),
+            decoded: std::sync::OnceLock::new(),
         };
         let parts = Parts {
             header: Header {
                 alg: "RS256".to_string(),
                 kid: None,
+                crit: None,
             },
             payload: Vec::new(),
             signature: Vec::new(),
@@ -253,11 +280,13 @@ mod tests {
             x: None,
             y: None,
             key_use: Some("sig".to_string()),
+            decoded: std::sync::OnceLock::new(),
         };
         let parts = Parts {
             header: Header {
                 alg: "ES256".to_string(),
                 kid: None,
+                crit: None,
             },
             payload: Vec::new(),
             signature: Vec::new(),
