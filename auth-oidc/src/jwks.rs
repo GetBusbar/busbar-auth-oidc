@@ -5,7 +5,70 @@
 //! (the fetch/cache lives in [`crate::cache`]). A JWKS is the provider's set of PUBLIC signing keys,
 //! each tagged by `kid`; a JWT's header `kid` selects which one verified it.
 
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde::Deserialize;
+use std::sync::OnceLock;
+
+/// The base64url-decoded, verify-ready key material for one [`Jwk`], decoded ONCE (at first use, then
+/// memoised on the owning `Jwk`) so the hot per-request verify path never re-decodes `n`/`e` (RSA) or
+/// `x`/`y` (EC). A fresh JWKS refresh builds fresh `Jwk`s with empty caches, so this is effectively
+/// "decode once per JWKS refresh". `Unusable` carries the SAME precise error the per-request decode
+/// used to raise, so a malformed key still fails with an exact, unchanged message at verify time —
+/// and one odd key in a set never poisons the parse of the whole set.
+#[derive(Debug, Clone)]
+pub enum KeyMaterial {
+    /// RSA modulus + exponent (decoded from `n`/`e`).
+    Rsa { n: Vec<u8>, e: Vec<u8> },
+    /// EC public point in uncompressed SEC1 form `0x04 || X || Y` (decoded from `x`/`y`).
+    Ec { point: Vec<u8> },
+    /// The key material was absent or not base64url; the deferred error is surfaced at verify time.
+    Unusable(String),
+}
+
+impl KeyMaterial {
+    /// Decode a key's material from its base64url fields, selected by `kty`. Never fails — a decode
+    /// problem becomes [`KeyMaterial::Unusable`] so it surfaces at verify time with an exact message.
+    fn from_jwk(jwk: &Jwk) -> Self {
+        match jwk.kty.as_str() {
+            "RSA" => {
+                let n = match b64(jwk.n.as_deref(), "RSA modulus n") {
+                    Ok(v) => v,
+                    Err(e) => return Self::Unusable(e),
+                };
+                let e = match b64(jwk.e.as_deref(), "RSA exponent e") {
+                    Ok(v) => v,
+                    Err(err) => return Self::Unusable(err),
+                };
+                Self::Rsa { n, e }
+            }
+            "EC" => {
+                let x = match b64(jwk.x.as_deref(), "EC coordinate x") {
+                    Ok(v) => v,
+                    Err(e) => return Self::Unusable(e),
+                };
+                let y = match b64(jwk.y.as_deref(), "EC coordinate y") {
+                    Ok(v) => v,
+                    Err(e) => return Self::Unusable(e),
+                };
+                // ring wants the uncompressed SEC1 point: 0x04 || X || Y.
+                let mut point = Vec::with_capacity(1 + x.len() + y.len());
+                point.push(0x04);
+                point.extend_from_slice(&x);
+                point.extend_from_slice(&y);
+                Self::Ec { point }
+            }
+            other => Self::Unusable(format!("JWKS key has unsupported kty {other}")),
+        }
+    }
+}
+
+/// base64url-decode a required JWK field, with a naming error on absence/format.
+fn b64(field: Option<&str>, what: &str) -> Result<Vec<u8>, String> {
+    let s = field.ok_or_else(|| format!("JWKS key missing {what}"))?;
+    URL_SAFE_NO_PAD
+        .decode(s)
+        .map_err(|_| format!("JWKS key {what} is not base64url"))
+}
 
 /// One JSON Web Key, the subset busbar's supported algorithms need. Unknown fields are ignored
 /// (`use`, `alg`, `x5c`, …) — a JWKS carries more than we consume.
@@ -37,6 +100,19 @@ pub struct Jwk {
     /// never be accepted for signature verification — enforced in [`crate::jwt::verify_signature`].
     #[serde(rename = "use", default)]
     pub key_use: Option<String>,
+    /// Memoised base64url-decoded key material — decoded once on first verify and reused for every
+    /// later request against this same cached key (see [`KeyMaterial`]). Not part of the JWKS wire
+    /// form; skipped in deserialization and rebuilt per JWKS refresh.
+    #[serde(skip)]
+    pub(crate) decoded: OnceLock<KeyMaterial>,
+}
+
+impl Jwk {
+    /// The decoded, verify-ready key material for this key — decoded once, then memoised, so the hot
+    /// per-request verify path never re-decodes the base64url fields.
+    pub fn material(&self) -> &KeyMaterial {
+        self.decoded.get_or_init(|| KeyMaterial::from_jwk(self))
+    }
 }
 
 /// A parsed JWKS: the provider's current set of signing keys.
