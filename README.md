@@ -30,10 +30,12 @@ explicitly in production; do not assume they move together.
 
 ## What it is for
 
-- **Verifying who's calling**: add `oidc` to `auth.chain` with its
-  `settings:` pointed at an IdP (Entra ID, Okta, Auth0, Keycloak, or any
-  standards-compliant OIDC provider) — `auth: { chain: [{ oidc: {
-  settings: {...} } }] }`. Every request's bearer token is verified
+- **Verifying who's calling**: define an entry under `identity-providers:`
+  with its `settings:` pointed at an IdP (Entra ID, Okta, Auth0, Keycloak,
+  or any standards-compliant OIDC provider) and reference it by name from
+  `auth.chain` — `identity-providers: { corp-oidc: { module: oidc,
+  settings: {...} } }` + `auth: { chain: [keys, corp-oidc] }`. Every
+  request's bearer token is verified
   against the IdP's live JWKS — the plugin never trusts an unsigned
   claim.
 - **Mapping claims to busbar identity**: the configured role claim (e.g.
@@ -128,17 +130,31 @@ Drop the resulting tarball into busbar's configured `plugins.dir` and
 set:
 
 ```yaml
+identity-providers:
+  corp-oidc:                 # the NAME is the instance; `module:` is the plugin behind it
+    module: oidc
+    settings:
+      issuer: "https://login.microsoftonline.com/<tenant-id>/v2.0"
+      audience: "<client-id>"
+      role_claim: groups
+    # max_admin_scope:       # per-provider admin ceiling; OMITTED = the most restrictive
+                             # (read-only). Never widen an external IdP to `full` casually.
+
 auth:
-  chain:
-    - oidc:
-        settings:
-          issuer: "https://login.microsoftonline.com/<tenant-id>/v2.0"
-          audience: "<client-id>"
-          role_claim: groups
+  chain: [keys, corp-oidc]   # built-ins (`keys`, `admin-tokens`) are referenced bare
+```
+
+Claim-to-role mapping is keyed by that same provider name:
+
+```yaml
+auth:
+  role_bindings:
+    corp-oidc:
+      "<sso-group>": { group: engineering }
 ```
 
 — see [`docs/configuration.md`](https://github.com/GetBusbar/busbar/blob/main/docs/configuration.md#auth-plugins)
-for the full `auth.chain` config reference.
+for the full `identity-providers:` / `auth.chain` config reference.
 
 ## Config
 
