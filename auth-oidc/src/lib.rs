@@ -241,7 +241,11 @@ impl OidcVerifier {
         // a real shape from non-compliant issuers) has its not-before constraint silently dropped
         // rather than enforced. `exp` already distinguishes the two cases; this makes `nbf` match.
         match claims.get("nbf") {
-            None => {}
+            // A missing member and an explicit JSON `null` both mean "no not-before constraint".
+            // `null` is what a serializer that writes absent optionals verbatim emits, so treating
+            // it as a malformed value would reject tokens that are legitimate everywhere else, and
+            // it weakens nothing: omitting the claim entirely already yields no constraint.
+            None | Some(Value::Null) => {}
             Some(raw) => match as_numeric_date_ceil(Some(raw)) {
                 Some(nbf) if nbf.saturating_sub(CLOCK_SKEW_SECS) > now_unix => {
                     return Err("token is not yet valid (nbf in the future)".to_string());

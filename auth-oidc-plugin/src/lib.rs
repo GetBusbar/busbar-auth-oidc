@@ -69,14 +69,23 @@ fn open(cfg: &str) -> Result<Box<dyn AuthPlugin>, String> {
             }
         }
         Err(e) => {
-            tracing::warn!(
-                module = "oidc",
-                error = %e,
-                "OIDC browser-login endpoint discovery failed; the plugin is loaded and token \
-                 VERIFICATION is unaffected, but begin_login/complete_login will refuse every \
-                 attempt until `authorization_endpoint` and `token_endpoint` are configured \
-                 explicitly or discovery succeeds"
+            let msg = format!(
+                "busbar auth-oidc: browser-login endpoint discovery failed ({e}). The plugin is \
+                 loaded and token VERIFICATION is unaffected, but begin_login/complete_login will \
+                 refuse every attempt until `authorization_endpoint` and `token_endpoint` are \
+                 configured explicitly or discovery succeeds."
             );
+            // STDERR, not only `tracing`. This crate ships as a `cdylib`, which statically links its
+            // own copy of `tracing-core` and therefore its own global dispatcher. The host installs
+            // a subscriber on ITS copy, and nothing in the plugin SDK or ABI bridges the two, so a
+            // `tracing` event raised in here is evaluated against a dispatcher that has no
+            // subscriber and is discarded. The plugin runs in the host's process, so its stderr IS
+            // the operator's stderr, which makes it the one channel that actually arrives.
+            eprintln!("{msg}");
+            // Also emitted through `tracing`, which is NOT redundant: this crate is advertised as
+            // linkable statically, and in that build there is a single dispatcher and the host's
+            // subscriber does see it, structured.
+            tracing::warn!(module = "oidc", error = %e, "{}", msg);
         }
     }
     // A SECOND fetcher instance for the live cache (the first was a borrow for discovery).

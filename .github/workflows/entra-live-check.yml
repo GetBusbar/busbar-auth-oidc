@@ -10,9 +10,11 @@
 # code actually interoperates with a real-world IdP's real quirks (issuer format, token shape,
 # claims) rather than only a synthetic fixture.
 #
-# Runs on push to main and on demand. Not on pull_request — forked PRs don't have access to repo
-# secrets, and the example already exits cleanly (SKIP, not fail) if the ENTRA_* secrets are absent,
-# so this only ever runs where the tenant is actually provisioned.
+# Runs on push to main and on demand. NOT on pull_request, and that is load-bearing: forked PRs have
+# no access to repo secrets, and under CI the example now HARD-FAILS rather than skipping when a
+# secret is absent or empty. It fails deliberately, because a green `entra-live-check` badge that
+# fetched no token is worse than no badge at all: it asserts a live-IdP verification that never
+# happened. Locally, with `CI` unset, it still prints SKIP and exits 0.
 name: entra-live-check
 
 env:

@@ -604,7 +604,6 @@ fn a_present_but_unreadable_nbf_is_denied_rather_than_ignored() {
         serde_json::json!("2099-01-01T00:00:00Z"),
         serde_json::json!(true),
         serde_json::json!([now + 3600]),
-        serde_json::json!(null),
     ] {
         let mut c = base_claims(now);
         c["nbf"] = malformed.clone();
@@ -616,10 +615,18 @@ fn a_present_but_unreadable_nbf_is_denied_rather_than_ignored() {
         assert!(err.contains("nbf"), "{err}");
     }
 
-    // An ABSENT nbf is still fine: it is an optional claim.
+    // An ABSENT nbf is still fine: it is an optional claim. So is an explicit `null`, which is
+    // what a serializer emitting absent optionals verbatim produces, and which cannot weaken
+    // anything: omitting the claim already yields no constraint.
     let mut absent = base_claims(now);
     absent.as_object_mut().unwrap().remove("nbf");
     assert!(verifier("groups").validate_claims(&absent, now).is_ok());
+    let mut null_nbf = base_claims(now);
+    null_nbf["nbf"] = serde_json::json!(null);
+    assert!(
+        verifier("groups").validate_claims(&null_nbf, now).is_ok(),
+        "an explicit null nbf means absent, not malformed"
+    );
 }
 
 #[test]
