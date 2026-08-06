@@ -68,7 +68,7 @@ the first request.
 ## Build
 
 Needs a Rust toolchain ([rustup](https://rustup.rs)), and — interim,
-until [busbarAI](https://github.com/GetBusbar/busbarAI) ships publicly,
+until [busbarAI](https://github.com/GetBusbar/busbar) ships publicly,
 a sibling checkout of `busbarAI` at `../busbarAI` (see
 [Dependencies](#dependencies) below).
 
@@ -86,7 +86,7 @@ checkout is needed for the OIDC logic itself; `auth-oidc-plugin` depends
 on it as a normal workspace path dependency (`../auth-oidc`).
 
 The remaining dependencies still reach into the
-[busbarAI](https://github.com/GetBusbar/busbarAI) monorepo: `busbar-api`
+[busbarAI](https://github.com/GetBusbar/busbar) monorepo: `busbar-api`
 (needed by both crates), `busbar-plugin-sdk` (`auth-oidc-plugin` only),
 and, as dev-dependencies for the end-to-end test, `busbar-plugin-loader`
 and `busbar-plugin-abi` (`auth-oidc-plugin` only) — the core-engine

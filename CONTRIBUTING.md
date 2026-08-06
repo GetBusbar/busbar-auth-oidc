@@ -16,7 +16,7 @@ build, test, and submit changes.
 `auth-oidc` is a Cargo workspace of two crates — `auth-oidc/` (the
 `busbar-auth-oidc` logic library) and `auth-oidc-plugin/` (the
 `busbar-auth-oidc-plugin` cdylib). You need a recent stable toolchain
-(`rustup` recommended), and — until [busbarAI](https://github.com/GetBusbar/busbarAI)
+(`rustup` recommended), and — until [busbarAI](https://github.com/GetBusbar/busbar)
 ships publicly — a sibling checkout of it at `../busbarAI`, since both
 crates' `Cargo.toml` point at busbar's crates as local path dependencies.
 See the README's [Dependencies](README.md#dependencies) section for the
@@ -53,7 +53,7 @@ This repo is a same-repo, 2-crate Cargo workspace: `auth-oidc/` (the
 
 `auth-oidc-plugin/src/lib.rs` is deliberately a thin adapter: it turns the
 engine's JSON config into an `OidcModule` and hands the trait object to
-[`busbar-plugin-sdk`](https://github.com/GetBusbar/busbarAI/tree/main/crates/plugin-sdk),
+[`busbar-plugin-sdk`](https://github.com/GetBusbar/busbar/tree/main/crates/plugin-sdk),
 which emits the C ABI symbols the loader resolves. The actual OIDC logic (JWKS
 fetch/cache, JWT verification, claim policy) lives in `auth-oidc/`, the
 `busbar-auth-oidc` library crate this plugin wraps — a same-repo sibling
