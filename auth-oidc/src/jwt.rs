@@ -187,9 +187,10 @@ mod tests {
     /// the rejection came from missing coordinates instead, this would pass for the wrong reason; the
     /// assertion on the error text guards against that.
     ///
-    /// RED (no `use` check): falls through to "JWKS key missing EC coordinate x" — a key-material
-    /// error, not a use-policy rejection — or, with valid material, would verify the signature outright.
-    /// GREEN: rejected specifically for `use: enc`, before key material is ever inspected.
+    /// Without a `use` check this falls through to "JWKS key missing EC coordinate x" — a
+    /// key-material error, not a use-policy rejection — or, with valid material, verifies the
+    /// signature outright. As implemented it is rejected specifically for `use: enc`, before key
+    /// material is ever inspected.
     #[test]
     fn verify_signature_rejects_an_encryption_only_key() {
         let key = Jwk {
@@ -267,8 +268,8 @@ mod tests {
         );
     }
 
-    /// A `"use": "sig"` key (the ordinary case) is unaffected by the new check — it still reaches
-    /// (and fails at) key-material parsing exactly as before, not the use-policy rejection.
+    /// A `"use": "sig"` key (the ordinary case) passes the use-policy check — it reaches (and fails
+    /// at) key-material parsing, not the use-policy rejection.
     #[test]
     fn verify_signature_permits_a_signing_key_to_reach_key_material_checks() {
         let key = Jwk {

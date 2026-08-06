@@ -15,8 +15,8 @@
 //! ## Crypto & dependencies
 //!
 //! Signature verification runs on `ring` — the crypto backend the whole workspace already uses (via
-//! rustls). NO `jsonwebtoken`/`rsa`: that avoids RUSTSEC-2023-0071 (the Marvin RSA-timing advisory the
-//! plugin-signing spike documented) and a second crypto stack. Crypto lives HERE in the plugin crate,
+//! rustls). NO `jsonwebtoken`/`rsa`: that avoids RUSTSEC-2023-0071 (the Marvin RSA-timing advisory)
+//! and a second crypto stack. Crypto lives HERE in the plugin crate,
 //! never in busbar core.
 //!
 //! ## Microsoft Entra ID (Azure AD) gotchas — handled here

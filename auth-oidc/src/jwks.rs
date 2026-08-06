@@ -12,9 +12,9 @@ use std::sync::OnceLock;
 /// The base64url-decoded, verify-ready key material for one [`Jwk`], decoded ONCE (at first use, then
 /// memoised on the owning `Jwk`) so the hot per-request verify path never re-decodes `n`/`e` (RSA) or
 /// `x`/`y` (EC). A fresh JWKS refresh builds fresh `Jwk`s with empty caches, so this is effectively
-/// "decode once per JWKS refresh". `Unusable` carries the SAME precise error the per-request decode
-/// used to raise, so a malformed key still fails with an exact, unchanged message at verify time —
-/// and one odd key in a set never poisons the parse of the whole set.
+/// "decode once per JWKS refresh". `Unusable` carries the precise error a per-request decode would
+/// raise, so a malformed key still fails with an exact message at verify time — and one odd key in a
+/// set never poisons the parse of the whole set.
 #[derive(Debug, Clone)]
 pub enum KeyMaterial {
     /// RSA modulus + exponent (decoded from `n`/`e`).

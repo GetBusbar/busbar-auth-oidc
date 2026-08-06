@@ -35,9 +35,10 @@
 //!
 //! Every trigger — cold start, TTL-stale, and unknown-`kid` rotation alike — goes through the same
 //! `min_refetch_interval` rate limit anchored on the last fetch ATTEMPT (failures included).
-//! Previously only the rotation path was bounded: because `fetched_at` advances only on success, an
-//! unreachable IdP left the set permanently TTL-stale and every single request issued its own fresh
-//! GET — an unbounded fetch storm against the provider, each request stalling for the full timeout.
+//! Bounding the rotation path alone is not enough: because `fetched_at` advances only on success, an
+//! unreachable IdP would leave the set permanently TTL-stale and every single request would issue its
+//! own fresh GET — an unbounded fetch storm against the provider, each request stalling for the full
+//! timeout.
 
 use crate::jwks::JwkSet;
 use std::sync::{Arc, Mutex};
@@ -395,8 +396,8 @@ mod tests {
     /// concurrency, so the test measures it directly: `f` records how many callers are inside it at
     /// once.
     ///
-    /// RED (lock held across `f`): observed concurrency is exactly 1.
-    /// GREEN: several verifications overlap.
+    /// With the lock held across `f`, observed concurrency is exactly 1. As implemented, several
+    /// verifications overlap.
     #[test]
     fn concurrent_verifications_are_not_serialised() {
         let (c, _calls) = cache(Ok(jwks("k1")), Duration::ZERO, Duration::from_secs(3600));
@@ -441,8 +442,8 @@ mod tests {
     /// cached — used to block on `lock()`, which cannot yield, parking worker threads until
     /// `/healthz` could not be polled and the orchestrator killed the node.
     ///
-    /// RED (fetch under the lock): the second caller waits out the full fetch.
-    /// GREEN: it serves from the cached key set immediately.
+    /// With the fetch under the lock, the second caller waits out the full fetch. As implemented, it
+    /// serves from the cached key set immediately.
     #[test]
     fn a_slow_jwks_fetch_does_not_stall_a_caller_that_already_has_the_key() {
         const FETCH: Duration = Duration::from_millis(1500);
@@ -522,8 +523,8 @@ mod tests {
     /// `fetched_at` only advances on success, an unreachable IdP leaves the set permanently stale —
     /// so without this bound every single request issues its own GET, forever.
     ///
-    /// RED (only the rotation path rate-limited): one fetch per request.
-    /// GREEN: one fetch per `min_refetch_interval`.
+    /// With only the rotation path rate-limited: one fetch per request. As implemented: one fetch
+    /// per `min_refetch_interval`.
     #[test]
     fn a_failing_provider_does_not_produce_a_fetch_storm() {
         // Fetch #1 primes the cache; after that the provider is unreachable. Simulated by a TTL of
@@ -609,10 +610,10 @@ mod tests {
     /// coexisting during an algorithm migration). The first key in the set is the WRONG `kty` for
     /// what `f` needs; only the second matches. `with_key` must try both, not just the first found.
     ///
-    /// RED (single-key `find`, `FnOnce` closure): only the first (RSA) key is ever tried, so `f`
-    /// (which only succeeds for an EC key) always fails, and `with_key` returns
-    /// "no JWKS key matches" even though a matching key is right there in the cache.
-    /// GREEN: `with_key` tries every same-`kid` key and succeeds on the second.
+    /// With a single-key `find` and an `FnOnce` closure, only the first (RSA) key is ever tried, so
+    /// `f` (which only succeeds for an EC key) always fails, and `with_key` returns
+    /// "no JWKS key matches" even though a matching key is right there in the cache. As implemented,
+    /// `with_key` tries every same-`kid` key and succeeds on the second.
     #[test]
     fn with_key_tries_every_key_sharing_a_kid_until_one_verifies() {
         let body = r#"{"keys":[
@@ -664,8 +665,8 @@ mod tests {
     /// must not keep validating signatures against a key the provider may have rotated out because it
     /// was compromised.
     ///
-    /// RED (no ceiling): `with_key` keeps succeeding forever off the primed keys.
-    /// GREEN: once `now` passes the ceiling, `with_key` returns the "cannot verify" error instead.
+    /// With no ceiling, `with_key` keeps succeeding forever off the primed keys. As implemented, once
+    /// `now` passes the ceiling, `with_key` returns the "cannot verify" error instead.
     #[test]
     fn a_permanently_unreachable_provider_stops_serving_keys_past_the_staleness_ceiling() {
         let ttl = Duration::from_millis(1);
@@ -727,9 +728,9 @@ mod tests {
     /// with traffic that early-return is nearly every request, so the ceiling was effectively
     /// bypassed.
     ///
-    /// RED (early returns don't check `max_stale`): the rate-limited follow-up call succeeds off the
-    /// ancient key set.
-    /// GREEN: it fails closed with the ceiling error, exactly like the fetch-failure path.
+    /// If the early returns do not check `max_stale`, the rate-limited follow-up call succeeds off
+    /// the ancient key set. As implemented, it fails closed with the ceiling error, exactly like the
+    /// fetch-failure path.
     #[test]
     fn the_rate_limited_early_return_also_enforces_the_staleness_ceiling() {
         // Prime once, then fail forever. min_refetch = 60s so the second past-ceiling call is
@@ -821,24 +822,22 @@ mod tests {
     /// !self.permits_attempt(...)`, line ~232) and never actually reaches the `fetch_gate`
     /// contention branch at all.
     ///
-    /// Getting a real, reliable test onto the actual `fetch_gate` `WouldBlock` arm (not the outer
-    /// rate-limit escape hatch) turned out to be the whole finding: `min_refetch_interval` set to
-    /// ANY positive duration (even 1ms, tried first) lets the winner's `last_attempt = Some(now)`
-    /// write (set the instant it acquires the gate, `refresh` line ~266 -- well before its 1500ms
-    /// fetch even starts) satisfy the loser's OUTER check too, since both threads pass the identical
-    /// fake `now`: `now.saturating_duration_since(now) == 0`, which is `< min_refetch_interval` for
-    /// any positive value, so the loser was ALWAYS being turned away by the outer check first,
-    /// never reaching this test's actual target. Proven empirically: the original version of this
-    /// test (with `min_refetch_interval = 1ms`) PASSED even with the `!desperate` guard manually
-    /// mutated to `false` -- a real "test passes for the wrong reason" bug in the test itself, not
-    /// just an academic concern. `min_refetch_interval = Duration::ZERO` closes it: `0 >= 0` is
-    /// always true, so the outer check never turns anyone away regardless of timing, and the ONLY
-    /// way a second caller can be short-circuited is by genuinely losing the `fetch_gate` race.
+    /// Reaching the actual `fetch_gate` `WouldBlock` arm (rather than the outer rate-limit escape
+    /// hatch) requires `min_refetch_interval = Duration::ZERO`, and this is subtle enough to be worth
+    /// stating: ANY positive duration lets the winner's `last_attempt = Some(now)` write (set the
+    /// instant it acquires the gate, well before its 1500ms fetch even starts) satisfy the loser's
+    /// OUTER check too, since both threads pass the identical fake `now` and
+    /// `now.saturating_duration_since(now) == 0` is `< min_refetch_interval` for any positive value.
+    /// The loser is then always turned away by the outer check and never reaches the arm under test
+    /// -- a test that would pass even with the `!desperate` guard hardcoded to `false`. With
+    /// `min_refetch_interval = ZERO`, `0 >= 0` is always true, so the outer check never turns anyone
+    /// away regardless of timing, and the ONLY way a second caller can be short-circuited is by
+    /// genuinely losing the `fetch_gate` race.
     ///
     /// Asserts on FETCH COUNT (not just wall-clock time) as the primary, deterministic signal: under
-    /// the real code the loser must never fetch at all (`calls == 1`); under the `if !desperate` ->
-    /// `if false` mutant, the loser instead blocks for the gate then performs its OWN real fetch
-    /// (`calls == 2`) once it acquires it (the inner re-check at line ~261 also always permits under
+    /// the real code the loser must never fetch at all (`calls == 1`); with `if !desperate` reduced
+    /// to `if false`, the loser instead blocks for the gate then performs its OWN real fetch
+    /// (`calls == 2`) once it acquires it (the inner re-check also always permits under
     /// `min_refetch_interval = ZERO`, so nothing stops the second fetch). Wall-clock timing is kept
     /// as a secondary corroborating signal, not the sole one.
     #[test]
@@ -900,7 +899,7 @@ mod tests {
     ///
     /// `min_refetch_interval = ZERO` so the loser is never turned away by the OUTER rate-limit check
     /// and genuinely reaches the gate-contention arm (same subtlety the gate-race test documents).
-    /// RED (that arm doesn't consult `max_stale`): the loser serves the ancient keys and succeeds.
+    /// If that arm does not consult `max_stale`, the loser serves the ancient keys and succeeds.
     #[test]
     fn the_lost_gate_race_early_return_also_enforces_the_staleness_ceiling() {
         const FETCH: Duration = Duration::from_millis(1500);
@@ -949,7 +948,7 @@ mod tests {
     /// it. The desperate loser's `now` is past `max_stale`, so even the keys the winner just fetched
     /// are already too old for it: it must fail closed, not serve them.
     ///
-    /// RED (that arm doesn't consult `max_stale`): the loser serves the winner's keys and succeeds.
+    /// If that arm does not consult `max_stale`, the loser serves the winner's keys and succeeds.
     #[test]
     fn the_post_gate_desperate_recheck_also_enforces_the_staleness_ceiling() {
         const FETCH: Duration = Duration::from_millis(1500);
@@ -1000,10 +999,11 @@ mod tests {
     /// immediate fetch, and must not fabricate a usable key set — `with_key` surfaces the honest
     /// "cannot verify" error.
     ///
-    /// RESIDUAL (not faked): the `staleness ceiling` sub-outcome of `serve_within_ceiling` AT line 262
-    /// is unreachable — any caller reaching 262 is desperate, so its `keys` (and thus `fetched_at`) are
-    /// absent and `too_stale` is never true there; only genuine thread contention could line a
-    /// non-desperate caller onto this arm. This drives the branch deterministically and asserts the
+    /// The `staleness ceiling` sub-outcome of `serve_within_ceiling` on the post-gate rate-limit
+    /// re-check is unreachable in practice — any caller reaching it is desperate, so its `keys` (and
+    /// thus `fetched_at`) are absent and `too_stale` is never true there; only genuine thread
+    /// contention could line a non-desperate caller onto that arm. This drives the branch
+    /// deterministically and asserts the
     /// observable contract: it fails closed.
     #[test]
     fn the_post_gate_rate_limit_recheck_fails_closed() {

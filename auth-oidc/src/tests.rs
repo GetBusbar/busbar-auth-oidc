@@ -213,7 +213,7 @@ fn tampered_payload_is_rejected() {
     ));
 }
 
-// ── RS256 real-signature coverage (Finding 2) ────────────────────────────────────────────────────
+// ── RS256 real-signature coverage ────────────────────────────────────────────────────────────────
 //
 // RS256 is the DOCUMENTED DEFAULT for the IdPs busbar targets (Entra/Google/Okta), yet the rest of
 // this suite signs ES256 only. `ring` cannot GENERATE RSA keys, so these tests carry two fixed
@@ -363,7 +363,7 @@ fn alg_confusion_against_an_rsa_key_is_rejected() {
     }
 }
 
-// ── alg-confusion guard (Finding 7) ────────────────────────────────────────────────────────────
+// ── alg-confusion guard ────────────────────────────────────────────────────────────────────────
 
 /// Build a compact JWT with an arbitrary (attacker-controlled) `alg` header value and an arbitrary
 /// signature segment, independent of [`TestKey::mint`] (which always writes `"ES256"`). Used to
@@ -382,8 +382,8 @@ fn token_with_alg(kid: &str, alg: &str, claims: &Value, sig: &[u8]) -> String {
 /// MUST be rejected. This verifier implements none, so any non-empty `crit` is a rejection — and the
 /// check fires on the header alone, before signature math (the signature bytes here are arbitrary).
 ///
-/// RED (no `crit` inspection): the header is ignored and the token falls through to normal signature
-/// processing. GREEN: rejected with a message naming the critical extension.
+/// Without `crit` inspection the header is ignored and the token falls through to normal signature
+/// processing. As implemented it is rejected with a message naming the critical extension.
 #[test]
 fn a_token_naming_an_unimplemented_critical_extension_is_rejected() {
     let key = TestKey::generate(KID);
@@ -466,9 +466,9 @@ fn no_credential_passes() {
 fn kid_rotation_triggers_bounded_refetch() {
     // ONE module, ONE cache, for the whole scenario — the provider rotates its JWKS underneath the
     // already-running module, which is what the miss-then-bounded-refetch branch
-    // (`cache.rs::with_key`'s post-first-lookup `refresh`) actually exists to handle. A prior version
-    // of this test rebuilt a second module with a pre-rotated two-key fixture, which meant the FIRST
-    // lookup already found the new key and the refetch branch was never reached.
+    // (`cache.rs::with_key`'s post-first-lookup `refresh`) actually exists to handle. Rebuilding a
+    // second module with a pre-rotated two-key fixture instead would leave the FIRST lookup finding
+    // the new key, and the refetch branch would never be reached.
     let old = TestKey::generate("old-kid");
     let new = TestKey::generate("new-kid");
     let fetcher = Arc::new(FixtureFetcher::new(old.jwks()));
@@ -567,7 +567,7 @@ fn audience_array_form_accepted() {
     assert!(verifier("groups").validate_claims(&c, now).is_ok());
 }
 
-// ── multi-valued aud + azp (OIDC Core 1.0 §3.1.3.7, Finding 4) ─────────────────────────────────────
+// ── multi-valued aud + azp (OIDC Core 1.0 §3.1.3.7) ────────────────────────────────────────────────
 
 /// A multi-valued `aud` that lists an audience the client does NOT trust is accepted ONLY when an
 /// `azp` claim names the trusted client. This is the spec's authorized-party gate.
@@ -583,9 +583,9 @@ fn multivalued_aud_with_untrusted_extra_is_accepted_when_azp_names_the_trusted_c
     );
 }
 
-/// RED (pre-fix, `.any(trusted)`): a token minted for the trusted client AND an attacker-controlled
-/// app sails through on the mere presence of the trusted audience. GREEN: with an untrusted extra
-/// audience and NO `azp`, the token is rejected.
+/// Under a bare `.any(trusted)` check, a token minted for the trusted client AND an
+/// attacker-controlled app sails through on the mere presence of the trusted audience. As
+/// implemented, an untrusted extra audience with NO `azp` is rejected.
 #[test]
 fn multivalued_aud_with_untrusted_extra_and_no_azp_is_rejected() {
     let now = 1_700_000_000;
@@ -628,9 +628,9 @@ fn not_yet_valid_denied() {
     assert!(verifier("groups").validate_claims(&c, now).is_err());
 }
 
-/// RFC 7519 §2: a NumericDate MAY be fractional. RED (pre-fix, `as_i64` only): a fractional `exp` is
-/// read as ABSENT and the token is denied for "no exp claim". GREEN: the fractional seconds are
-/// accepted (floored), so a future fractional `exp` verifies.
+/// RFC 7519 §2: a NumericDate MAY be fractional. Under an `as_i64`-only read, a fractional `exp` is
+/// read as ABSENT and the token is denied for "no exp claim". As implemented the fractional seconds
+/// are accepted (floored), so a future fractional `exp` verifies.
 #[test]
 fn fractional_exp_is_accepted_not_treated_as_absent() {
     let now = 1_700_000_000;
@@ -798,9 +798,9 @@ fn discovery_with_matching_issuer_resolves_jwks_uri() {
     assert_eq!(url, "https://issuer.test/keys");
 }
 
-/// RED (pre-fix): a discovery document with NO issuer check at all resolves `jwks_uri` regardless of
-/// which host served it — a poisoned response silently repoints key fetching for the process
-/// lifetime. GREEN (this fix): the mismatch is rejected before `jwks_uri` is ever read.
+/// Without an issuer check, a discovery document resolves `jwks_uri` regardless of which host served
+/// it — a poisoned response silently repoints key fetching for the process lifetime. As implemented,
+/// the mismatch is rejected before `jwks_uri` is ever read.
 #[test]
 fn discovery_with_mismatched_issuer_is_rejected() {
     let doc = serde_json::json!({
@@ -847,10 +847,10 @@ fn subject_falls_back_to_sub_when_oid_absent() {
     assert_eq!(p.id, "oidc:subject-guid", "sub must win when oid is absent");
 }
 
-/// RED (pre-fix): with neither immutable claim present, the module silently fell through to the
-/// MUTABLE preferred_username and identified the caller anyway. GREEN (this fix): a non-compliant IdP
-/// that omits both oid and sub (sub is REQUIRED by OIDC Core 1.0) is refused, not silently downgraded
-/// to a spoofable/reassignable identity.
+/// Falling through to the MUTABLE preferred_username when neither immutable claim is present would
+/// identify the caller anyway. As implemented, a non-compliant IdP that omits both oid and sub (sub
+/// is REQUIRED by OIDC Core 1.0) is refused, not silently downgraded to a spoofable/reassignable
+/// identity.
 #[test]
 fn missing_both_oid_and_sub_is_rejected_not_downgraded_to_a_mutable_claim() {
     let now = 1_700_000_000;
@@ -867,9 +867,9 @@ fn missing_both_oid_and_sub_is_rejected_not_downgraded_to_a_mutable_claim() {
     );
 }
 
-/// RED (pre-fix, `.and_then(Value::as_str)`): an empty-string `sub` (with `oid` absent) is accepted
-/// and yields the degenerate shared principal `oidc:`. GREEN: an empty/whitespace subject is treated
-/// like an absent one and rejected — the identity anchor must be non-empty.
+/// Under a bare `.and_then(Value::as_str)`, an empty-string `sub` (with `oid` absent) is accepted
+/// and yields the degenerate shared principal `oidc:`. As implemented, an empty/whitespace subject is
+/// treated like an absent one and rejected — the identity anchor must be non-empty.
 #[test]
 fn empty_string_subject_is_rejected_not_accepted_as_a_blank_identity() {
     let now = 1_700_000_000;
@@ -928,9 +928,9 @@ fn display_name_falls_back_to_preferred_username_when_name_claim_absent() {
 
 // ── credential-cache TTL ceiling ─────────────────────────────────────────────────────────────────
 
-/// RED (pre-fix): an un-ceilinged `ttl_secs` derived straight from a standard ~3600s-lived access
-/// token WIDENED the engine's credential-cache window from its 300s default to up to 3600s — trading
-/// the reported over-cache bug for a larger one. GREEN: the suggestion can only ever shorten the
+/// An un-ceilinged `ttl_secs` derived straight from a standard ~3600s-lived access token would WIDEN
+/// the engine's credential-cache window from its 300s default to up to 3600s — a worse problem than
+/// the over-caching it is meant to address. As implemented, the suggestion can only ever shorten the
 /// engine's default, never lengthen it.
 #[test]
 fn ttl_secs_is_ceilinged_even_for_a_long_lived_token() {

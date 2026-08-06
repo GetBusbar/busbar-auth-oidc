@@ -8,10 +8,8 @@
 //! and `dlopen`s the actually-built plugin cdylib to verify it end to end — a genuine JWKS fetch, a
 //! genuine signature verification, and a genuine claim-to-`Principal` mapping across the real C ABI.
 //!
-//! Ported from `busbarAI`'s `crates/plugin-loader/src/lib.rs`
-//! (`load_and_exercise_auth_oidc_plugin_success` /
-//! `load_and_exercise_auth_oidc_plugin_bad_config_fails_over_abi`), the only over-the-ABI coverage of
-//! the `kind: auth` dlopen seam, now hosted here as this plugin's own end-to-end test suite.
+//! This is the only over-the-ABI coverage of the `kind: auth` dlopen seam, and it lives here rather
+//! than in the loader so it travels with the plugin it exercises.
 
 use busbar_plugin_abi::kind as abi_kind;
 use busbar_plugin_loader::{auth::load_auth_from_bytes, plugin_library_filename};
@@ -21,11 +19,9 @@ use busbar_plugin_loader::{auth::load_auth_from_bytes, plugin_library_filename};
 /// only over-the-ABI coverage of the `kind: auth` dlopen seam and must never silently skip there.
 /// Checks BOTH the "uplifted" `<profile_dir>/<name>` copy (only refreshed when `[lib]` is a ROOT
 /// build target, e.g. `cargo build --all-targets`) and the raw `<profile_dir>/deps/<name>` compiler
-/// output (refreshed on every build that recompiles the lib). A bare `cargo test --release` (what
-/// `release-check.sh`'s Phase 4 runs, and what cargo-mutants runs) does NOT uplift the cdylib to
-/// the top-level profile dir, only to `target/deps` — checking only `profile_dir` silently finds
-/// nothing even though the cdylib really was built. Same fix already applied to
-/// store-postgres-plugin's and webrequest-hook's equivalent `plugin_path()` helpers.
+/// output (refreshed on every build that recompiles the lib). A bare `cargo test --release` does
+/// NOT uplift the cdylib to the top-level profile dir, only to `target/deps`, so checking only
+/// `profile_dir` silently finds nothing even though the cdylib really was built.
 fn plugin_path() -> Option<std::path::PathBuf> {
     let candidate = (|| {
         let exe = std::env::current_exe().ok()?;
@@ -346,8 +342,8 @@ fn wait_for_admin_ready(
     false
 }
 
-/// THE REAL END-TO-END PROOF Matthew asked for by name: "we called oidc... for EVERY plugin." Not a
-/// direct ABI `load_auth_from_bytes` call (the tests above already cover that seam) and not a
+/// The full install-path proof: not a direct ABI `load_auth_from_bytes` call (the tests above
+/// already cover that seam) and not a
 /// file-drop — an operator installing a NEW auth plugin onto a LIVE gateway does it over the real
 /// Admin API (`POST /api/v1/admin/plugins`), then the auth chain picks it up on the next boot (auth
 /// modules are, like store, restart-to-apply — a fresh process is the real mechanism, not an invented
