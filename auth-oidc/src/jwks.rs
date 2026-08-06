@@ -124,8 +124,26 @@ pub struct JwkSet {
 
 impl JwkSet {
     /// Parse a JWKS document (the body of a `jwks_uri` GET).
+    ///
+    /// A document that parses but carries ZERO keys is an ERROR, not an empty success. An identity
+    /// provider that can sign tokens always publishes at least one key, so `{"keys":[]}` is a
+    /// provider blip, a maintenance proxy, or a blackholing load balancer answering 200 with a
+    /// well-formed nothing. Returning it as `Ok` would let the caller install it over a working key
+    /// set and reset the freshness clocks, which converts a transient upstream hiccup into a total
+    /// auth outage that lasts at least a full refetch interval and persists for as long as the
+    /// empty body does. The caller's error path already preserves the previous keys; this makes the
+    /// degenerate document take that path instead of the success path.
     pub fn parse(body: &str) -> Result<Self, String> {
-        serde_json::from_str(body).map_err(|e| format!("invalid JWKS document: {e}"))
+        let set: Self =
+            serde_json::from_str(body).map_err(|e| format!("invalid JWKS document: {e}"))?;
+        if set.keys.is_empty() {
+            return Err(
+                "JWKS document contains no keys; refusing to replace the cached key set with an \
+                 empty one"
+                    .to_string(),
+            );
+        }
+        Ok(set)
     }
 
     /// Find ALL keys whose `kid` matches `kid`. A JWT header names the `kid` that signed it; selecting
@@ -149,6 +167,28 @@ mod tests {
 
     fn set(body: &str) -> JwkSet {
         JwkSet::parse(body).unwrap()
+    }
+
+    /// A well-formed JWKS carrying zero keys must be an ERROR. It parses cleanly, so without this
+    /// it reaches the cache's success arm and REPLACES a working key set, resetting the freshness
+    /// anchors with it. Every subsequent verification then misses, and the rate limiter holds the
+    /// next refetch off, so one 200-with-an-empty-body from a provider or a proxy in front of it
+    /// takes the whole deployment's authentication down until the body stops being empty.
+    #[test]
+    fn an_empty_key_set_is_an_error_not_an_empty_success() {
+        let err = JwkSet::parse(r#"{"keys":[]}"#)
+            .expect_err("a JWKS with no keys must not parse as a successful empty set");
+        assert!(
+            err.contains("no keys"),
+            "the error should say the document carried no keys: {err}"
+        );
+        // A document that is merely missing the member is the same case.
+        assert!(JwkSet::parse(r#"{}"#).is_err());
+        // And a real one-key document still parses.
+        assert!(JwkSet::parse(
+            r#"{"keys":[{"kty":"EC","kid":"a","crv":"P-256","x":"AAAA","y":"BBBB"}]}"#
+        )
+        .is_ok());
     }
 
     #[test]

@@ -5,7 +5,7 @@ version = "1.0.0"
 publish = false            # first-party signed cdylib, shipped as a packed/signed tarball, not to crates.io
 edition = "2021"
 rust-version = "1.97"
-description = "The OIDC auth module as a droppable busbar plugin — a cdylib exporting the auth C ABI. Drop it in the plugins folder and add `oidc` to auth.chain with auth.modules.oidc.config."
+description = "The OIDC auth module as a droppable busbar plugin: a cdylib exporting the auth C ABI. Drop it in the plugins folder, add `oidc` to auth.chain, and configure it under `identity-providers:`."
 license = "Apache-2.0"
 
 [lib]
@@ -20,6 +20,7 @@ busbar-api = { path = "../../busbarAI/crates/api" }
 busbar-plugin-sdk = { path = "../../busbarAI/crates/plugin-sdk" }
 busbar-auth-oidc = { path = "../auth-oidc" }
 serde_json = "1"
+tracing = "0.1"
 
 [dev-dependencies]
 # INTERIM local path deps into busbarAI, same rationale as above — these are dev-only. The end-to-end

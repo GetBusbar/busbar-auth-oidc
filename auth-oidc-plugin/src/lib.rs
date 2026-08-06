@@ -3,7 +3,7 @@
 
 //! The **OIDC auth module as a droppable busbar plugin** — a `cdylib` that exports the auth C ABI
 //! ([`busbar_plugin_abi::auth`]). Build it, drop the resulting `.so`/`.dll`/`.dylib` into the engine's
-//! plugins folder, add `oidc` to `auth.chain`, and configure `auth.modules.oidc.config`; the engine
+//! plugins folder, add `oidc` to `auth.chain`, and configure it under `identity-providers:`; the engine
 //! loads it in-process at boot over the auth ABI.
 //!
 //! All the OIDC logic (JWKS, JWT verification on `ring`, claim policy) lives in the `busbar-auth-oidc`
@@ -54,12 +54,29 @@ fn open(cfg: &str) -> Result<Box<dyn AuthPlugin>, String> {
     // that pins `jwks_url` and never reaches discovery must still boot — the endpoints simply stay
     // `None` and that half of login correctly fails closed. An endpoint that is neither configured nor
     // discoverable is left `None` for the same reason.
-    if let Ok((authorization_endpoint, token_endpoint)) = resolve_login_endpoints(&cfg, &fetcher) {
-        if cfg.authorization_endpoint.is_none() {
-            cfg.authorization_endpoint = authorization_endpoint;
+    // The failure is not fatal, but it is not silent either. Dropping the `Err` left an operator
+    // with a plugin that loaded cleanly and a sign-in button that dead-ends, and no signal anywhere
+    // naming the cause. That matters most in the case worth hearing about: `resolve_login_endpoints`
+    // is where a discovery document whose `issuer` does not match the configured one is refused, so
+    // a swallowed error here is exactly how a tampered discovery endpoint looks from the outside.
+    match resolve_login_endpoints(&cfg, &fetcher) {
+        Ok((authorization_endpoint, token_endpoint)) => {
+            if cfg.authorization_endpoint.is_none() {
+                cfg.authorization_endpoint = authorization_endpoint;
+            }
+            if cfg.token_endpoint.is_none() {
+                cfg.token_endpoint = token_endpoint;
+            }
         }
-        if cfg.token_endpoint.is_none() {
-            cfg.token_endpoint = token_endpoint;
+        Err(e) => {
+            tracing::warn!(
+                module = "oidc",
+                error = %e,
+                "OIDC browser-login endpoint discovery failed; the plugin is loaded and token \
+                 VERIFICATION is unaffected, but begin_login/complete_login will refuse every \
+                 attempt until `authorization_endpoint` and `token_endpoint` are configured \
+                 explicitly or discovery succeeds"
+            );
         }
     }
     // A SECOND fetcher instance for the live cache (the first was a borrow for discovery).

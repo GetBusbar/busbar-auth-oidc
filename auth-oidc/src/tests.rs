@@ -549,6 +549,79 @@ fn wrong_issuer_denied() {
     assert!(verifier("groups").validate_claims(&c, now).is_err());
 }
 
+/// A token with NO `iss` claim at all must be rejected. Every fixture in this file carries an
+/// issuer, and `wrong_issuer_denied` only mutates it to a wrong VALUE, so the absent-claim arm had
+/// no coverage: changing it from a rejection to `{}` would accept a token that names no issuer
+/// whatsoever, and nothing here would go red.
+#[test]
+fn a_token_with_no_iss_claim_is_denied() {
+    let now = 1_700_000_000;
+    let mut c = base_claims(now);
+    c.as_object_mut().unwrap().remove("iss");
+    let err = verifier("groups")
+        .validate_claims(&c, now)
+        .expect_err("a token carrying no issuer must be rejected, not accepted");
+    assert!(err.contains("iss"), "{err}");
+}
+
+/// A token with NO `aud` claim, or an `aud` that is neither a string nor an array, must be
+/// rejected. The catch-all arm that does this had no test: flipping it to accept would admit a
+/// token with no audience at all, which is the confused-deputy shape this check exists to stop.
+#[test]
+fn a_token_with_no_aud_or_a_malformed_aud_is_denied() {
+    let now = 1_700_000_000;
+
+    let mut absent = base_claims(now);
+    absent.as_object_mut().unwrap().remove("aud");
+    assert!(
+        verifier("groups").validate_claims(&absent, now).is_err(),
+        "a token carrying no audience must be rejected"
+    );
+
+    for malformed in [
+        serde_json::json!(42),
+        serde_json::json!(true),
+        serde_json::json!({ "aud": AUDIENCE }),
+        serde_json::json!(null),
+    ] {
+        let mut c = base_claims(now);
+        c["aud"] = malformed.clone();
+        assert!(
+            verifier("groups").validate_claims(&c, now).is_err(),
+            "an aud that is not a string or an array of strings must be rejected, got {malformed}"
+        );
+    }
+}
+
+/// An `nbf` that is PRESENT but not a NumericDate must be rejected rather than silently skipped.
+/// Both an absent claim and an unreadable one used to produce `None` from the same helper, so a
+/// string NumericDate (a real shape from non-compliant issuers) dropped the not-before constraint
+/// entirely while the token still verified.
+#[test]
+fn a_present_but_unreadable_nbf_is_denied_rather_than_ignored() {
+    let now = 1_700_000_000;
+    for malformed in [
+        serde_json::json!("2099-01-01T00:00:00Z"),
+        serde_json::json!(true),
+        serde_json::json!([now + 3600]),
+        serde_json::json!(null),
+    ] {
+        let mut c = base_claims(now);
+        c["nbf"] = malformed.clone();
+        let err = verifier("groups")
+            .validate_claims(&c, now)
+            .expect_err(&format!(
+                "an unreadable nbf must be rejected, got {malformed}"
+            ));
+        assert!(err.contains("nbf"), "{err}");
+    }
+
+    // An ABSENT nbf is still fine: it is an optional claim.
+    let mut absent = base_claims(now);
+    absent.as_object_mut().unwrap().remove("nbf");
+    assert!(verifier("groups").validate_claims(&absent, now).is_ok());
+}
+
 #[test]
 fn wrong_audience_denied() {
     let now = 1_700_000_000;
@@ -1370,6 +1443,79 @@ fn begin_and_complete_login_drive_the_full_flow() {
     {
         LoginOutcome::Identify(p) => assert_eq!(p.id, "oidc:object-guid"),
         other => panic!("expected Identify, got {other:?}"),
+    }
+}
+
+/// `complete_login`'s `token_response` arm, driven through `complete_login` ITSELF rather than
+/// through the inner helper.
+///
+/// The round-trip test above reaches this behaviour via `identity_from_token_response` because the
+/// helper takes an injectable clock and `complete_login` does not. That left the arm in
+/// `complete_login` executed by no test at all: replacing its whole body with an unconditional
+/// `LoginOutcome::Identify(...)` (that is, handing out an identity for ANY token-endpoint response,
+/// with no signature and no claim check) kept the entire suite green. The e2e tests do not cover it
+/// either, since they drive `authenticate`, not the login flow.
+///
+/// Mints against the REAL clock so `complete_login`'s internal `now_unix()` accepts it, and pairs
+/// the positive case with a wrong-key negative so the test cannot pass on an unconditional accept.
+#[test]
+fn complete_login_verifies_the_token_response_and_rejects_a_forged_one() {
+    let key = TestKey::generate(KID);
+    let real_now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let mut c = cfg("groups");
+    c.authorization_endpoint = Some("https://idp.test/authorize".to_string());
+    c.token_endpoint = Some("https://idp.test/token".to_string());
+    let m = OidcModule::new(
+        &c,
+        "https://jwks.test/keys".to_string(),
+        Box::new(FixtureFetcher::new(key.jwks())),
+    );
+
+    let good = serde_json::json!({ "id_token": key.mint(&base_claims(real_now)) }).to_string();
+    match m.complete_login(&CompleteLogin {
+        token_response: Some(LoginHttpResponse {
+            status: 200,
+            body: good,
+        }),
+        ..Default::default()
+    }) {
+        LoginOutcome::Identify(p) => assert_eq!(p.id, "oidc:object-guid"),
+        other => panic!("a validly signed id_token must Identify, got {other:?}"),
+    }
+
+    // Same claims, DIFFERENT signing key, same kid. Only a real signature check rejects this, so
+    // this is the half that fails if the arm ever stops verifying.
+    let forged = TestKey::generate(KID);
+    let bad = serde_json::json!({ "id_token": forged.mint(&base_claims(real_now)) }).to_string();
+    match m.complete_login(&CompleteLogin {
+        token_response: Some(LoginHttpResponse {
+            status: 200,
+            body: bad,
+        }),
+        ..Default::default()
+    }) {
+        LoginOutcome::Reject => {}
+        other => panic!("an id_token signed by the wrong key must Reject, got {other:?}"),
+    }
+
+    // A non-2xx token-endpoint response must be refused before its body is ever parsed: an
+    // `invalid_grant` error body carrying an attacker-supplied `id_token` field is otherwise
+    // verified as though the exchange had succeeded. Every existing fixture used status 200.
+    let error_body =
+        serde_json::json!({ "error": "invalid_grant", "id_token": key.mint(&base_claims(real_now)) })
+            .to_string();
+    match m.complete_login(&CompleteLogin {
+        token_response: Some(LoginHttpResponse {
+            status: 400,
+            body: error_body,
+        }),
+        ..Default::default()
+    }) {
+        LoginOutcome::Reject => {}
+        other => panic!("a non-2xx token-endpoint response must Reject, got {other:?}"),
     }
 }
 

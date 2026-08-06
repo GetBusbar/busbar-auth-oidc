@@ -5,7 +5,7 @@
 //! Connect JWT (ID or access token) a caller presents as its bearer credential and maps it to a
 //! [`busbar_api::Principal`]: verify the signature against the provider's JWKS, check `iss`/`aud`/
 //! `exp`/`nbf`, and read the configured role claim (`groups` by default, or `roles` for Entra
-//! app-roles) into the principal's ROLES. busbar's own `group_map:` / `auth.modules.oidc:` config
+//! app-roles) into the principal's ROLES. busbar's own `auth.role_bindings:` config
 //! then resolves those roles to governance grants and admin scope — the module asserts identity
 //! only, never policy.
 //!
@@ -23,7 +23,7 @@
 //!
 //! - **issuer** is `https://login.microsoftonline.com/<tenant-id>/v2.0`, **aud** is the app's
 //!   client-id. Both are exact-matched.
-//! - **group claims are GUIDs**, not names — the operator maps those GUIDs in `group_map:`.
+//! - **group claims are GUIDs**, not names: the operator maps those GUIDs in `auth.role_bindings:`.
 //! - **>200 groups overage**: Entra omits the `groups` claim and instead emits `_claim_names` /
 //!   `_claim_sources` markers pointing at the Graph API. busbar does NOT call Graph and does NOT
 //!   silently degrade: [`OidcVerifier`] REJECTS such a token with a precise error pointing the
@@ -73,7 +73,7 @@ const MAX_CACHE_TTL_SECS: i64 = 300;
 /// fine; it only needs to stay behind "now".
 const CLOCK_SANITY_FLOOR_UNIX: i64 = 1_767_225_600; // 2026-01-01T00:00:00Z
 
-/// The operator's `auth.modules.oidc.config` settings, deserialized from the JSON the engine passes to
+/// The operator's `identity-providers:` settings for this module, deserialized from the JSON the engine passes to
 /// the plugin's `open`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -234,10 +234,27 @@ impl OidcVerifier {
         // saturating rationale as `exp` above, opposite direction: `nbf` at i64::MIN saturates to
         // i64::MIN, which is trivially `<= now_unix` and passes — an out-of-range-low `nbf` was
         // never a meaningful "not yet valid" signal anyway.
-        if let Some(nbf) = as_numeric_date_ceil(claims.get("nbf")) {
-            if nbf.saturating_sub(CLOCK_SKEW_SECS) > now_unix {
-                return Err("token is not yet valid (nbf in the future)".to_string());
-            }
+        //
+        // PRESENT-BUT-UNREADABLE is rejected, not skipped. `as_numeric_date_ceil` returns `None`
+        // both for an absent claim and for one that is present but not a JSON number, and treating
+        // those alike means a token carrying `"nbf": "2099-01-01T00:00:00Z"` (a string NumericDate,
+        // a real shape from non-compliant issuers) has its not-before constraint silently dropped
+        // rather than enforced. `exp` already distinguishes the two cases; this makes `nbf` match.
+        match claims.get("nbf") {
+            None => {}
+            Some(raw) => match as_numeric_date_ceil(Some(raw)) {
+                Some(nbf) if nbf.saturating_sub(CLOCK_SKEW_SECS) > now_unix => {
+                    return Err("token is not yet valid (nbf in the future)".to_string());
+                }
+                Some(_) => {}
+                None => {
+                    return Err(
+                        "token has an 'nbf' claim that is not a NumericDate; refusing to ignore a \
+                         not-before constraint it cannot evaluate"
+                            .to_string(),
+                    );
+                }
+            },
         }
 
         // ENTRA >200-GROUPS OVERAGE: when a user is in more groups than the token can carry, Entra
@@ -258,7 +275,7 @@ impl OidcVerifier {
         }
 
         // Roles/groups claim → principal ROLES (1.5.0: the field was renamed groups->roles). A missing/empty claim is NOT an error here (an unmapped
-        // principal is denied downstream by group_map when default:deny); it just yields no groups.
+        // principal is denied downstream by the role bindings when default:deny); it yields no groups.
         let groups = extract_string_list(claims.get(&self.role_claim));
 
         // Subject → stable principal id. ONLY the IMMUTABLE identifier (`oid` — Entra's stable object
