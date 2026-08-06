@@ -68,7 +68,7 @@ the first request.
 ## Build
 
 Needs a Rust toolchain ([rustup](https://rustup.rs)), and — interim,
-until [busbarAI](https://github.com/GetBusbar/busbar) ships publicly —
+until [busbarAI](https://github.com/GetBusbar/busbarAI) ships publicly,
 a sibling checkout of `busbarAI` at `../busbarAI` (see
 [Dependencies](#dependencies) below).
 
