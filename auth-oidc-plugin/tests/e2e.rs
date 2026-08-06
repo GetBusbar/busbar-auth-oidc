@@ -545,12 +545,24 @@ fn install_oidc_plugin_via_admin_api_and_authenticate() {
         }))
         .send()
         .expect("POST to the real data plane with a real OIDC bearer token");
-    assert_ne!(
-        resp.status().as_u16(),
-        401,
+    // NOT `assert_ne!(status, 401)`. That form passes on 400, 404, 500 and every other failure, so
+    // it cannot distinguish "the plugin authenticated this token" from "the request died for an
+    // unrelated reason before auth mattered". The chain is `[oidc]` and the upstream is a mock, so
+    // a genuinely authenticated request reaches the proxy and comes back either as a success or as
+    // an upstream-shaped failure. Both of those are downstream of authentication; a 401 or a 403 is
+    // not. Assert that positively.
+    let status = resp.status().as_u16();
+    let body = resp.text().unwrap_or_default();
+    assert!(
+        status != 401 && status != 403,
         "a genuinely valid, real-signed OIDC token must be authenticated by the live installed \
-         plugin, not rejected: {}",
-        resp.text().unwrap_or_default()
+         plugin, not rejected: status {status}, body {body}"
+    );
+    assert!(
+        status < 400 || (502..=504).contains(&status),
+        "an authenticated request must reach the proxy and return either a success or an \
+         upstream-shaped failure; status {status} means it never got past the gateway's own \
+         handling, so this assertion would not have noticed an auth regression: body {body}"
     );
 
     // A token from the WRONG key (same iss/aud/kid) must be rejected by the live installed plugin.
