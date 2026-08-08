@@ -406,7 +406,8 @@ fn install_oidc_plugin_via_admin_api_and_authenticate() {
             "listen: \"127.0.0.1:{data_port1}\"\n\
              admin_listen: \"127.0.0.1:{admin_port1}\"\n\
              plugins:\n  enabled: true\n  dir: {}\n  trust:\n    allow_unsigned: true\n\
-             auth:\n  chain: []\n  admin_auth:\n    - admin-tokens: {{ token: {{ env: BUSBAR_ADMIN_TOKEN }} }}\n\
+             identity-providers:\n  admin-tokens: {{ module: admin-tokens, token: {{ env: BUSBAR_ADMIN_TOKEN }} }}\n\
+             auth:\n  chain: []\n  admin_auth: [admin-tokens]\n\
              providers:\n  mock:\n    api_key: {{ env: MOCK_KEY }}\n\
              models:\n  test-model:\n    provider: mock\n",
             plugins_dir.display()
@@ -489,9 +490,10 @@ fn install_oidc_plugin_via_admin_api_and_authenticate() {
             "listen: \"127.0.0.1:{data_port2}\"\n\
              admin_listen: \"127.0.0.1:{admin_port2}\"\n\
              plugins:\n  enabled: true\n  dir: {}\n  trust:\n    allow_unsigned: true\n\
-             auth:\n  admin_auth:\n    - admin-tokens: {{ token: {{ env: BUSBAR_ADMIN_TOKEN }} }}\n\
-             \x20 chain:\n    - oidc:\n        settings:\n          issuer: \"{ISSUER}\"\n          audience: \"{AUDIENCE}\"\n\
-             \x20         jwks_url: \"{jwks_url}\"\n          ca_cert_pem: |\n{}\n\
+             identity-providers:\n  admin-tokens: {{ module: admin-tokens, token: {{ env: BUSBAR_ADMIN_TOKEN }} }}\n\
+             \x20 oidc:\n    module: oidc\n    settings:\n      issuer: \"{ISSUER}\"\n      audience: \"{AUDIENCE}\"\n\
+             \x20     jwks_url: \"{jwks_url}\"\n      ca_cert_pem: |\n{}\n\
+             auth:\n  admin_auth: [admin-tokens]\n  chain: [oidc]\n\
              \x20 role_bindings:\n    oidc:\n      \"11111111-aaaa\": {{}}\n\
              providers:\n  mock:\n    api_key: {{ env: MOCK_KEY }}\n\
              models:\n  test-model:\n    provider: mock\n",
