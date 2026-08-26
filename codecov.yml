@@ -1,0 +1,22 @@
+# Codecov is INFORMATIONAL here, never a gate. The correctness gate is CI's `ci` job (plugin-ci.yml);
+# coverage is an observation surfaced on the README badge and as per-PR context. So:
+#   * status.*.informational: true  → Codecov posts a check for visibility but it is NEVER "failing",
+#     so it can never block a PR or turn a branch red over a coverage delta.
+#   * comment: false                → no bot comments on PRs; the signal lives on the badge + the
+#     Codecov UI, keeping PRs seamless.
+#   * ignore                        → exclude test-only paths and the sibling busbarAI engine checkout
+#     so the reported percentage reflects THIS plugin's shipped code, not test harnesses or core.
+coverage:
+  status:
+    project:
+      default:
+        informational: true
+    patch:
+      default:
+        informational: true
+
+comment: false
+
+ignore:
+  - "auth-oidc-plugin/tests"
+  - "busbarAI"
