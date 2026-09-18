@@ -11,7 +11,7 @@
 //! This is the only over-the-ABI coverage of the `kind: auth` dlopen seam, and it lives here rather
 //! than in the loader so it travels with the plugin it exercises.
 
-use busbar_plugin_abi::kind as abi_kind;
+use busbar_plugin::cold::kind as abi_kind;
 use busbar_plugin_loader::{auth::load_auth_from_bytes, plugin_library_filename};
 
 /// Locate the built `busbar_auth_oidc_plugin` cdylib in the target dir (mirrors the loader's own

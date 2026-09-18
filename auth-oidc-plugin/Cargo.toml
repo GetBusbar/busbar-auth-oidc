@@ -29,6 +29,9 @@ tracing = "0.1"
 # HTTPS fetch+verify rather than a stub. Same rustls/rcgen/ring versions the monorepo pins for this
 # exact test (crates/plugin-loader's dev-dependencies).
 busbar-plugin-loader = { path = "../../busbar/crates/plugin-loader" }
+# The COLD plugin ABI moved from the old `busbar-plugin-abi` crate into `busbar-plugin::cold` in
+# 1.6.0; tests/e2e.rs uses `busbar_plugin::cold::kind` for the `kind: auth` load-seam constants.
+busbar-plugin = { path = "../../busbar/crates/busbar-plugin" }
 ring = "0.17"
 base64 = "0.22"
 rcgen = "0.14"
