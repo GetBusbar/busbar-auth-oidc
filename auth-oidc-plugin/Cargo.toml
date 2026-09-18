@@ -16,8 +16,8 @@ crate-type = ["cdylib", "rlib"]   # cdylib for the C ABI delivery; rlib so the u
 # real logic lives here, not in busbarAI). Only busbar-api/busbar-plugin-sdk still reach into busbarAI
 # — INTERIM local path dependencies into a sibling checkout, since busbarAI isn't public yet; once it
 # ships publicly these become git (pinned rev/tag) or crates.io dependencies instead.
-busbar-api = { path = "../../busbarAI/crates/api" }
-busbar-plugin-sdk = { path = "../../busbarAI/crates/plugin-sdk" }
+busbar-api = { path = "../../busbar/crates/api" }
+busbar-plugin-sdk = { path = "../../busbar/crates/plugin-sdk" }
 busbar-auth-oidc = { path = "../auth-oidc" }
 serde_json = "1"
 tracing = "0.1"
@@ -28,8 +28,7 @@ tracing = "0.1"
 # JWKS document over a real local TLS listener, so busbar-auth-oidc's own ReqwestFetcher does a genuine
 # HTTPS fetch+verify rather than a stub. Same rustls/rcgen/ring versions the monorepo pins for this
 # exact test (crates/plugin-loader's dev-dependencies).
-busbar-plugin-loader = { path = "../../busbarAI/crates/plugin-loader" }
-busbar-plugin-abi = { path = "../../busbarAI/crates/plugin-abi" }
+busbar-plugin-loader = { path = "../../busbar/crates/plugin-loader" }
 ring = "0.17"
 base64 = "0.22"
 rcgen = "0.14"

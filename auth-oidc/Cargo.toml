@@ -12,7 +12,7 @@ license = "Apache-2.0"
 # INTERIM: busbarAI isn't public yet, so this is a local path dependency into a sibling checkout of
 # the monorepo. Once busbarAI ships publicly this should become a git (pinned rev/tag) or crates.io
 # dependency instead — same pattern already applied to busbar-plugin-sdk in ../auth-oidc-plugin.
-busbar-api = { path = "../../busbarAI/crates/api" }
+busbar-api = { path = "../../busbar/crates/api" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Signature verification on the workspace's existing crypto backend — NO jsonwebtoken/rsa (avoids
