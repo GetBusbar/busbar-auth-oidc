@@ -69,8 +69,8 @@ the first request.
 ## Build
 
 Needs a Rust toolchain ([rustup](https://rustup.rs)), and — interim,
-until [busbarAI](https://github.com/GetBusbar/busbar) ships publicly,
-a sibling checkout of `busbarAI` at `../busbarAI` (see
+until [busbar](https://github.com/GetBusbar/busbar) ships publicly,
+a sibling checkout of `busbar` at `../busbar` (see
 [Dependencies](#dependencies) below).
 
 ```sh
@@ -87,22 +87,22 @@ checkout is needed for the OIDC logic itself; `auth-oidc-plugin` depends
 on it as a normal workspace path dependency (`../auth-oidc`).
 
 The remaining dependencies still reach into the
-[busbarAI](https://github.com/GetBusbar/busbar) monorepo: `busbar-api`
+[busbar](https://github.com/GetBusbar/busbar) monorepo: `busbar-api`
 (needed by both crates), `busbar-plugin-sdk` (`auth-oidc-plugin` only),
 and, as dev-dependencies for the end-to-end test, `busbar-plugin-loader`
-and `busbar-plugin-abi` (`auth-oidc-plugin` only) — the core-engine
-contracts every plugin depends on the same way. Because busbarAI is not
+and `busbar-plugin` (`auth-oidc-plugin` only) — the core-engine
+contracts every plugin depends on the same way. Because busbar is not
 yet public, both crates' `Cargo.toml` point at these as **local path
-dependencies** (`../../busbarAI/crates/...`), which means this repo
-expects to be checked out as a sibling of `busbarAI`:
+dependencies** (`../../busbar/crates/...`), which means this repo
+expects to be checked out as a sibling of `busbar`:
 
 ```
 some-parent-dir/
-├── busbarAI/
+├── busbar/
 └── auth-oidc/          # this repo — the auth-oidc/ + auth-oidc-plugin/ workspace
 ```
 
-This is an interim measure — once busbarAI ships publicly, these should
+This is an interim measure — once busbar ships publicly, these should
 become git (pinned rev/tag) or crates.io dependencies instead. Grep both
 crates' `Cargo.toml` for the `INTERIM` comments when doing that
 migration.
@@ -112,7 +112,7 @@ migration.
 Once built, the cdylib is packed and signed like any other busbar plugin
 — see
 [`docs/plugins.md`](https://github.com/GetBusbar/busbar/blob/main/docs/plugins.md#signing-and-packaging)
-in busbarAI for the full reference. In short:
+in busbar for the full reference. In short:
 
 ```sh
 BUSBAR_SIGN_KEY=<signing key> busbar-plugin-pack pack \

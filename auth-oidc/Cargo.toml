@@ -9,8 +9,8 @@ description = "The OIDC auth module for busbar: verify an OpenID Connect JWT (JW
 license = "Apache-2.0"
 
 [dependencies]
-# INTERIM: busbarAI isn't public yet, so this is a local path dependency into a sibling checkout of
-# the monorepo. Once busbarAI ships publicly this should become a git (pinned rev/tag) or crates.io
+# INTERIM: busbar isn't public yet, so this is a local path dependency into a sibling checkout of
+# the monorepo. Once busbar ships publicly this should become a git (pinned rev/tag) or crates.io
 # dependency instead — same pattern already applied to busbar-plugin-sdk in ../auth-oidc-plugin.
 busbar-api = { path = "../../busbar/crates/api" }
 serde = { version = "1", features = ["derive"] }

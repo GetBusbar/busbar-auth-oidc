@@ -13,8 +13,8 @@ crate-type = ["cdylib", "rlib"]   # cdylib for the C ABI delivery; rlib so the u
 
 [dependencies]
 # busbar-auth-oidc is now a SAME-REPO sibling crate (this plugin brings 100% of what it needs — the
-# real logic lives here, not in busbarAI). Only busbar-api/busbar-plugin-sdk still reach into busbarAI
-# — INTERIM local path dependencies into a sibling checkout, since busbarAI isn't public yet; once it
+# real logic lives here, not in busbar). Only busbar-api/busbar-plugin-sdk still reach into busbar
+# — INTERIM local path dependencies into a sibling checkout, since busbar isn't public yet; once it
 # ships publicly these become git (pinned rev/tag) or crates.io dependencies instead.
 busbar-api = { path = "../../busbar/crates/api" }
 busbar-plugin-sdk = { path = "../../busbar/crates/plugin-sdk" }
@@ -23,7 +23,7 @@ serde_json = "1"
 tracing = "0.1"
 
 [dev-dependencies]
-# INTERIM local path deps into busbarAI, same rationale as above — these are dev-only. The end-to-end
+# INTERIM local path deps into busbar, same rationale as above — these are dev-only. The end-to-end
 # test loads the built cdylib over the real loader ABI seam, mints a real ES256 JWT, and serves a real
 # JWKS document over a real local TLS listener, so busbar-auth-oidc's own ReqwestFetcher does a genuine
 # HTTPS fetch+verify rather than a stub. Same rustls/rcgen/ring versions the monorepo pins for this

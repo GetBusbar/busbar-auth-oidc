@@ -2,9 +2,9 @@
 #
 # This repo brings 100% of what it needs: the real OIDC verification logic (auth-oidc) and the thin
 # dlopen ABI adapter that packages it as a busbar plugin (auth-oidc-plugin) both live here, as a
-# same-repo Cargo workspace — not split across this repo and busbarAI. Only busbar-api/busbar-plugin-sdk
-# (and, for the adapter's dev-dependencies, busbar-plugin-loader/busbar-plugin-abi) still reach into a
-# sibling busbarAI checkout, since those are core-engine contracts every plugin depends on the same way.
+# same-repo Cargo workspace — not split across this repo and busbar. Only busbar-api/busbar-plugin-sdk
+# (and, for the adapter's dev-dependencies, busbar-plugin-loader/busbar-plugin) still reach into a
+# sibling busbar checkout, since those are core-engine contracts every plugin depends on the same way.
 [workspace]
 resolver = "2"
 members = [

@@ -4,7 +4,7 @@
 #     so it can never block a PR or turn a branch red over a coverage delta.
 #   * comment: false                → no bot comments on PRs; the signal lives on the badge + the
 #     Codecov UI, keeping PRs seamless.
-#   * ignore                        → exclude test-only paths and the sibling busbarAI engine checkout
+#   * ignore                        → exclude test-only paths and the sibling busbar engine checkout
 #     so the reported percentage reflects THIS plugin's shipped code, not test harnesses or core.
 coverage:
   status:
@@ -19,4 +19,4 @@ comment: false
 
 ignore:
   - "auth-oidc-plugin/tests"
-  - "busbarAI"
+  - "busbar"

@@ -16,15 +16,15 @@ build, test, and submit changes.
 `auth-oidc` is a Cargo workspace of two crates — `auth-oidc/` (the
 `busbar-auth-oidc` logic library) and `auth-oidc-plugin/` (the
 `busbar-auth-oidc-plugin` cdylib). You need a recent stable toolchain
-(`rustup` recommended), and — until [busbarAI](https://github.com/GetBusbar/busbar)
-ships publicly — a sibling checkout of it at `../busbarAI`, since both
+(`rustup` recommended), and — until [busbar](https://github.com/GetBusbar/busbar)
+ships publicly — a sibling checkout of it at `../busbar`, since both
 crates' `Cargo.toml` point at busbar's crates as local path dependencies.
 See the README's [Dependencies](README.md#dependencies) section for the
 exact layout. `ci.yml` itself defines no `BUSBAR_REF` — it delegates
 entirely to the reusable `GetBusbar/busbar` `plugin-ci.yml` workflow,
 which pins its own busbar ref; the `BUSBAR_REF` this repo owns lives in
 [`release.yml`](.github/workflows/release.yml) (used to check out the
-sibling `busbarAI` for packing/signing) and
+sibling `busbar` for packing/signing) and
 [`entra-live-check.yml`](.github/workflows/entra-live-check.yml) (used
 for the live Entra check).
 
@@ -57,7 +57,7 @@ engine's JSON config into an `OidcModule` and hands the trait object to
 which emits the C ABI symbols the loader resolves. The actual OIDC logic (JWKS
 fetch/cache, JWT verification, claim policy) lives in `auth-oidc/`, the
 `busbar-auth-oidc` library crate this plugin wraps — a same-repo sibling
-crate, not the `busbarAI` monorepo — so most substantive OIDC-logic changes
+crate, not the `busbar` monorepo — so most substantive OIDC-logic changes
 belong in `auth-oidc/`, not `auth-oidc-plugin/`. Changes to the auth/identity
 path deserve extra care and review: this plugin decides who busbar trusts.
 

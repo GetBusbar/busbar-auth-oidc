@@ -39,8 +39,8 @@ jobs:
   #     no-op here, not a red job — a reporting dependency must never fail the build.
   #
   # LAYOUT mirrors plugin-ci.yml: this repo's crates take INTERIM local-path dependencies on a
-  # sibling busbarAI checkout (`../../busbarAI/crates/*`), so the plugin is checked out into `plugin/`
-  # and busbar alongside it into `busbarAI/` for those paths to resolve. This plugin runs with
+  # sibling busbar checkout (`../../busbar/crates/*`), so the plugin is checked out into `plugin/`
+  # and busbar alongside it into `busbar/` for those paths to resolve. This plugin runs with
   # `service: none`, so there are no backend service containers or *_URL env vars to mirror here.
   coverage:
     name: coverage (llvm-cov · codecov)
@@ -57,7 +57,7 @@ jobs:
           # Same engine ref the `ci` job builds against: the base branch on a pull_request (github.ref_name
           # is '<number>/merge' there), the pushed branch otherwise — so coverage measures the same build.
           ref: ${{ github.base_ref || github.ref_name }}
-          path: busbarAI
+          path: busbar
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
