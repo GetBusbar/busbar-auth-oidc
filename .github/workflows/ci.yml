@@ -50,13 +50,16 @@ jobs:
         uses: actions/checkout@v7
         with:
           path: plugin
-      - name: Checkout busbar (sibling path dependency)
+      # Pinned to field 1 of .busbar-ref — the engine Cargo.lock was resolved against (so `--locked`
+      # holds) and the one this repo's release builds; a moving branch here drifts from the lock.
+      - name: Resolve busbar ref from .busbar-ref
+        id: ref
+        run: echo "sha=$(cut -d' ' -f1 plugin/.busbar-ref)" >> "$GITHUB_OUTPUT"
+      - name: Checkout busbar (sibling path dependency, pinned to .busbar-ref)
         uses: actions/checkout@v7
         with:
           repository: GetBusbar/busbar
-          # Same engine ref the `ci` job builds against: the base branch on a pull_request (github.ref_name
-          # is '<number>/merge' there), the pushed branch otherwise — so coverage measures the same build.
-          ref: ${{ github.base_ref || github.ref_name }}
+          ref: ${{ steps.ref.outputs.sha }}
           path: busbar
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
