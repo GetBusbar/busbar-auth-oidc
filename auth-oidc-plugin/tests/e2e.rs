@@ -51,7 +51,7 @@ fn plugin_path() -> Option<std::path::PathBuf> {
 }
 
 mod support;
-use support::{spawn_https_fixture, TestKey};
+use support::{Issuer, UNUSED_ISSUER};
 
 /// End-to-end SUCCESS: dlopen the real auth-oidc-plugin cdylib, `open()` it against a config pointing
 /// at a real local HTTPS JWKS fixture (trusted via `ca_cert_pem`), then `authenticate()` a real
@@ -64,8 +64,8 @@ fn load_and_exercise_auth_oidc_plugin_success() {
         return;
     };
 
-    let key = TestKey::generate("test-kid-1");
-    let (jwks_url, cert_pem) = spawn_https_fixture(key.jwks());
+    let key = Issuer::start(UNUSED_ISSUER, "test-kid-1");
+    let (jwks_url, cert_pem) = (key.jwks_url().to_string(), key.cert_pem().to_string());
 
     const ISSUER: &str = "https://oidc-test.invalid/v2.0";
     const AUDIENCE: &str = "api://busbar-client";
@@ -99,7 +99,7 @@ fn load_and_exercise_auth_oidc_plugin_success() {
         "name": "Alice Example",
         "groups": ["11111111-aaaa", "22222222-bbbb"],
     });
-    let token = key.mint(&claims);
+    let token = key.sign(&claims);
 
     match module.authenticate(Some(&token)) {
         busbar_contract::auth::AuthVerdict::Identify(p) => {
@@ -118,8 +118,8 @@ fn load_and_exercise_auth_oidc_plugin_success() {
 
     // A token signed by a DIFFERENT key (same kid) must fail closed over the real ABI too — not just
     // in `busbar-auth-oidc`'s own in-process tests.
-    let forged_key = TestKey::generate("test-kid-1");
-    let forged_token = forged_key.mint(&claims);
+    let forged_key = Issuer::start(UNUSED_ISSUER, "test-kid-1");
+    let forged_token = forged_key.sign(&claims);
     assert!(
         matches!(
             module.authenticate(Some(&forged_token)),
@@ -262,7 +262,7 @@ fn wait_for_admin_ready(
 /// modules are, like store, restart-to-apply — a fresh process is the real mechanism, not an invented
 /// shortcut). This test: boots a real busbar with the admin listener up, installs the built
 /// auth-oidc-plugin cdylib over that live HTTP API, restarts onto `auth.chain: [oidc]` pointing at a
-/// REAL local HTTPS JWKS fixture (the same `TestKey`/`spawn_https_fixture` helpers the direct-ABI test
+/// REAL local HTTPS JWKS fixture (the same `busbar_auth_oidc::testkit::Issuer` the direct-ABI test
 /// above uses — a real self-signed TLS cert, a real ES256 keypair), then drives a REAL data-plane
 /// HTTP request carrying a REAL signed bearer JWT through the live process and confirms it is
 /// authenticated (not 401) — and that a token from the WRONG key is rejected (401), proving the full
@@ -285,8 +285,8 @@ fn install_oidc_plugin_via_admin_api_and_authenticate() {
     }
     let (busbar_bin, pack_bin) = build_real_binaries();
 
-    let key = TestKey::generate("admin-e2e-kid");
-    let (jwks_url, cert_pem) = spawn_https_fixture(key.jwks());
+    let key = Issuer::start(UNUSED_ISSUER, "admin-e2e-kid");
+    let (jwks_url, cert_pem) = (key.jwks_url().to_string(), key.cert_pem().to_string());
     const ISSUER: &str = "https://oidc-admin-e2e.invalid/v2.0";
     const AUDIENCE: &str = "api://busbar-admin-e2e";
 
@@ -456,7 +456,7 @@ fn install_oidc_plugin_via_admin_api_and_authenticate() {
         "sub": "admin-e2e-subject",
         "groups": ["11111111-aaaa"],
     });
-    let good_token = key.mint(&claims);
+    let good_token = key.sign(&claims);
 
     let resp = client
         .post(format!("http://{data_addr2}/v1/chat/completions"))
@@ -488,8 +488,8 @@ fn install_oidc_plugin_via_admin_api_and_authenticate() {
     );
 
     // A token from the WRONG key (same iss/aud/kid) must be rejected by the live installed plugin.
-    let forged_key = TestKey::generate("admin-e2e-kid");
-    let forged_token = forged_key.mint(&claims);
+    let forged_key = Issuer::start(UNUSED_ISSUER, "admin-e2e-kid");
+    let forged_token = forged_key.sign(&claims);
     let forged_resp = client
         .post(format!("http://{data_addr2}/v1/chat/completions"))
         .bearer_auth(&forged_token)

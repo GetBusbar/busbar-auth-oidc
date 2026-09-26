@@ -24,6 +24,16 @@ base64 = "0.22"
 # `blocking` feature reuses that major (no second HTTP stack); the auth path is synchronous.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking"] }
 tracing = "0.1"
+# `testkit` only (off by default, never in a shipped build): the local issuer's certificate and its
+# loopback JWKS endpoint (src/testkit.rs). The same rustls 0.23 / ring stack reqwest already links.
+rcgen = { version = "0.14", optional = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
+
+[features]
+# A LOCAL OIDC ISSUER for tests of hosts that load this module (busbar's auth-chain and stdio-serve
+# proofs, this repo's own conformance and e2e tests): an ES256 key, its JWKS served over a
+# certificate-verified loopback endpoint, and genuinely signed tokens. Off by default.
+testkit = ["dep:rcgen", "dep:rustls"]
 
 [dev-dependencies]
 # ring's ECDSA keygen/signing lets the tests mint real ES256 tokens + a matching JWKS fixture with no

@@ -23,16 +23,14 @@ tracing = "0.1"
 [dev-dependencies]
 # Dev-only, same pinned busbar rev as busbar-contract (one busbar source resolves). The linked +
 # dropped-in conformance test (tests/conformance.rs) signs, packs, scans and opens the built cdylib
-# over the REAL loader; the end-to-end
-# test loads the built cdylib over the real loader ABI seam, mints a real ES256 JWT, and serves a real
-# JWKS document over a real local TLS listener, so busbar-auth-oidc's own ReqwestFetcher does a genuine
-# HTTPS fetch+verify rather than a stub. Same rustls/rcgen/ring versions the monorepo pins for this
-# exact test (crates/plugin-loader's dev-dependencies).
+# over the REAL loader; the end-to-end test loads the built cdylib over the real loader ABI seam.
 busbar-plugin-loader = { git = "https://github.com/GetBusbar/busbar", rev = "8b7b6473f47f8d37ae60839c74cfe6a9b64a1dc9" }
-ring = "0.17"
+# Both tests verify REAL ES256 tokens against a REAL JWKS served over a certificate-verified loopback
+# endpoint: the logic crate's own local issuer (`busbar_auth_oidc::testkit`), so
+# busbar-auth-oidc's ReqwestFetcher does a genuine fetch + verify rather than a stub.
+busbar-auth-oidc = { path = "../auth-oidc", features = ["testkit"] }
+# The e2e decodes the login cookie (base64url JSON) the live admin install flow sets.
 base64 = "0.22"
-rcgen = "0.14"
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 # For the real-server admin-API install + auth-chain e2e test (tests/e2e.rs's
 # install_oidc_plugin_via_admin_api_and_authenticate): packs the plugin cdylib with the real
 # `busbar-plugin-pack` BINARY (spawned as a subprocess, same as store-postgres/store-sqlite's own

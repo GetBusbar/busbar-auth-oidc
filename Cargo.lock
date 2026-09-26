@@ -127,8 +127,10 @@ version = "1.0.0"
 dependencies = [
  "base64",
  "busbar-contract",
+ "rcgen",
  "reqwest",
  "ring",
+ "rustls",
  "serde",
  "serde_json",
  "tracing",
@@ -142,10 +144,7 @@ dependencies = [
  "busbar-auth-oidc",
  "busbar-contract",
  "busbar-plugin-loader",
- "rcgen",
  "reqwest",
- "ring",
- "rustls",
  "serde_json",
  "tracing",
 ]

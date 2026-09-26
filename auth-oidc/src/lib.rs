@@ -41,6 +41,8 @@ pub mod cache;
 pub mod jwks;
 pub mod jwt;
 mod reqwest_fetcher;
+#[cfg(feature = "testkit")]
+pub mod testkit;
 
 pub use cache::{JwksCache, JwksFetcher};
 pub use reqwest_fetcher::ReqwestFetcher;

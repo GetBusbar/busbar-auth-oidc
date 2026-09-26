@@ -25,7 +25,7 @@ mod support;
 use busbar_contract::auth::{AuthPlugin, BeginLogin, CompleteLogin, LoginHttpResponse};
 use busbar_plugin_loader::sign::{sign, Manifest, SigningKey, TrustPolicy};
 use busbar_plugin_loader::{LinkedPlugin, PluginRegistry};
-use support::{spawn_https_fixture, TestKey};
+use support::{Issuer, UNUSED_ISSUER};
 
 /// The module's registry name and alias (what an operator's `identity-providers:` names).
 const NAME: &str = "busbar-auth-oidc";
@@ -140,7 +140,7 @@ struct Tokens {
     wrong_audience: String,
 }
 
-fn tokens(key: &TestKey) -> Tokens {
+fn tokens(key: &Issuer) -> Tokens {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -157,9 +157,9 @@ fn tokens(key: &TestKey) -> Tokens {
         })
     };
     Tokens {
-        valid: key.mint(&claims(AUDIENCE)),
-        forged: TestKey::generate("conformance-kid").mint(&claims(AUDIENCE)),
-        wrong_audience: key.mint(&claims("api://someone-else")),
+        valid: key.sign(&claims(AUDIENCE)),
+        forged: Issuer::start(UNUSED_ISSUER, "conformance-kid").sign(&claims(AUDIENCE)),
+        wrong_audience: key.sign(&claims("api://someone-else")),
     }
 }
 
@@ -231,8 +231,8 @@ fn transcript(registry: &PluginRegistry, cfg: &str, t: &Tokens) -> Vec<String> {
 /// arms show the comparison is not vacuous.
 #[test]
 fn the_linked_and_the_dropped_in_oidc_module_are_one_module() {
-    let key = TestKey::generate("conformance-kid");
-    let (jwks_url, cert_pem) = spawn_https_fixture(key.jwks());
+    let key = Issuer::start(UNUSED_ISSUER, "conformance-kid");
+    let (jwks_url, cert_pem) = (key.jwks_url().to_string(), key.cert_pem().to_string());
     let cfg = config(&jwks_url, &cert_pem, AUDIENCE);
     let t = tokens(&key);
     let lib = cdylib();
