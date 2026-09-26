@@ -36,7 +36,11 @@ const JWKS_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 /// ```
 ///
 /// `jwks_url` is optional — when omitted it is discovered from the issuer's OIDC discovery document.
-fn open(cfg: &str) -> Result<Box<dyn AuthPlugin>, String> {
+///
+/// PUBLIC because it is the COMPILED-IN constructor (DECISIONS #2): a build that links this crate
+/// opens the module through this function and drives it through the `dispatch_compiled_in` twin the
+/// export macro emits — the same op-dispatch the cdylib's `busbar_call` runs.
+pub fn open(cfg: &str) -> Result<Box<dyn AuthPlugin>, String> {
     let mut cfg: OidcConfig = if cfg.trim().is_empty() {
         return Err("oidc plugin requires config (issuer, audience); none provided".to_string());
     } else {
