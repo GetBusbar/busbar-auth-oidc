@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The **OIDC auth module as a droppable busbar plugin** — a `cdylib` that exports the auth C ABI
-//! ([`busbar_plugin::cold::auth`]). Build it, drop the resulting `.so`/`.dll`/`.dylib` into the engine's
+//! ([`busbar_contract::abi::cold::auth`]). Build it, drop the resulting `.so`/`.dll`/`.dylib` into the engine's
 //! plugins folder, define it once under `identity-providers:` (`module: oidc` plus its `settings:`),
 //! and reference that name from `auth.chain`; the engine loads it in-process at boot over the auth
 //! ABI.
@@ -14,10 +14,10 @@
 //! loader resolves (`busbar_abi`, `busbar_plugin_kind`, `busbar_open`, `busbar_call`, `busbar_free`,
 //! `busbar_close`).
 
-use busbar_api::AuthPlugin;
 use busbar_auth_oidc::{
     resolve_jwks_url, resolve_login_endpoints, OidcConfig, OidcModule, ReqwestFetcher,
 };
+use busbar_contract::auth::AuthPlugin;
 use std::time::Duration;
 
 /// The bound on a JWKS / discovery HTTP fetch. Generous enough for a cold DNS + TLS handshake to a
@@ -98,7 +98,7 @@ fn open(cfg: &str) -> Result<Box<dyn AuthPlugin>, String> {
     )))
 }
 
-busbar_plugin_sdk::export_login_plugin!(open);
+busbar_contract::export_login_plugin!(open);
 
 #[cfg(test)]
 mod tests;

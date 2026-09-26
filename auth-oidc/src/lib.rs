@@ -3,7 +3,7 @@
 
 //! **OIDC auth module** for busbar — the first identity-provider auth PLUGIN. Validates an OpenID
 //! Connect JWT (ID or access token) a caller presents as its bearer credential and maps it to a
-//! [`busbar_api::Principal`]: verify the signature against the provider's JWKS, check `iss`/`aud`/
+//! [`busbar_contract::auth::Principal`]: verify the signature against the provider's JWKS, check `iss`/`aud`/
 //! `exp`/`nbf`, and read the configured role claim (`groups` by default, or `roles` for Entra
 //! app-roles) into the principal's ROLES. busbar's own `auth.role_bindings:` config
 //! then resolves those roles to governance grants and admin scope — the module asserts identity
@@ -29,8 +29,8 @@
 //!   silently degrade: [`OidcVerifier`] REJECTS such a token with a precise error pointing the
 //!   operator at **app-roles** (`role_claim: roles`), whose count is bounded.
 
-use busbar_api::{
-    AuthModule, AuthOutcome, BeginLogin, CompleteLogin, LoginHop, LoginHttpResponse, LoginModule,
+use busbar_contract::auth::{
+    AuthModule, AuthVerdict, BeginLogin, CompleteLogin, LoginHop, LoginHttpResponse, LoginModule,
     LoginOutcome, Principal,
 };
 use serde::Deserialize;
@@ -391,7 +391,7 @@ fn extract_string_list(v: Option<&Value>) -> Vec<String> {
     }
 }
 
-/// The runtime OIDC auth module: a verifier + a JWKS cache. Implements [`busbar_api::AuthModule`].
+/// The runtime OIDC auth module: a verifier + a JWKS cache. Implements [`busbar_contract::auth::AuthModule`].
 pub struct OidcModule {
     verifier: OidcVerifier,
     jwks: JwksCache,
@@ -447,22 +447,22 @@ impl OidcModule {
             None => return LoginOutcome::Reject,
         };
         match self.verify(id_token, now_unix, now_mono) {
-            AuthOutcome::Identify(p) => LoginOutcome::Identify(p),
+            AuthVerdict::Identify(p) => LoginOutcome::Identify(p),
             // A non-JWT / bad-sig / bad-claim id_token in a login callback is a hard failure — unlike
             // the verify chain, there is no "next module" to defer a `Pass` to. Enumerated (not `_`)
-            // so a future `AuthOutcome` variant is a compile error here, forcing a deliberate mapping.
-            AuthOutcome::Reject | AuthOutcome::Pass => LoginOutcome::Reject,
+            // so a future `AuthVerdict` variant is a compile error here, forcing a deliberate mapping.
+            AuthVerdict::Reject | AuthVerdict::Pass => LoginOutcome::Reject,
         }
     }
 
-    /// The full verification of one presented bearer token → an [`AuthOutcome`]. Split from
+    /// The full verification of one presented bearer token → an [`AuthVerdict`]. Split from
     /// `authenticate` so it can be driven with an injected `now` in tests.
-    fn verify(&self, token: &str, now_unix: i64, now_mono: Instant) -> AuthOutcome {
+    fn verify(&self, token: &str, now_unix: i64, now_mono: Instant) -> AuthVerdict {
         let parts = match jwt::split(token) {
             Ok(p) => p,
             // Not a well-formed JWT ⇒ not our credential shape. `Pass` so a later chain module (or
             // the mode default) can handle it — a random opaque bearer is not an OIDC failure.
-            Err(_) => return AuthOutcome::Pass,
+            Err(_) => return AuthVerdict::Pass,
         };
         let kid = parts.header.kid.clone().unwrap_or_default();
 
@@ -473,22 +473,22 @@ impl OidcModule {
             .with_key(&kid, now_mono, |key| jwt::verify_signature(&parts, key))
         {
             tracing::warn!(module = "oidc", error = %e, "OIDC token signature verification failed");
-            return AuthOutcome::Reject;
+            return AuthVerdict::Reject;
         }
 
         let claims = match jwt::claims(&parts) {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!(module = "oidc", error = %e, "OIDC token claims are malformed");
-                return AuthOutcome::Reject;
+                return AuthVerdict::Reject;
             }
         };
 
         match self.verifier.validate_claims(&claims, now_unix) {
-            Ok(principal) => AuthOutcome::Identify(principal),
+            Ok(principal) => AuthVerdict::Identify(principal),
             Err(e) => {
                 tracing::warn!(module = "oidc", error = %e, "OIDC token claim validation failed");
-                AuthOutcome::Reject
+                AuthVerdict::Reject
             }
         }
     }
@@ -499,10 +499,10 @@ impl AuthModule for OidcModule {
         "oidc"
     }
 
-    fn authenticate(&self, candidate: Option<&str>) -> AuthOutcome {
+    fn authenticate(&self, candidate: Option<&str>) -> AuthVerdict {
         let Some(token) = candidate else {
             // No credential presented ⇒ not ours; defer.
-            return AuthOutcome::Pass;
+            return AuthVerdict::Pass;
         };
         self.verify(token, now_unix(), Instant::now())
     }

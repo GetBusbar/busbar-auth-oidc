@@ -1,0 +1,291 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2026 Busbar Inc and contributors
+
+//! **ONE AUTH MODULE, BOTH DOORS, ONE ROW** — the OIDC module's linked + dropped-in conformance
+//! (DECISIONS #2 rule (1): a plugin is compiled in OR dropped in — same contract, same loading
+//! path), run against the busbar rev this repo pins (`.busbar-ref`).
+//!
+//! The module is held two ways at once: LINKED (this crate's `BUSBAR_COLD_ENTRY`, the boundary
+//! `export_login_plugin!` emits and a busbar build that compiles the module in hands the loader,
+//! through `PluginRegistry::link`) and DROPPED IN (this crate's built cdylib, signed first-party
+//! under the SAME statement into a temp `plugins/` directory and found by the loader's scan). Each
+//! arm is opened by the one `open_login` against a REAL local HTTPS JWKS (a self-signed cert trusted
+//! through `ca_cert_pem`) and driven through the same script — real ES256 tokens verified (a valid
+//! one, a forged one, a wrong audience, no credential), the authorize URL, the token-exchange hop,
+//! and the token response verified into an identity — and the two transcripts, with the registry
+//! row each door resolves the name to, must be byte-identical.
+//!
+//! The RED arms are in the same file: the same cdylib opened under a DIFFERENT config is a different
+//! transcript (so the equality is not vacuous), and the same bytes signed as `secret` are refused at
+//! the kind handshake, naming both kinds. A missing cdylib PANICS — this test IS the dropped-in
+//! door's proof, and never skips.
+
+mod support;
+
+use busbar_contract::auth::{AuthPlugin, BeginLogin, CompleteLogin, LoginHttpResponse};
+use busbar_plugin_loader::sign::{sign, Manifest, SigningKey, TrustPolicy};
+use busbar_plugin_loader::{LinkedPlugin, PluginRegistry};
+use support::{spawn_https_fixture, TestKey};
+
+/// The module's registry name and alias (what an operator's `identity-providers:` names).
+const NAME: &str = "busbar-auth-oidc";
+const ALIAS: &str = "oidc";
+
+const ISSUER: &str = "https://oidc-conformance.invalid/v2.0";
+const AUDIENCE: &str = "api://busbar-conformance";
+
+/// The release key the dropped-in arm is signed with, and the policy's first-party key.
+fn release() -> SigningKey {
+    SigningKey::from_bytes(&[11u8; 32])
+}
+
+/// This crate's built cdylib (uplifted or under `deps`, newest wins). A missing artifact is a
+/// failure, never a skip.
+fn cdylib() -> Vec<u8> {
+    let exe = std::env::current_exe().expect("the test binary has a path");
+    let profile = exe
+        .parent()
+        .and_then(|d| d.parent())
+        .expect("target/<profile>");
+    let file = busbar_plugin_loader::plugin_library_filename("busbar_auth_oidc_plugin");
+    let found = [profile.join(&file), profile.join("deps").join(&file)]
+        .into_iter()
+        .filter_map(|p| Some((std::fs::metadata(&p).ok()?.modified().ok()?, p)))
+        .max()
+        .map(|(_, p)| p)
+        .unwrap_or_else(|| panic!("the busbar-auth-oidc-plugin cdylib ({file}) is not built"));
+    std::fs::read(found).expect("read the cdylib")
+}
+
+/// The statement both doors make for the module, as `kind`, at the newest payload schema the
+/// loader speaks for that kind.
+fn statement(kind: &str) -> Manifest {
+    Manifest {
+        name: NAME.into(),
+        alias: ALIAS.into(),
+        kind: kind.into(),
+        version: env!("CARGO_PKG_VERSION").into(),
+        publisher: busbar_plugin_loader::sign::FIRST_PARTY_PUBLISHER.into(),
+        abi_version: *busbar_plugin_loader::supported_abi(kind)
+            .iter()
+            .max()
+            .expect("a payload schema for the kind"),
+        sha256: String::new(),
+        signature: String::new(),
+        description: String::new(),
+        homepage: String::new(),
+        license: String::new(),
+        needs: Default::default(),
+        settings_schema: None,
+        schema_derived: false,
+        host: None,
+        declares: Default::default(),
+    }
+}
+
+/// THE LINKED DOOR: this crate's boundary, registered through `PluginRegistry::link`.
+fn linked() -> PluginRegistry {
+    PluginRegistry::empty()
+        .link(vec![LinkedPlugin::boundary(
+            statement("auth"),
+            &busbar_auth_oidc_plugin::BUSBAR_COLD_ENTRY,
+        )])
+        .expect("the linked door admits the module")
+}
+
+/// THE DROPPED-IN DOOR: `lib` signed first-party under `manifest` into a fresh `plugins/`
+/// directory, scanned under a policy holding the release key.
+fn dropped(tag: &str, manifest: Manifest, lib: &[u8]) -> PluginRegistry {
+    let dir = std::env::temp_dir().join(format!("auth-oidc-conf-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let signed = sign(&release(), manifest, lib);
+    let tarball = busbar_plugin_loader::tarball::package(&signed, "libauth.so", lib).unwrap();
+    std::fs::write(dir.join("auth.tar.gz"), tarball).unwrap();
+    let policy = TrustPolicy {
+        first_party_key: Some(release().verifying_key()),
+        binary_version: env!("CARGO_PKG_VERSION").into(),
+        first_party_floors: Default::default(),
+        first_party_high_water: Default::default(),
+        publishers: Default::default(),
+        allow_unsigned: false,
+        allow_third_party: false,
+        min_versions: Default::default(),
+    };
+    let registry =
+        busbar_plugin_loader::scan_and_validate(&dir, &policy).expect("the signed module scans");
+    let _ = std::fs::remove_dir_all(&dir);
+    registry
+}
+
+/// The operator config: the local JWKS, trusted through its own certificate, and explicit login
+/// endpoints (so `open` performs no discovery).
+fn config(jwks_url: &str, cert_pem: &str, audience: &str) -> String {
+    serde_json::json!({
+        "issuer": ISSUER,
+        "audience": audience,
+        "jwks_url": jwks_url,
+        "ca_cert_pem": cert_pem,
+        "role_claim": "roles",
+        "authorization_endpoint": "https://idp.conformance.invalid/authorize",
+        "token_endpoint": "https://idp.conformance.invalid/token",
+    })
+    .to_string()
+}
+
+/// The tokens the script presents, minted once so both doors judge the same bytes.
+struct Tokens {
+    valid: String,
+    forged: String,
+    wrong_audience: String,
+}
+
+fn tokens(key: &TestKey) -> Tokens {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let claims = |aud: &str| {
+        serde_json::json!({
+            "iss": ISSUER,
+            "aud": aud,
+            "exp": now + 3600,
+            "nbf": now - 10,
+            "sub": "conformance-subject",
+            "name": "Conformance Caller",
+            "roles": ["Gateway.User", "Gateway.Admin"],
+        })
+    };
+    Tokens {
+        valid: key.mint(&claims(AUDIENCE)),
+        forged: TestKey::generate("conformance-kid").mint(&claims(AUDIENCE)),
+        wrong_audience: key.mint(&claims("api://someone-else")),
+    }
+}
+
+/// What one door does with the module opened under `cfg`, as one comparable transcript: the row the
+/// name resolves to (and the row its alias resolves to), then the script's every answer.
+fn transcript(registry: &PluginRegistry, cfg: &str, t: &Tokens) -> Vec<String> {
+    let p = registry.resolve(NAME).expect("the name resolves");
+    let stated = Manifest {
+        sha256: String::new(),
+        signature: String::new(),
+        ..p.manifest.clone()
+    };
+    let by_alias = registry.resolve(ALIAS).map(|a| a.manifest.name.clone());
+    let (module, abi): (Box<dyn AuthPlugin>, u32) = registry
+        .open_login(ALIAS, cfg)
+        .expect("the module opens through its alias");
+    let token_response = |id_token: &str, status: u16| CompleteLogin {
+        token_response: Some(LoginHttpResponse {
+            status,
+            body: serde_json::json!({ "id_token": id_token }).to_string(),
+        }),
+        ..Default::default()
+    };
+    vec![
+        serde_json::to_string(&stated).unwrap(),
+        format!("alias -> {by_alias:?}; abi {abi}"),
+        format!("name={} cacheable={}", module.name(), module.cacheable()),
+        format!("login_kind={:?}", module.login_kind()),
+        format!("{:?}", module.authenticate(Some(&t.valid))),
+        format!("{:?}", module.authenticate(Some(&t.forged))),
+        format!("{:?}", module.authenticate(Some(&t.wrong_audience))),
+        format!("{:?}", module.authenticate(Some("not-a-jwt"))),
+        format!("{:?}", module.authenticate(None)),
+        format!(
+            "{:?}",
+            module.begin_login(&BeginLogin {
+                redirect_uri: "https://node.example/auth/token".into(),
+                state: "conformance-state".into(),
+                code_challenge: "conformance-challenge".into(),
+                nonce: Some("conformance-nonce".into()),
+                scopes: vec!["profile".into()],
+            })
+        ),
+        format!(
+            "{:?}",
+            module.complete_login(&CompleteLogin {
+                code: Some("the-code".into()),
+                redirect_uri: Some("https://node.example/auth/token".into()),
+                code_verifier: Some("the-verifier".into()),
+                ..Default::default()
+            })
+        ),
+        format!(
+            "{:?}",
+            module.complete_login(&token_response(&t.valid, 200))
+        ),
+        format!(
+            "{:?}",
+            module.complete_login(&token_response(&t.forged, 200))
+        ),
+        format!(
+            "{:?}",
+            module.complete_login(&token_response(&t.valid, 400))
+        ),
+    ]
+}
+
+/// The OIDC module registers ONE row and behaves as ONE module through either door — and the RED
+/// arms show the comparison is not vacuous.
+#[test]
+fn the_linked_and_the_dropped_in_oidc_module_are_one_module() {
+    let key = TestKey::generate("conformance-kid");
+    let (jwks_url, cert_pem) = spawn_https_fixture(key.jwks());
+    let cfg = config(&jwks_url, &cert_pem, AUDIENCE);
+    let t = tokens(&key);
+    let lib = cdylib();
+
+    let linked = transcript(&linked(), &cfg, &t);
+    let dropped_registry = dropped("dropped", statement("auth"), &lib);
+    let dropped_in = transcript(&dropped_registry, &cfg, &t);
+    assert_eq!(linked, dropped_in, "the two doors are not one module");
+
+    // Not a vacuous pass: the script did what the module is for — the valid token and the valid
+    // token response identified the caller with its roles, and the forged token was rejected.
+    let text = linked.join("\n");
+    assert!(
+        linked[11].starts_with("Identify(") && linked[11].contains("oidc:conformance-subject"),
+        "{text}"
+    );
+    assert!(
+        linked[4].starts_with("Identify(") && linked[4].contains("oidc:conformance-subject"),
+        "{text}"
+    );
+    assert!(linked[4].contains("\"Gateway.Admin\""), "{text}");
+    assert_eq!(linked[5], "Reject", "{text}");
+    assert!(
+        linked[9].starts_with("Authorize(\"https://idp.conformance.invalid/authorize?"),
+        "{text}"
+    );
+    assert!(
+        linked[10].starts_with("Exchange(") && linked[10].contains("idp.conformance.invalid/token"),
+        "{text}"
+    );
+
+    // RED ARM 1: the same cdylib under a different operator config (another audience) is a
+    // different transcript — the token the linked door identified is now refused.
+    let other = transcript(
+        &dropped_registry,
+        &config(&jwks_url, &cert_pem, "api://someone-else"),
+        &t,
+    );
+    assert_ne!(
+        other, linked,
+        "a different config must not read as the same module"
+    );
+
+    // RED ARM 2: the same bytes signed as `secret` are refused at the kind handshake.
+    let wrong = dropped("as-secret", statement("secret"), &lib);
+    let e = match wrong.open_secret(ALIAS, &cfg) {
+        Ok(_) => panic!("an auth library signed as secret must not open"),
+        Err(e) => e,
+    };
+    assert!(
+        e.contains(&format!(
+            "plugin '{NAME}' exports kind 'auth' but is being loaded as 'secret'"
+        )),
+        "{e}"
+    );
+}

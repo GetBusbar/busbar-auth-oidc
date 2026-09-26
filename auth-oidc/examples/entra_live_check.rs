@@ -15,8 +15,8 @@
 //!
 //! Run: `cargo run -p busbar-auth-oidc --example entra_live_check`
 
-use busbar_api::AuthModule;
 use busbar_auth_oidc::{resolve_jwks_url, OidcConfig, OidcModule, ReqwestFetcher};
+use busbar_contract::auth::AuthModule;
 use std::time::Duration;
 
 fn env_or_skip(key: &str) -> Option<String> {
@@ -93,7 +93,7 @@ fn main() {
     let outcome = module.authenticate(Some(&id_token));
     println!("real Entra token outcome: {outcome:?}");
     assert!(
-        matches!(outcome, busbar_api::AuthOutcome::Identify(_)),
+        matches!(outcome, busbar_contract::auth::AuthVerdict::Identify(_)),
         "a real, freshly-issued Entra token must verify as Identify, got: {outcome:?}"
     );
 
@@ -119,7 +119,7 @@ fn main() {
     let tampered_outcome = module2.authenticate(Some(&tampered));
     println!("tampered token outcome: {tampered_outcome:?}");
     assert!(
-        matches!(tampered_outcome, busbar_api::AuthOutcome::Reject),
+        matches!(tampered_outcome, busbar_contract::auth::AuthVerdict::Reject),
         "a tampered signature over a real Entra-issued token must be rejected, got: {tampered_outcome:?}"
     );
 

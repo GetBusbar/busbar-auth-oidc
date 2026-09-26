@@ -5,14 +5,14 @@ version = "1.0.0"
 publish = false            # internal workspace crate; never goes to crates.io
 edition = "2021"
 rust-version = "1.97"
-description = "The OIDC auth module for busbar: verify an OpenID Connect JWT (JWKS signature + iss/aud/exp/nbf) and map its role/group claim to a Principal. Implements busbar_api::AuthModule. Crypto on ring (no jsonwebtoken/rsa)."
+description = "The OIDC auth module for busbar: verify an OpenID Connect JWT (JWKS signature + iss/aud/exp/nbf) and map its role/group claim to a Principal. Implements busbar_contract::auth::AuthModule. Crypto on ring (no jsonwebtoken/rsa)."
 license = "Apache-2.0"
 
 [dependencies]
-# INTERIM: busbar isn't public yet, so this is a local path dependency into a sibling checkout of
-# the monorepo. Once busbar ships publicly this should become a git (pinned rev/tag) or crates.io
-# dependency instead — same pattern already applied to busbar-plugin-sdk in ../auth-oidc-plugin.
-busbar-api = { path = "../../busbar/crates/api" }
+# The ONE busbar crate a plugin names (#40: contract only). Pinned by git rev to the busbar commit in
+# `.busbar-ref`; a busbar build that links this crate `[patch]`es the busbar git source to its own
+# tree, so ONE copy of the contract links.
+busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "8b7b6473f47f8d37ae60839c74cfe6a9b64a1dc9" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Signature verification on the workspace's existing crypto backend — NO jsonwebtoken/rsa (avoids

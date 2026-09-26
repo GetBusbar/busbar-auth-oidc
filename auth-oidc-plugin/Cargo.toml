@@ -13,25 +13,22 @@ crate-type = ["cdylib", "rlib"]   # cdylib for the C ABI delivery; rlib so the u
 
 [dependencies]
 # busbar-auth-oidc is now a SAME-REPO sibling crate (this plugin brings 100% of what it needs — the
-# real logic lives here, not in busbar). Only busbar-api/busbar-plugin-sdk still reach into busbar
-# — INTERIM local path dependencies into a sibling checkout, since busbar isn't public yet; once it
-# ships publicly these become git (pinned rev/tag) or crates.io dependencies instead.
-busbar-api = { path = "../../busbar/crates/api" }
-busbar-plugin-sdk = { path = "../../busbar/crates/plugin-sdk" }
+# real logic lives here, not in busbar). The one busbar crate is busbar-contract (#40), whose
+# `abi::sdk` carries the export macro — pinned by git rev to `.busbar-ref` field 1.
+busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "8b7b6473f47f8d37ae60839c74cfe6a9b64a1dc9" }
 busbar-auth-oidc = { path = "../auth-oidc" }
 serde_json = "1"
 tracing = "0.1"
 
 [dev-dependencies]
-# INTERIM local path deps into busbar, same rationale as above — these are dev-only. The end-to-end
+# Dev-only, same pinned busbar rev as busbar-contract (one busbar source resolves). The linked +
+# dropped-in conformance test (tests/conformance.rs) signs, packs, scans and opens the built cdylib
+# over the REAL loader; the end-to-end
 # test loads the built cdylib over the real loader ABI seam, mints a real ES256 JWT, and serves a real
 # JWKS document over a real local TLS listener, so busbar-auth-oidc's own ReqwestFetcher does a genuine
 # HTTPS fetch+verify rather than a stub. Same rustls/rcgen/ring versions the monorepo pins for this
 # exact test (crates/plugin-loader's dev-dependencies).
-busbar-plugin-loader = { path = "../../busbar/crates/plugin-loader" }
-# The COLD plugin ABI moved from the old `busbar-plugin-abi` crate into `busbar-plugin::cold` in
-# 1.6.0; tests/e2e.rs uses `busbar_plugin::cold::kind` for the `kind: auth` load-seam constants.
-busbar-plugin = { path = "../../busbar/crates/busbar-plugin" }
+busbar-plugin-loader = { git = "https://github.com/GetBusbar/busbar", rev = "8b7b6473f47f8d37ae60839c74cfe6a9b64a1dc9" }
 ring = "0.17"
 base64 = "0.22"
 rcgen = "0.14"

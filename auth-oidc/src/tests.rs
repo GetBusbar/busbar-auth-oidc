@@ -157,7 +157,7 @@ fn valid_token_identifies_with_groups() {
     let now = 1_700_000_000;
     let token = key.mint(&base_claims(now));
     match m.verify(&token, now, Instant::now()) {
-        AuthOutcome::Identify(p) => {
+        AuthVerdict::Identify(p) => {
             assert_eq!(p.id, "oidc:object-guid");
             assert_eq!(p.name.as_deref(), Some("Alice Contoso"));
             assert_eq!(p.roles, vec!["11111111-aaaa", "22222222-bbbb"]);
@@ -175,7 +175,7 @@ fn app_roles_claim_maps_to_groups() {
     claims["roles"] = serde_json::json!(["Billing.Reader", "Billing.Admin"]);
     let token = key.mint(&claims);
     match m.verify(&token, now, Instant::now()) {
-        AuthOutcome::Identify(p) => assert_eq!(p.roles, vec!["Billing.Reader", "Billing.Admin"]),
+        AuthVerdict::Identify(p) => assert_eq!(p.roles, vec!["Billing.Reader", "Billing.Admin"]),
         other => panic!("expected Identify, got {other:?}"),
     }
 }
@@ -190,7 +190,7 @@ fn bad_signature_is_rejected() {
     let token = other.mint(&base_claims(now));
     assert!(matches!(
         m.verify(&token, now, Instant::now()),
-        AuthOutcome::Reject
+        AuthVerdict::Reject
     ));
 }
 
@@ -209,7 +209,7 @@ fn tampered_payload_is_rejected() {
     let tampered = format!("{}.{}.{}", segs[0], forged_payload, segs[2]);
     assert!(matches!(
         m.verify(&tampered, now, Instant::now()),
-        AuthOutcome::Reject
+        AuthVerdict::Reject
     ));
 }
 
@@ -300,7 +300,7 @@ fn valid_rs256_token_identifies() {
     let now = 1_700_000_000;
     let token = key.mint(&base_claims(now));
     match m.verify(&token, now, Instant::now()) {
-        AuthOutcome::Identify(p) => {
+        AuthVerdict::Identify(p) => {
             assert_eq!(p.id, "oidc:object-guid");
             assert_eq!(p.roles, vec!["11111111-aaaa", "22222222-bbbb"]);
         }
@@ -317,7 +317,7 @@ fn bad_rs256_signature_is_rejected() {
     let now = 1_700_000_000;
     let token = wrong.mint(&base_claims(now));
     assert!(
-        matches!(m.verify(&token, now, Instant::now()), AuthOutcome::Reject),
+        matches!(m.verify(&token, now, Instant::now()), AuthVerdict::Reject),
         "an RS256 token signed by the wrong RSA key must be rejected"
     );
 }
@@ -338,7 +338,7 @@ fn tampered_rs256_payload_is_rejected() {
     assert!(
         matches!(
             m.verify(&tampered, now, Instant::now()),
-            AuthOutcome::Reject
+            AuthVerdict::Reject
         ),
         "a tampered payload under a valid RS256 header must be rejected"
     );
@@ -449,7 +449,7 @@ fn non_jwt_bearer_passes() {
     // An opaque non-JWT bearer is not our credential shape ⇒ Pass (defer to the next chain module).
     assert!(matches!(
         m.verify("sk-opaque-token", 1_700_000_000, Instant::now()),
-        AuthOutcome::Pass
+        AuthVerdict::Pass
     ));
 }
 
@@ -457,7 +457,7 @@ fn non_jwt_bearer_passes() {
 fn no_credential_passes() {
     let key = TestKey::generate(KID);
     let m = module_with(&key, "groups");
-    assert!(matches!(m.authenticate(None), AuthOutcome::Pass));
+    assert!(matches!(m.authenticate(None), AuthVerdict::Pass));
 }
 
 // ── kid rotation ────────────────────────────────────────────────────────────────────────────────
@@ -484,7 +484,7 @@ fn kid_rotation_triggers_bounded_refetch() {
     let tok_old = old.mint(&base_claims(now));
     assert!(matches!(
         m.verify(&tok_old, now, t0),
-        AuthOutcome::Identify(_)
+        AuthVerdict::Identify(_)
     ));
     assert_eq!(fetcher.calls(), 1);
 
@@ -505,7 +505,7 @@ fn kid_rotation_triggers_bounded_refetch() {
     // test claims to exercise.
     let tok_new = new.mint(&base_claims(now));
     match m.verify(&tok_new, now, t0 + Duration::from_secs(61)) {
-        AuthOutcome::Identify(p) => assert_eq!(p.id, "oidc:object-guid"),
+        AuthVerdict::Identify(p) => assert_eq!(p.id, "oidc:object-guid"),
         other => panic!("expected Identify after rotation, got {other:?}"),
     }
     assert_eq!(fetcher.calls(), 2, "exactly one refetch for the rotation");
@@ -516,7 +516,7 @@ fn kid_rotation_triggers_bounded_refetch() {
     let tok_ghost = ghost.mint(&base_claims(now));
     assert!(matches!(
         m.verify(&tok_ghost, now, t0 + Duration::from_secs(62)),
-        AuthOutcome::Reject
+        AuthVerdict::Reject
     ));
     assert_eq!(fetcher.calls(), 2, "rate limit held off a second refetch");
 }
@@ -531,7 +531,7 @@ fn unknown_kid_after_refetch_is_rejected() {
     let token = bogus.mint(&base_claims(now));
     assert!(matches!(
         m.verify(&token, now, Instant::now()),
-        AuthOutcome::Reject
+        AuthVerdict::Reject
     ));
 }
 

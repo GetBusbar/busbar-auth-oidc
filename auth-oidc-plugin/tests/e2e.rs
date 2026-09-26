@@ -11,7 +11,7 @@
 //! This is the only over-the-ABI coverage of the `kind: auth` dlopen seam, and it lives here rather
 //! than in the loader so it travels with the plugin it exercises.
 
-use busbar_plugin::cold::kind as abi_kind;
+use busbar_contract::abi::cold::kind as abi_kind;
 use busbar_plugin_loader::{auth::load_auth_from_bytes, plugin_library_filename};
 
 /// Locate the built `busbar_auth_oidc_plugin` cdylib in the target dir (mirrors the loader's own
@@ -50,122 +50,13 @@ fn plugin_path() -> Option<std::path::PathBuf> {
     candidate
 }
 
-/// Install ring as the process-default rustls `CryptoProvider`, once. Idempotent: an already-installed
-/// error means some other test (or the plugin's own reqwest/rustls stack under the SAME test binary)
-/// already installed one; since everything here is ring, that's fine.
-fn install_ring_provider_once() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
-}
-
-/// A minimal real HTTPS server: one self-signed cert, one background thread, one fixed response body
-/// served to every request on every path (the test controls exactly what URL it configures, so
-/// path-routing logic would be pure overhead). No framework — just `rustls` over a blocking
-/// `TcpStream`, which is all `busbar_auth_oidc::ReqwestFetcher`'s blocking client needs to complete a
-/// real TLS handshake, request, and response. Returns `(https url to the served body, the server's
-/// cert PEM to trust via the plugin's optional `ca_cert_pem` config)`.
-fn spawn_https_fixture(body: String) -> (String, String) {
-    install_ring_provider_once();
-
-    let cert_key = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_string()])
-        .expect("generate self-signed cert");
-    let cert_pem = cert_key.cert.pem();
-    let cert_der = cert_key.cert.der().clone();
-    use rustls::pki_types::pem::PemObject;
-    let key_der = rustls::pki_types::PrivateKeyDer::from_pem_slice(
-        cert_key.signing_key.serialize_pem().as_bytes(),
-    )
-    .expect("parse generated private key");
-
-    let server_config = rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(vec![cert_der], key_der)
-        .expect("build TLS server config");
-    let server_config = std::sync::Arc::new(server_config);
-
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral test port");
-    let port = listener.local_addr().expect("local_addr").port();
-
-    std::thread::spawn(move || {
-        for stream in listener.incoming() {
-            let Ok(stream) = stream else { continue };
-            let Ok(conn) = rustls::ServerConnection::new(server_config.clone()) else {
-                continue;
-            };
-            let mut tls = rustls::StreamOwned::new(conn, stream);
-            let mut buf = [0u8; 4096];
-            // Drive the handshake + read whatever of the request arrives; the response below doesn't
-            // depend on the request content (fixed body, any path), so a short/partial read is fine —
-            // we only need enough I/O to complete the handshake.
-            let _ = std::io::Read::read(&mut tls, &mut buf);
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                body.len()
-            );
-            let _ = std::io::Write::write_all(&mut tls, response.as_bytes());
-            let _ = std::io::Write::write_all(&mut tls, body.as_bytes());
-            let _ = std::io::Write::flush(&mut tls);
-        }
-    });
-
-    (format!("https://127.0.0.1:{port}/jwks"), cert_pem)
-}
-
-/// A ring ES256 signer, mirroring `busbar-auth-oidc`'s own test fixture
-/// (`crates/auth-oidc/src/tests.rs::TestKey`) so this test mints and verifies REAL tokens rather than
-/// stubbing the crypto.
-struct TestKey {
-    kp: ring::signature::EcdsaKeyPair,
-    rng: ring::rand::SystemRandom,
-    kid: &'static str,
-}
-impl TestKey {
-    fn generate(kid: &'static str) -> Self {
-        let rng = ring::rand::SystemRandom::new();
-        let pkcs8 = ring::signature::EcdsaKeyPair::generate_pkcs8(
-            &ring::signature::ECDSA_P256_SHA256_FIXED_SIGNING,
-            &rng,
-        )
-        .unwrap();
-        let kp = ring::signature::EcdsaKeyPair::from_pkcs8(
-            &ring::signature::ECDSA_P256_SHA256_FIXED_SIGNING,
-            pkcs8.as_ref(),
-            &rng,
-        )
-        .unwrap();
-        Self { kp, rng, kid }
-    }
-
-    fn jwks(&self) -> String {
-        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-        use ring::signature::KeyPair;
-        let pt = self.kp.public_key().as_ref();
-        assert_eq!(pt[0], 0x04, "uncompressed point");
-        let x = URL_SAFE_NO_PAD.encode(&pt[1..33]);
-        let y = URL_SAFE_NO_PAD.encode(&pt[33..65]);
-        serde_json::json!({
-            "keys": [{
-                "kty": "EC", "crv": "P-256", "kid": self.kid, "x": x, "y": y, "use": "sig", "alg": "ES256"
-            }]
-        })
-        .to_string()
-    }
-
-    fn mint(&self, claims: &serde_json::Value) -> String {
-        use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-        let header = serde_json::json!({ "alg": "ES256", "typ": "JWT", "kid": self.kid });
-        let h = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).unwrap());
-        let p = URL_SAFE_NO_PAD.encode(serde_json::to_vec(claims).unwrap());
-        let signing_input = format!("{h}.{p}");
-        let sig = self.kp.sign(&self.rng, signing_input.as_bytes()).unwrap();
-        let s = URL_SAFE_NO_PAD.encode(sig.as_ref());
-        format!("{signing_input}.{s}")
-    }
-}
+mod support;
+use support::{spawn_https_fixture, TestKey};
 
 /// End-to-end SUCCESS: dlopen the real auth-oidc-plugin cdylib, `open()` it against a config pointing
 /// at a real local HTTPS JWKS fixture (trusted via `ca_cert_pem`), then `authenticate()` a real
 /// ES256-signed JWT over the C ABI and confirm the identity + mapped groups come back correctly
-/// through `DynAuth`/`AuthOutcome::Identify`.
+/// through `DynAuth`/`AuthVerdict::Identify`.
 #[test]
 fn load_and_exercise_auth_oidc_plugin_success() {
     let Some(path) = plugin_path() else {
@@ -211,7 +102,7 @@ fn load_and_exercise_auth_oidc_plugin_success() {
     let token = key.mint(&claims);
 
     match module.authenticate(Some(&token)) {
-        busbar_api::AuthOutcome::Identify(p) => {
+        busbar_contract::auth::AuthVerdict::Identify(p) => {
             // No `oid` claim in this fixture, so the IMMUTABLE `sub` is the identity of record —
             // `preferred_username` is display-only now, never identity (see lib.rs's subject-claim
             // precedence: oid/sub only, mutable claims are name-fallback, never id-fallback).
@@ -232,35 +123,40 @@ fn load_and_exercise_auth_oidc_plugin_success() {
     assert!(
         matches!(
             module.authenticate(Some(&forged_token)),
-            busbar_api::AuthOutcome::Reject
+            busbar_contract::auth::AuthVerdict::Reject
         ),
         "a token signed by the wrong key must be rejected across the real ABI"
     );
 }
 
-/// The sibling busbar checkout's root (same convention `store-postgres`/`store-sqlite`'s own e2e
-/// tests already use for this).
+/// The busbar checkout the live e2e builds the REAL `busbar` and `busbar-plugin-pack` binaries from:
+/// `BUSBAR_CHECKOUT`, a checkout of GetBusbar/busbar at `.busbar-ref` field 1 (this repo's CI `e2e` job
+/// checks it out and sets the variable). This repo builds against busbar by git rev, not a sibling
+/// path, so the binaries' source is named explicitly. Unset ⇒ the live leg cannot run, and says so.
 fn busbar_root() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../busbar")
+    let dir = std::env::var_os("BUSBAR_CHECKOUT").expect(
+        "BUSBAR_CHECKOUT is unset: the live e2e builds the real busbar binaries from a checkout of \
+         GetBusbar/busbar at .busbar-ref (ci.yml `e2e` sets it)",
+    );
+    std::path::PathBuf::from(dir)
         .canonicalize()
-        .expect("sibling busbar checkout must exist (see Cargo.toml path deps)")
+        .expect("BUSBAR_CHECKOUT names an existing busbar checkout")
 }
 
 /// Build (once, cached by cargo) and return the real `busbar` and `busbar-plugin-pack` binaries from
 /// the sibling busbar checkout — never a fixture, the exact binaries a real release ships.
 fn build_real_binaries() -> (std::path::PathBuf, std::path::PathBuf) {
     let root = busbar_root();
-    // Two invocations, exactly as plugin-ci.yml builds them: in busbar 1.6.0 `busbar-plugin-pack` is
-    // a feature-gated bin of the `busbar-plugin-sdk` package (`--features pack`), not a package of
-    // its own, and building it separately keeps the `pack` feature out of the `busbar` build.
+    // Two invocations: in busbar 1.6.0 `busbar-plugin-pack` is a feature-gated bin of the
+    // `busbar-plugin-loader` package (`--features pack`), not a package of its own, and building it
+    // separately keeps the `pack` feature out of the `busbar` build.
     for args in [
         &["build", "--release", "-p", "busbar", "--bin", "busbar"][..],
         &[
             "build",
             "--release",
             "-p",
-            "busbar-plugin-sdk",
+            "busbar-plugin-loader",
             "--features",
             "pack",
             "--bin",
@@ -378,6 +274,15 @@ fn install_oidc_plugin_via_admin_api_and_authenticate() {
         eprintln!("skip: auth-oidc-plugin cdylib not built");
         return;
     };
+    if std::env::var_os("BUSBAR_CHECKOUT").is_none() {
+        // The live install leg boots the REAL busbar binary, built from a busbar checkout at
+        // `.busbar-ref`; ci.yml's `e2e` job provides one and sets BUSBAR_CHECKOUT. Loud, never silent.
+        eprintln!(
+            "skip: BUSBAR_CHECKOUT unset — the admin-API install e2e needs a busbar checkout at \
+             .busbar-ref to build the real busbar binary (ci.yml `e2e` runs it)"
+        );
+        return;
+    }
     let (busbar_bin, pack_bin) = build_real_binaries();
 
     let key = TestKey::generate("admin-e2e-kid");

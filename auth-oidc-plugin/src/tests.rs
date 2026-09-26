@@ -4,7 +4,7 @@
 // itself does with the config before handing off. The real over-the-ABI, real-network-fixture success
 // path lives in this crate's own `tests/e2e.rs`.
 use super::open;
-use busbar_api::{AuthPlugin, BeginLogin, LoginOutcome};
+use busbar_contract::auth::{AuthPlugin, BeginLogin, LoginOutcome};
 
 /// `open` returns `Result<Box<dyn AuthPlugin>, String>`, and `dyn AuthPlugin` is not `Debug` (it
 /// carries no such bound), so the standard `.unwrap_err()` doesn't compile here. This is the

@@ -22,7 +22,7 @@ on:
   release:
     types: [published]
   schedule:
-    - cron: " * * *"
+    - cron: "31 9 * * *" # daily; minute staggered per repo
   workflow_dispatch:
     inputs:
       version:
