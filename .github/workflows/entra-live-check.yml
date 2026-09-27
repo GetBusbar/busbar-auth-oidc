@@ -5,7 +5,7 @@
 # OidcModule/ReqwestFetcher: real discovery document, real JWKS fetch, real RS256 signature check,
 # real claim validation, plus a tamper check confirming a corrupted signature is genuinely rejected.
 #
-# This complements, not replaces, the hermetic dlopen ABI tests in ci.yml (plugin-ci.yml) — those
+# This complements, not replaces, the hermetic linked + dropped-in conformance in ci.yml — those
 # prove the ABI seam and the crypto path work at all, with no external dependency; this proves the
 # code actually interoperates with a real-world IdP's real quirks (issuer format, token shape,
 # claims) rather than only a synthetic fixture.
@@ -17,11 +17,8 @@
 # happened. Locally, with `CI` unset, it still prints SKIP and exits 0.
 name: entra-live-check
 
-env:
-  # Same BUSBAR_REF convention ci.yml / release.yml already establish for the sibling path
-  # dependency (busbar-api) this crate needs. Update to `main` once busbar 1.5.0 ships.
-  BUSBAR_REF: dev
-
+# busbar 1.6.0: the crate's one busbar dependency is busbar-contract, a `git` dependency pinned to
+# `.busbar-ref` field 1 — cargo fetches it; no busbar checkout is needed beside this repo.
 on:
   push:
     branches: [main]
@@ -33,24 +30,15 @@ jobs:
     steps:
       - name: Checkout auth-oidc
         uses: actions/checkout@v7
-        with:
-          path: auth-oidc
 
-      - name: Checkout busbar (sibling path dependency)
-        uses: actions/checkout@v7
-        with:
-          repository: GetBusbar/busbar
-          ref: ${{ env.BUSBAR_REF }}
-          path: busbar
-
-      - uses: dtolnay/rust-toolchain@stable
+      # The toolchain rust-toolchain.toml pins.
+      - uses: dtolnay/rust-toolchain@62ae3a85dbdd2bedbb5819da8ce45635129289a1 # 1.98.0
       - uses: Swatinem/rust-cache@v2
 
       - name: Real Entra ID token verification
-        working-directory: auth-oidc
         env:
           ENTRA_TENANT_ID: ${{ secrets.ENTRA_TENANT_ID }}
           ENTRA_CLIENT_ID: ${{ secrets.ENTRA_CLIENT_ID }}
           ENTRA_TEST_USERNAME: ${{ secrets.ENTRA_TEST_USERNAME }}
           ENTRA_TEST_PASSWORD: ${{ secrets.ENTRA_TEST_PASSWORD }}
-        run: cargo run --example entra_live_check
+        run: cargo run --locked -p busbar-auth-oidc --example entra_live_check
