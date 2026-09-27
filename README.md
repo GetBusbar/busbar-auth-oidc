@@ -1,4 +1,14 @@
-# auth-oidc
+<!-- fleet:header:begin (rendered by `cargo xtask fleet render` from GetBusbar/busbar's plugins.yaml; edit it there) -->
+# busbar-auth-oidc
+
+The OIDC auth module as a droppable busbar plugin: a cdylib exporting the auth C ABI. Drop it in the plugins folder and add oidc to auth.chain with its settings nested under it.
+
+| kind | alias | crate | busbar | license |
+|---|---|---|---|---|
+| `auth` | `oidc` | `busbar-auth-oidc-plugin` | 1.6.0 (pinned in `.busbar-ref`) | Apache-2.0 |
+
+[![ci](https://github.com/GetBusbar/busbar-auth-oidc/actions/workflows/ci.yml/badge.svg?branch=dev)](https://github.com/GetBusbar/busbar-auth-oidc/actions/workflows/ci.yml)
+<!-- fleet:header:end -->
 
 **This plugin's version: v1.0.0.** (Independently versioned from busbar
 itself — see [Versioning](#versioning) below.)
