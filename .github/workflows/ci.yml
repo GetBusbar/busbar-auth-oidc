@@ -139,5 +139,5 @@ jobs:
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: lcov.info
-          slug: GetBusbar/auth-oidc
+          slug: GetBusbar/busbar-auth-oidc
           fail_ci_if_error: false
