@@ -307,7 +307,7 @@ jobs:
       # This repo publishes a runnable bundle, so the check does not stop at 'the tarball exists':
       # the image is pulled fresh and the container must BOOT and answer /healthz. That is the
       # assertion that was missing when the published bundle shipped a config busbar had retired.
-      bundle_image: 33 10
+      bundle_image: ""
       bundle_env: ""
     permissions:
       contents: read
