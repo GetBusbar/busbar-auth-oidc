@@ -196,7 +196,7 @@ fn pack_oidc_tarball(
             "--lib",
             so_path.to_str().unwrap(),
             "--name",
-            "busbar-auth-oidc-plugin",
+            "busbar-auth-oidc",
             "--alias",
             "oidc",
             "--kind",
@@ -371,7 +371,7 @@ fn install_oidc_plugin_via_admin_api_and_authenticate() {
     );
     let installed: serde_json::Value = install_resp.json().unwrap();
     assert_eq!(installed["file"], file);
-    assert_eq!(installed["name"], "busbar-auth-oidc-plugin");
+    assert_eq!(installed["name"], "busbar-auth-oidc");
     assert!(
         plugins_dir.join(file).exists(),
         "the admin API install must have written the tarball to the real plugins dir"
