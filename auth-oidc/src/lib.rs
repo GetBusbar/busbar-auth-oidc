@@ -748,10 +748,14 @@ fn fetch_discovery_doc(cfg: &OidcConfig, fetcher: &dyn JwksFetcher) -> Result<Va
         .map_err(|e| format!("OIDC discovery document is not JSON: {e}"))?;
     match doc.get("issuer").and_then(Value::as_str) {
         Some(doc_issuer) if doc_issuer == cfg.issuer => {}
+        // The document's `issuer` is untrusted remote input and this error is printed to the
+        // operator's stderr at boot, so it is escaped: a newline or terminal escape in it must not
+        // reach the terminal raw. A printable issuer is byte-identical.
         Some(other) => {
             return Err(format!(
-                "OIDC discovery document's issuer '{other}' does not match the configured issuer \
+                "OIDC discovery document's issuer '{}' does not match the configured issuer \
                  '{}' ({discovery_url}); refusing to trust its jwks_uri",
+                other.escape_debug(),
                 cfg.issuer
             ))
         }

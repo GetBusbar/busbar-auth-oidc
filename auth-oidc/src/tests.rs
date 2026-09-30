@@ -1592,3 +1592,25 @@ fn untrusted_kid_and_alg_are_escaped_in_error_text() {
     );
     assert!(err.contains("unsupported/forbidden"), "{err}");
 }
+
+/// The discovery document's `issuer` is untrusted remote input, and the mismatch error carrying it
+/// is printed to the operator's stderr at boot (and returned from `open`). A newline or a terminal
+/// escape in it must not reach the terminal raw (OIDC-4).
+#[test]
+fn a_hostile_discovery_issuer_is_escaped_in_the_mismatch_error() {
+    let doc = serde_json::json!({ "issuer": "x\n\u{1b}]0;pwn\u{7}", "jwks_uri": "https://x" });
+    let fetcher = FixtureFetcher::new(doc.to_string());
+    for err in [
+        resolve_login_endpoints(&discovery_cfg(), &fetcher).expect_err("mismatched issuer"),
+        resolve_jwks_url(&discovery_cfg(), &fetcher).expect_err("mismatched issuer"),
+    ] {
+        assert!(
+            err.contains("does not match the configured issuer"),
+            "expected the issuer-mismatch error, got: {err:?}"
+        );
+        assert!(
+            !err.contains('\n') && !err.contains('\u{1b}') && !err.contains('\u{7}'),
+            "the remote issuer must be escaped in the error: {err:?}"
+        );
+    }
+}
