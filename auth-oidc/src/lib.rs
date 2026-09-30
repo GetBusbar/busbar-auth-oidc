@@ -688,8 +688,21 @@ fn is_clock_sane(t: i64) -> bool {
 
 /// Resolve the JWKS url from config: the explicit `jwks_url`, or discovered from the issuer's OIDC
 /// discovery document. `fetcher` performs the discovery GET when needed.
+///
+/// An explicit `jwks_url` must be an `https` URL. The fetcher is https-only, so any other value
+/// would load cleanly and then reject every token at first use; it is refused here, at boot, with
+/// an error naming the field instead.
 pub fn resolve_jwks_url(cfg: &OidcConfig, fetcher: &dyn JwksFetcher) -> Result<String, String> {
     if let Some(url) = &cfg.jwks_url {
+        let parsed = reqwest::Url::parse(url)
+            .map_err(|e| format!("jwks_url is not a valid URL ({e}); it must be an https URL"))?;
+        if parsed.scheme() != "https" {
+            return Err(format!(
+                "jwks_url must be an https URL (got scheme '{}'); the JWKS is only ever fetched \
+                 over https",
+                parsed.scheme().escape_debug()
+            ));
+        }
         return Ok(url.clone());
     }
     let doc = fetch_discovery_doc(cfg, fetcher)?;

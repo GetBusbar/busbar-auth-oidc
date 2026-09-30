@@ -135,3 +135,26 @@ fn missing_jwks_url_with_malformed_issuer_fails_fast_without_network() {
         "expected a descriptive discovery-failure message naming the failed step, got: {err}"
     );
 }
+
+#[test]
+fn an_explicit_http_jwks_url_is_refused_at_open() {
+    // OIDC-5 (owner-approved 2026-09-30): the JWKS fetcher is https-only, so an http `jwks_url`
+    // used to boot and then reject every token. It is refused at open, naming the field. Hermetic:
+    // the refusal happens before any fetch.
+    let cfg = r#"{
+        "issuer": "https://issuer.invalid.example",
+        "audience": "api://busbar-client",
+        "jwks_url": "http://issuer.invalid.example/keys",
+        "authorization_endpoint": "https://issuer.invalid.example/authorize",
+        "token_endpoint": "https://issuer.invalid.example/token"
+    }"#;
+    let err = expect_err(open(cfg));
+    assert!(
+        err.contains("jwks_url"),
+        "the error must name jwks_url: {err}"
+    );
+    assert!(
+        err.contains("https"),
+        "the error must say https is required: {err}"
+    );
+}

@@ -1614,3 +1614,36 @@ fn a_hostile_discovery_issuer_is_escaped_in_the_mismatch_error() {
         );
     }
 }
+
+/// An explicit `jwks_url` that is not https is refused at resolve time, naming the field: the
+/// fetcher is https-only, so such a config used to load cleanly and then reject every token
+/// (OIDC-5, owner-approved 2026-09-30). An https one still resolves with no fetch at all.
+#[test]
+fn an_explicit_non_https_jwks_url_is_refused_at_resolve_time() {
+    let fetcher = FixtureFetcher::new(String::new());
+    for bad in ["http://idp.invalid/k", "not a url", "ftp://idp.invalid/k"] {
+        let mut c = cfg("groups");
+        c.jwks_url = Some(bad.to_string());
+        let err = resolve_jwks_url(&c, &fetcher)
+            .expect_err("a non-https jwks_url must be refused at boot");
+        assert!(
+            err.contains("jwks_url"),
+            "the error must name jwks_url: {err}"
+        );
+        assert!(
+            err.contains("https"),
+            "the error must say https is required: {err}"
+        );
+    }
+    let mut c = cfg("groups");
+    c.jwks_url = Some("https://idp.invalid/keys".to_string());
+    assert_eq!(
+        resolve_jwks_url(&c, &fetcher).as_deref(),
+        Ok("https://idp.invalid/keys")
+    );
+    assert_eq!(
+        fetcher.calls(),
+        0,
+        "an explicit jwks_url never triggers discovery"
+    );
+}
