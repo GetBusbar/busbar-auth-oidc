@@ -171,9 +171,14 @@ impl JwksCache {
             }
         }
 
+        // `kid` comes from the UNSIGNED header of an untrusted bearer and this error reaches a
+        // warn log before any signature has been accepted, so it is escaped: a kid carrying a
+        // newline or a terminal escape must not forge or colour log records. Printable kids are
+        // byte-identical.
         Err(format!(
-            "no JWKS key matches the token's kid '{kid}' (after a bounded rotation refetch); the \
-             signing key is unknown to the configured jwks_url"
+            "no JWKS key matches the token's kid '{}' (after a bounded rotation refetch); the \
+             signing key is unknown to the configured jwks_url",
+            kid.escape_debug()
         ))
     }
 

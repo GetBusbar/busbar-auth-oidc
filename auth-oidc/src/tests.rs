@@ -1555,3 +1555,40 @@ fn login_fails_closed_without_endpoints() {
         LoginOutcome::Reject
     ));
 }
+
+// ── log-injection: untrusted header strings are escaped in errors that reach a log (OIDC-3) ──────
+
+/// `kid` and `alg` come from the UNSIGNED header of an untrusted bearer, and the errors that carry
+/// them reach `tracing::warn!` before any signature is accepted. A newline or a terminal escape in
+/// either must not survive into the error text (a forged log record / recoloured terminal).
+#[test]
+fn untrusted_kid_and_alg_are_escaped_in_error_text() {
+    let key = TestKey::generate(KID);
+    let c = crate::cache::JwksCache::new(
+        "https://jwks.test/keys",
+        Box::new(FixtureFetcher::new(key.jwks())),
+        Duration::from_secs(60),
+        Duration::from_secs(3600),
+    );
+    let err = c
+        .with_key("a\nb\u{1b}[31m", Instant::now(), |_| Ok(()))
+        .expect_err("an unknown kid must not verify");
+    assert!(
+        !err.contains('\n') && !err.contains('\u{1b}'),
+        "the unknown-kid error must escape the header's kid: {err:?}"
+    );
+    assert!(
+        err.contains("a\\nb"),
+        "the kid is still named, escaped: {err:?}"
+    );
+
+    let jwk = jwks::JwkSet::parse(&key.jwks()).unwrap().keys[0].clone();
+    let token = token_with_alg(KID, "HS\n\u{1b}[31m", &base_claims(1_700_000_000), b"sig");
+    let parts = jwt::split(&token).unwrap();
+    let err = jwt::verify_signature(&parts, &jwk).unwrap_err();
+    assert!(
+        !err.contains('\n') && !err.contains('\u{1b}'),
+        "the forbidden-alg error must escape the header's alg: {err:?}"
+    );
+    assert!(err.contains("unsupported/forbidden"), "{err}");
+}

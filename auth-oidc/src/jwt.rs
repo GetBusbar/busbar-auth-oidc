@@ -162,9 +162,11 @@ pub fn verify_signature(parts: &Parts, key: &Jwk) -> Result<(), String> {
             .map_err(|_| "JWT signature verification failed".to_string())
     } else {
         // `none` (unsigned), `HS*` (HMAC — accepting a symmetric alg against an asymmetric JWKS key is
-        // the RS256→HS256 key-confusion attack), and any other alg are REFUSED.
+        // the RS256→HS256 key-confusion attack), and any other alg are REFUSED. `alg` is from the
+        // unsigned header of an untrusted bearer and this error is logged, so it is escaped.
         Err(format!(
-            "unsupported/forbidden JWT alg '{alg}': only {ALG_RS256} and {ALG_ES256} are accepted"
+            "unsupported/forbidden JWT alg '{}': only {ALG_RS256} and {ALG_ES256} are accepted",
+            alg.escape_debug()
         ))
     }
 }
