@@ -473,8 +473,10 @@ mod tests {
         let t0 = Instant::now();
         c.with_key("k1", t0, |_| Ok(())).expect("prime");
 
-        // Past TTL, so the next caller triggers a refetch against the slow provider.
-        let now = t0 + Duration::from_secs(10);
+        // Past TTL AND past the 60s refetch interval the priming fetch anchored, so the next caller
+        // really does refetch against the slow provider (inside the rate-limit window it would
+        // serve the cache without fetching, and the test would prove nothing).
+        let now = t0 + Duration::from_secs(61);
 
         std::thread::scope(|s| {
             let slow = {
