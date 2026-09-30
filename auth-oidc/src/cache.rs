@@ -394,6 +394,23 @@ mod tests {
         (c, calls)
     }
 
+    /// Block until the fetcher has been ENTERED `n` times in total. `calls` is bumped on entry to
+    /// `fetch`, and `fetch` only ever runs with the single-flight gate held (and after the
+    /// rate-limit anchor is set), so once the count is reached the gate winner is provably inside
+    /// its fetch.
+    /// Ordering the racing threads on this, not on a sleep, keeps these tests deterministic on a
+    /// loaded runner: a descheduled winner can no longer let the "loser" become the fetcher.
+    fn wait_for_fetch_entries(calls: &AtomicUsize, n: usize) {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while calls.load(Ordering::SeqCst) < n {
+            assert!(
+                Instant::now() < deadline,
+                "the gate winner never entered its fetch"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
     /// THE CLASS TEST, half 1: signature verification must not be serialised.
     ///
     /// `f` is RSA/ECDSA verification, and it used to run WITH the cache mutex held — so every OIDC
@@ -452,26 +469,23 @@ mod tests {
     #[test]
     fn a_slow_jwks_fetch_does_not_stall_a_caller_that_already_has_the_key() {
         const FETCH: Duration = Duration::from_millis(1500);
-        let (c, _calls) = cache(Ok(jwks("k1")), FETCH, Duration::from_millis(1));
+        let (c, calls) = cache(Ok(jwks("k1")), FETCH, Duration::from_millis(1));
         let t0 = Instant::now();
         c.with_key("k1", t0, |_| Ok(())).expect("prime");
 
         // Past TTL, so the next caller triggers a refetch against the slow provider.
         let now = t0 + Duration::from_secs(10);
-        let ready = Arc::new(Barrier::new(2));
 
         std::thread::scope(|s| {
             let slow = {
-                let (c, ready) = (&c, ready.clone());
+                let c = &c;
                 s.spawn(move || {
-                    ready.wait();
                     c.with_key("k1", now, |_| Ok(()))
                         .expect("refetching caller")
                 })
             };
-            ready.wait();
-            // Give the refetcher a moment to be inside the fetch.
-            std::thread::sleep(Duration::from_millis(100));
+            // The refetcher is inside the fetch (priming was fetch #1).
+            wait_for_fetch_entries(&calls, 2);
 
             let began = Instant::now();
             c.with_key("k1", now, |_| Ok(())).expect("unblocked caller");
@@ -499,7 +513,6 @@ mod tests {
         const N: usize = 6;
         let start = Arc::new(Barrier::new(N));
         let now = Instant::now();
-        let began = Instant::now();
 
         std::thread::scope(|s| {
             for _ in 0..N {
@@ -511,16 +524,13 @@ mod tests {
             }
         });
 
+        // The fetch COUNT is the signal: callers serialised behind one another's fetches would each
+        // have fetched. (A wall-clock bound here only measured the runner's load.)
         assert_eq!(
             calls.load(Ordering::SeqCst),
             1,
             "a cold cache must single-flight: {N} concurrent callers issued {} fetches",
             calls.load(Ordering::SeqCst)
-        );
-        assert!(
-            began.elapsed() < Duration::from_millis(300) * 3,
-            "cold-start callers serialised behind one another's fetches ({:?})",
-            began.elapsed()
         );
     }
 
@@ -864,19 +874,14 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1, "priming fetch");
 
         let now = t0 + Duration::from_secs(10); // well past the 1ms ttl
-        let ready = Arc::new(Barrier::new(2));
 
         std::thread::scope(|s| {
             let slow = {
-                let (c, ready) = (&c, ready.clone());
-                s.spawn(move || {
-                    ready.wait();
-                    c.with_key("k1", now, |_| Ok(())).expect("gate winner")
-                })
+                let c = &c;
+                s.spawn(move || c.with_key("k1", now, |_| Ok(())).expect("gate winner"))
             };
-            ready.wait();
-            // Give the winner a moment to actually acquire the gate before we race in.
-            std::thread::sleep(Duration::from_millis(100));
+            // The winner holds the gate and is inside its fetch before we race in.
+            wait_for_fetch_entries(&calls, 2);
 
             let began = Instant::now();
             c.with_key("k1", now, |_| Ok(())).expect("gate loser");
@@ -922,18 +927,15 @@ mod tests {
         let t0 = Instant::now();
         c.with_key("k1", t0, |_| Ok(())).expect("prime"); // keys Some — later callers are non-desperate
 
-        let ready = Arc::new(Barrier::new(2));
         std::thread::scope(|s| {
             let winner = {
-                let (c, ready) = (&c, ready.clone());
+                let c = &c;
                 // Winner refetches WITHIN the ceiling; it only has to hold the gate through the slow fetch.
                 s.spawn(move || {
-                    ready.wait();
                     let _ = c.with_key("k1", t0 + Duration::from_secs(1), |_| Ok(()));
                 })
             };
-            ready.wait();
-            std::thread::sleep(Duration::from_millis(100)); // let the winner acquire the gate first
+            wait_for_fetch_entries(&calls, 2); // the winner holds the gate, inside its fetch
 
             // Loser races in PAST the 24h ceiling: loses the gate, takes the ~244 early return.
             let past_ceiling = t0 + Duration::from_secs(25 * 3600);
@@ -970,18 +972,15 @@ mod tests {
         );
         // COLD cache — never primed — so every caller is desperate (keys.is_none()).
         let t0 = Instant::now();
-        let ready = Arc::new(Barrier::new(2));
         std::thread::scope(|s| {
             let winner = {
-                let (c, ready) = (&c, ready.clone());
+                let c = &c;
                 s.spawn(move || {
-                    ready.wait();
                     c.with_key("k1", t0, |_| Ok(()))
                         .expect("cold winner fills the cache");
                 })
             };
-            ready.wait();
-            std::thread::sleep(Duration::from_millis(100)); // winner acquires the gate and starts fetching
+            wait_for_fetch_entries(&calls, 1); // winner holds the gate and is fetching
 
             // Desperate loser (cache still empty when it enters) waits behind the gate; when it
             // acquires, the winner has filled `keys`, so it hits the ~256 desperate re-check. Its `now`
@@ -1025,18 +1024,15 @@ mod tests {
             Duration::from_millis(1),
         );
         let t0 = Instant::now();
-        let ready = Arc::new(Barrier::new(2));
         std::thread::scope(|s| {
             let winner = {
-                let (c, ready) = (&c, ready.clone());
+                let c = &c;
                 // Cold desperate winner: acquires the gate, sets last_attempt, then the fetch FAILS.
                 s.spawn(move || {
-                    ready.wait();
                     let _ = c.with_key("k1", t0, |_| Ok(()));
                 })
             };
-            ready.wait();
-            std::thread::sleep(Duration::from_millis(100)); // winner takes the gate, starts its doomed fetch
+            wait_for_fetch_entries(&calls, 1); // winner holds the gate, inside its doomed fetch
 
             // Cold desperate loser queues behind the gate; the winner's fetch fails, `keys` is still
             // None, and at the SAME `now` the loser is inside the 60s window ⇒ post-gate re-check (262).
