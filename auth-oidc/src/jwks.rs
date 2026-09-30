@@ -118,15 +118,33 @@ impl Jwk {
 /// A parsed JWKS: the provider's current set of signing keys.
 #[derive(Debug, Clone, Deserialize)]
 pub struct JwkSet {
-    /// The keys. Deserialized from the top-level `keys` array of a JWKS document.
+    /// The keys. Deserialized from the top-level `keys` array of a JWKS document. An entry that is
+    /// not a usable [`Jwk`] (no `kty`, a non-string member, …) is SKIPPED rather than failing the
+    /// whole document: RFC 7517 §5 says a JWK Set consumer SHOULD ignore keys it cannot use, and
+    /// one odd entry must not take every other key (and so every token) down with it.
+    #[serde(deserialize_with = "skip_unusable_keys")]
     pub keys: Vec<Jwk>,
 }
 
+/// Deserialize the `keys` array entry by entry, keeping only the entries that deserialize as a
+/// [`Jwk`]. The array itself must still be present and be an array.
+fn skip_unusable_keys<'de, D>(d: D) -> Result<Vec<Jwk>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw: Vec<serde_json::Value> = Deserialize::deserialize(d)?;
+    Ok(raw
+        .into_iter()
+        .filter_map(|v| serde_json::from_value::<Jwk>(v).ok())
+        .collect())
+}
+
 impl JwkSet {
-    /// Parse a JWKS document (the body of a `jwks_uri` GET).
+    /// Parse a JWKS document (the body of a `jwks_uri` GET). Entries that are not usable JWKs are
+    /// skipped (see [`JwkSet::keys`]).
     ///
-    /// A document that parses but carries ZERO keys is an ERROR, not an empty success. An identity
-    /// provider that can sign tokens always publishes at least one key, so `{"keys":[]}` is a
+    /// A document that parses but carries ZERO usable keys is an ERROR, not an empty success. An
+    /// identity provider that can sign tokens always publishes at least one key, so `{"keys":[]}` is a
     /// provider blip, a maintenance proxy, or a blackholing load balancer answering 200 with a
     /// well-formed nothing. Returning it as `Ok` would let the caller install it over a working key
     /// set and reset the freshness clocks, which converts a transient upstream hiccup into a total

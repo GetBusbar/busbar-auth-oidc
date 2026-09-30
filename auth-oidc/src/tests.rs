@@ -1647,3 +1647,35 @@ fn an_explicit_non_https_jwks_url_is_refused_at_resolve_time() {
         "an explicit jwks_url never triggers discovery"
     );
 }
+
+/// One malformed JWK entry (here: no `kty`; there: a numeric `kid`) must not fail the parse of the
+/// whole set. RFC 7517 §5: a consumer SHOULD ignore JWKs it cannot use. The valid key still loads
+/// and still verifies a token (OIDC-6, owner-approved 2026-09-30). A set with NO usable key is
+/// still the "no keys" error.
+#[test]
+fn one_malformed_jwk_is_skipped_not_fatal_to_the_whole_set() {
+    let key = TestKey::generate("a");
+    let key_set: Value = serde_json::from_str(&key.jwks()).unwrap();
+    let good = key_set["keys"][0].clone();
+    let body = serde_json::json!({ "keys": [{ "kid": "bad" }, { "kty": "EC", "kid": 7 }, good] });
+    let body = body.to_string();
+    let set = jwks::JwkSet::parse(&body).expect("one bad entry must not fail the whole JWKS");
+    assert_eq!(set.find_all("a").count(), 1, "the valid key must survive");
+    assert_eq!(set.keys.len(), 1, "the unusable entries are skipped");
+
+    // End to end: a token signed by the valid key verifies against that set.
+    let m = OidcModule::new(
+        &cfg("groups"),
+        "https://jwks.test/keys".to_string(),
+        Box::new(FixtureFetcher::new(body)),
+    );
+    let now = 1_700_000_000;
+    assert!(matches!(
+        m.verify(&key.mint(&base_claims(now)), now, Instant::now()),
+        AuthVerdict::Identify(_)
+    ));
+
+    let err = jwks::JwkSet::parse(r#"{"keys":[{"kid":"bad"}]}"#)
+        .expect_err("a set with no usable key is still an error");
+    assert!(err.contains("no keys"), "got: {err}");
+}
