@@ -37,8 +37,9 @@ and is loaded in-process by busbar over the signed hybrid plugin ABI —
 
 This plugin is versioned **independently of busbar** — `v1.0.0` here says
 nothing about which busbar release it is. Compatibility with busbar is
-stated separately: **requires busbar 1.5.0+** (the release that ships the
-signed hybrid plugin ABI this crate loads over). Pin both versions
+stated separately: **requires busbar 1.6.0+** (contract ABI 3, which this
+crate declares in `auth-oidc/declares.json`; busbar 1.5.x speaks an older
+auth ABI and refuses to load it). Pin both versions
 explicitly in production; do not assume they move together.
 
 
@@ -83,11 +84,15 @@ the first request.
 |---|---|---|---|
 | `issuer` | yes | — | The IdP's OIDC issuer URL. Checked against the JWT's `iss` claim. |
 | `audience` | yes | — | The expected `aud` claim (busbar's registered client/resource identifier at the IdP). |
-| `jwks_url` | no | discovered from `issuer` | The IdP's JWKS endpoint. When omitted, resolved once at `open()` via OIDC discovery (`<issuer>/.well-known/openid-configuration`). |
+| `jwks_url` | no | discovered from `issuer` | The IdP's JWKS endpoint. Must be an `https` URL (anything else is refused at load). When omitted, resolved once at `open()` via OIDC discovery (`<issuer>/.well-known/openid-configuration`). |
 | `role_claim` | no | `groups` | The claim mapped onto the resulting `Principal`'s roles; set `roles` to use Entra app-roles instead. |
 | `jwks_min_refetch_secs` | no | `60` | JWKS refetch rate-limit (seconds) — the bound on how often a kid-rotation refetch can occur. |
 | `jwks_ttl_secs` | no | `3600` | JWKS cache TTL (seconds). |
-| `ca_cert_pem` | no | — | An extra root CA (PEM) to trust for the JWKS/discovery HTTPS fetch, in addition to the system trust store — for a private CA or a test fixture (this is exactly what `tests/e2e.rs` uses to trust its own self-signed local JWKS server). |
+| `ca_cert_pem` | no | — | An extra root CA (PEM) to trust for the JWKS/discovery HTTPS fetch, in addition to the built-in public (webpki) roots; the OS trust store is not consulted — for a private CA or a test fixture (this is exactly what `tests/e2e.rs` uses to trust its own self-signed local JWKS server). |
+| `client_id` | no | `audience` | The OAuth `client_id` presented on the browser-login authorize URL and token exchange. The client secret is never set here; busbar core holds it. |
+| `scopes` | no | `[]` | Extra OAuth scopes requested at browser login, on top of the always-sent `openid`. |
+| `authorization_endpoint` | no | discovered from `issuer` | The IdP authorize endpoint for browser login. When omitted, taken from the discovery document at `open()`; absent and undiscoverable means browser login is refused (token verification is unaffected). |
+| `token_endpoint` | no | discovered from `issuer` | The IdP token endpoint for the browser-login code exchange. Discovered like `authorization_endpoint` when omitted. |
 
 Unknown config fields are rejected (`deny_unknown_fields`) — a typo'd or
 stray key fails loudly at boot instead of being silently ignored.
