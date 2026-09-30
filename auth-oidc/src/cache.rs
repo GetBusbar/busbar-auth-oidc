@@ -299,8 +299,22 @@ impl JwksCache {
                 let too_stale = inner
                     .fetched_at
                     .is_some_and(|t| now.saturating_duration_since(t) >= self.max_stale);
-                match inner.keys.clone() {
-                    Some(keys) if !too_stale => Ok(Some(keys)),
+                let previous = inner.keys.clone();
+                drop(inner);
+                match previous {
+                    Some(keys) if !too_stale => {
+                        // The fallback hides the failure from every caller, so it is logged here:
+                        // otherwise an IdP serving 5xx, a TLS failure or an empty key set leaves no
+                        // trace until a rotated-key token is rejected as "unknown kid". The attempt
+                        // window rate-limits this. The error names the URL and the cause only.
+                        tracing::warn!(
+                            module = "oidc",
+                            url = %self.url,
+                            error = %e,
+                            "JWKS refresh failed; serving the previous key set"
+                        );
+                        Ok(Some(keys))
+                    }
                     _ => Err(e),
                 }
             }
@@ -651,6 +665,42 @@ mod tests {
         assert!(
             calls.load(Ordering::SeqCst) >= 2,
             "the refetch was attempted"
+        );
+    }
+
+    /// OIDC-8: a failed refresh that falls back to the previous keys logs a warn carrying the
+    /// fetch error, so an IdP outage is visible before the first rotated-key token is rejected.
+    #[test]
+    fn a_failed_refresh_that_keeps_the_previous_keys_logs_a_warn_with_the_error() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = JwksCache::new(
+            "https://idp.example/jwks",
+            Box::new(ScriptedFetcher {
+                ok_calls: 1,
+                delay: Duration::ZERO,
+                calls: calls.clone(),
+            }),
+            Duration::from_millis(1),
+            Duration::from_millis(1),
+        );
+        let t0 = Instant::now();
+        let cap = busbar_contract::testkit::WarnCapture::default();
+        tracing::subscriber::with_default(cap.clone(), || {
+            c.with_key("k1", t0, |_| Ok(())).expect("prime");
+            c.with_key("k1", t0 + Duration::from_secs(10), |_| Ok(()))
+                .expect("the previous keys still serve");
+        });
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "the refetch was attempted");
+        assert_eq!(
+            cap.count("JWKS refresh failed; serving the previous key set"),
+            1,
+            "one warn for the one failed refresh: {:?}",
+            cap.messages()
+        );
+        assert!(
+            cap.contains("provider unreachable") && cap.contains("https://idp.example/jwks"),
+            "the warn names the fetch error and the URL: {:?}",
+            cap.messages()
         );
     }
 
