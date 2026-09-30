@@ -15,7 +15,7 @@
 //! `busbar_close`).
 
 use busbar_auth_oidc::{
-    resolve_jwks_url, resolve_login_endpoints, OidcConfig, OidcModule, ReqwestFetcher,
+    resolve_jwks_url, resolve_login_endpoints, JwksFetcher, OidcConfig, OidcModule, ReqwestFetcher,
 };
 use busbar_contract::auth::AuthPlugin;
 use std::time::Duration;
@@ -41,7 +41,7 @@ const JWKS_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 /// opens the module through this function and drives it through the `dispatch_compiled_in` twin the
 /// export macro emits — the same op-dispatch the cdylib's `busbar_call` runs.
 pub fn open(cfg: &str) -> Result<Box<dyn AuthPlugin>, String> {
-    let mut cfg: OidcConfig = if cfg.trim().is_empty() {
+    let cfg: OidcConfig = if cfg.trim().is_empty() {
         return Err("oidc plugin requires config (issuer, audience); none provided".to_string());
     } else {
         serde_json::from_str(cfg).map_err(|e| format!("invalid oidc plugin config: {e}"))?
@@ -49,9 +49,25 @@ pub fn open(cfg: &str) -> Result<Box<dyn AuthPlugin>, String> {
 
     // The fetcher used both for discovery (if needed) and for JWKS refreshes.
     let fetcher = ReqwestFetcher::new(JWKS_FETCH_TIMEOUT, cfg.ca_cert_pem.as_deref())?;
+    open_with(cfg, &fetcher, |cfg| {
+        // A SECOND fetcher instance for the live cache (the first was a borrow for discovery).
+        let cache_fetcher = ReqwestFetcher::new(JWKS_FETCH_TIMEOUT, cfg.ca_cert_pem.as_deref())?;
+        Ok(Box::new(cache_fetcher) as Box<dyn JwksFetcher>)
+    })
+}
+
+/// The body of [`open`] after the config is parsed, with the two fetchers injected: `discovery`
+/// serves the discovery GETs made here, and `cache_fetcher` builds the fetcher the live JWKS cache
+/// owns (called at the point `open` has always built it). Split out so the discovery merge is
+/// testable without a network.
+fn open_with(
+    mut cfg: OidcConfig,
+    discovery: &dyn JwksFetcher,
+    cache_fetcher: impl FnOnce(&OidcConfig) -> Result<Box<dyn JwksFetcher>, String>,
+) -> Result<Box<dyn AuthPlugin>, String> {
     // Resolve the JWKS url at construction (fail boot loudly if discovery can't find it), so the hot
     // path never does discovery.
-    let jwks_url = resolve_jwks_url(&cfg, &fetcher)?;
+    let jwks_url = resolve_jwks_url(&cfg, discovery)?;
     // Resolve the browser-login endpoints (authorize/token): explicit config wins, any absent one is
     // discovered from the issuer's openid-configuration. Filling them here is what makes
     // begin_login/complete_login live in production. UNLIKE the JWKS url above, a discovery FAILURE here
@@ -64,7 +80,7 @@ pub fn open(cfg: &str) -> Result<Box<dyn AuthPlugin>, String> {
     // naming the cause. That matters most in the case worth hearing about: `resolve_login_endpoints`
     // is where a discovery document whose `issuer` does not match the configured one is refused, so
     // a swallowed error here is exactly how a tampered discovery endpoint looks from the outside.
-    match resolve_login_endpoints(&cfg, &fetcher) {
+    match resolve_login_endpoints(&cfg, discovery) {
         Ok((authorization_endpoint, token_endpoint)) => {
             if cfg.authorization_endpoint.is_none() {
                 cfg.authorization_endpoint = authorization_endpoint;
@@ -74,12 +90,7 @@ pub fn open(cfg: &str) -> Result<Box<dyn AuthPlugin>, String> {
             }
         }
         Err(e) => {
-            let msg = format!(
-                "busbar auth-oidc: browser-login endpoint discovery failed ({e}). The plugin is \
-                 loaded and token VERIFICATION is unaffected, but begin_login/complete_login will \
-                 refuse every attempt until `authorization_endpoint` and `token_endpoint` are \
-                 configured explicitly or discovery succeeds."
-            );
+            let msg = login_discovery_failed_message(&e);
             // STDERR, not only `tracing`. This crate ships as a `cdylib`, which statically links its
             // own copy of `tracing-core` and therefore its own global dispatcher. The host installs
             // a subscriber on ITS copy, and nothing in the plugin SDK or ABI bridges the two, so a
@@ -93,13 +104,18 @@ pub fn open(cfg: &str) -> Result<Box<dyn AuthPlugin>, String> {
             tracing::warn!(module = "oidc", error = %e, "{}", msg);
         }
     }
-    // A SECOND fetcher instance for the live cache (the first was a borrow for discovery).
-    let cache_fetcher = ReqwestFetcher::new(JWKS_FETCH_TIMEOUT, cfg.ca_cert_pem.as_deref())?;
-    Ok(Box::new(OidcModule::new(
-        &cfg,
-        jwks_url,
-        Box::new(cache_fetcher),
-    )))
+    let cache_fetcher = cache_fetcher(&cfg)?;
+    Ok(Box::new(OidcModule::new(&cfg, jwks_url, cache_fetcher)))
+}
+
+/// The operator message for a failed browser-login endpoint discovery at load.
+fn login_discovery_failed_message(e: &str) -> String {
+    format!(
+        "busbar auth-oidc: browser-login endpoint discovery failed ({e}). The plugin is \
+         loaded and token VERIFICATION is unaffected, but begin_login/complete_login will \
+         refuse every attempt until `authorization_endpoint` and `token_endpoint` are \
+         configured explicitly or discovery succeeds."
+    )
 }
 
 busbar_contract::export_login_plugin!(open);

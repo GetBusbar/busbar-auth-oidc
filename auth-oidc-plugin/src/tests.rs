@@ -3,8 +3,10 @@
 // `busbar-auth-oidc`'s own job and is covered by that crate's own tests; these only cover what `open`
 // itself does with the config before handing off. The real over-the-ABI, real-network-fixture success
 // path lives in this crate's own `tests/e2e.rs`.
-use super::open;
-use busbar_contract::auth::{AuthPlugin, BeginLogin, LoginOutcome};
+use super::{open, open_with};
+use busbar_auth_oidc::{JwksFetcher, OidcConfig};
+use busbar_contract::auth::{AuthPlugin, BeginLogin, CompleteLogin, LoginOutcome};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// `open` returns `Result<Box<dyn AuthPlugin>, String>`, and `dyn AuthPlugin` is not `Debug` (it
 /// carries no such bound), so the standard `.unwrap_err()` doesn't compile here. This is the
@@ -157,4 +159,92 @@ fn an_explicit_http_jwks_url_is_refused_at_open() {
         err.contains("https"),
         "the error must say https is required: {err}"
     );
+}
+
+/// A discovery fetcher serving one fixed body (or failing), counting its GETs. No network.
+struct Discovery {
+    body: Result<String, String>,
+    calls: AtomicUsize,
+}
+impl Discovery {
+    fn serving(body: Result<String, String>) -> Self {
+        Self {
+            body,
+            calls: AtomicUsize::new(0),
+        }
+    }
+}
+impl JwksFetcher for Discovery {
+    fn fetch(&self, _url: &str) -> Result<String, String> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.body.clone()
+    }
+}
+
+/// The cache fetcher `open_with` hands the live module. These tests never authenticate, so it is
+/// never called.
+fn unused_cache_fetcher(_: &OidcConfig) -> Result<Box<dyn JwksFetcher>, String> {
+    Ok(Box::new(Discovery::serving(Err("unused".to_string()))))
+}
+
+const DISCOVERY_ISSUER: &str = "https://issuer.invalid.example";
+
+/// A verify-capable config with an explicit https jwks_url and NO login endpoints, so open resolves
+/// the login endpoints from discovery.
+fn discovery_login_cfg() -> OidcConfig {
+    serde_json::from_str(&format!(
+        r#"{{"issuer":"{DISCOVERY_ISSUER}","audience":"api://busbar-client",
+            "jwks_url":"https://issuer.invalid.example/keys"}}"#
+    ))
+    .expect("a valid config")
+}
+
+#[test]
+fn open_merges_discovered_login_endpoints_into_the_module() {
+    // OIDC-18: the discovered authorization/token endpoints must reach the live module, or every
+    // discovery-configured deployment's login dead-ends. Hermetic: discovery is a fixture.
+    let doc = serde_json::json!({
+        "issuer": DISCOVERY_ISSUER,
+        "jwks_uri": "https://issuer.invalid.example/keys",
+        "authorization_endpoint": "https://issuer.invalid.example/discovered/authorize",
+        "token_endpoint": "https://issuer.invalid.example/discovered/token",
+    });
+    let discovery = Discovery::serving(Ok(doc.to_string()));
+    let module = match open_with(discovery_login_cfg(), &discovery, unused_cache_fetcher) {
+        Ok(m) => m,
+        Err(e) => panic!("open_with must succeed with a matching discovery document: {e}"),
+    };
+    assert_eq!(
+        discovery.calls.load(Ordering::SeqCst),
+        1,
+        "one discovery GET"
+    );
+
+    let begin = BeginLogin {
+        redirect_uri: "https://busbar.test/auth/token".to_string(),
+        state: "st".to_string(),
+        code_challenge: "ch".to_string(),
+        nonce: None,
+        scopes: vec![],
+    };
+    match module.begin_login(&begin) {
+        LoginOutcome::Authorize(url) => assert!(
+            url.starts_with("https://issuer.invalid.example/discovered/authorize?"),
+            "begin_login must redirect to the DISCOVERED authorize endpoint, got: {url}"
+        ),
+        other => panic!("expected Authorize, got {other:?}"),
+    }
+    let complete = CompleteLogin {
+        code: Some("code".to_string()),
+        redirect_uri: Some("https://busbar.test/auth/token".to_string()),
+        code_verifier: Some("verifier".to_string()),
+        ..Default::default()
+    };
+    match module.complete_login(&complete) {
+        LoginOutcome::Exchange(hop) => assert_eq!(
+            hop.url, "https://issuer.invalid.example/discovered/token",
+            "the token exchange must target the DISCOVERED token endpoint"
+        ),
+        other => panic!("expected Exchange, got {other:?}"),
+    }
 }
