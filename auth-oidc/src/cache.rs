@@ -829,6 +829,45 @@ mod tests {
         );
     }
 
+    /// The `ttl * 24` term of `max_stale` (OIDC-22): with `ttl = 7200s` the ceiling is 48h, not the
+    /// 24h floor. Behind a failing provider the primed keys still serve at +47h and stop at +48h.
+    #[test]
+    fn max_stale_scales_with_a_long_ttl() {
+        struct FailAfterFirst {
+            first: Mutex<bool>,
+            body: String,
+        }
+        impl JwksFetcher for FailAfterFirst {
+            fn fetch(&self, _url: &str) -> Result<String, String> {
+                let mut first = self.first.lock().unwrap();
+                if *first {
+                    *first = false;
+                    return Ok(self.body.clone());
+                }
+                Err("provider unreachable".into())
+            }
+        }
+        let c = JwksCache::new(
+            "https://idp.example/jwks",
+            Box::new(FailAfterFirst {
+                first: Mutex::new(true),
+                body: jwks("k1"),
+            }),
+            Duration::from_millis(1),
+            Duration::from_secs(7200),
+        );
+        let t0 = Instant::now();
+        c.with_key("k1", t0, |_| Ok(())).expect("prime");
+
+        c.with_key("k1", t0 + Duration::from_secs(47 * 3600), |_| Ok(()))
+            .expect("at +47h a ttl of 2h (ceiling 48h) must still serve the cached keys");
+        assert!(
+            c.with_key("k1", t0 + Duration::from_secs(48 * 3600), |_| Ok(()))
+                .is_err(),
+            "at +48h the cached keys are past the ceiling and must not serve"
+        );
+    }
+
     /// A NON-desperate caller (one that already holds a usable cached key set) that loses the
     /// `fetch_gate` race — another caller is mid-fetch — must return the cached keys immediately,
     /// not block waiting for the gate. This is distinct from the existing
