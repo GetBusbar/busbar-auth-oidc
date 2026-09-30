@@ -1081,6 +1081,21 @@ fn is_clock_sane_boundary() {
     );
 }
 
+/// The fail-closed MAPPING `now_unix` applies (OIDC-13): below the floor the reading becomes
+/// `i64::MAX` (every token then fails `exp`), at or above it the reading passes through. Pinning
+/// the mapping, not just the comparison, is what catches a `now_unix` that returns the raw reading.
+#[test]
+fn clock_or_fail_closed_maps_an_insane_reading_to_i64_max() {
+    assert_eq!(clock_or_fail_closed(CLOCK_SANITY_FLOOR_UNIX - 1), i64::MAX);
+    assert_eq!(clock_or_fail_closed(0), i64::MAX);
+    assert_eq!(clock_or_fail_closed(i64::MIN), i64::MAX);
+    assert_eq!(
+        clock_or_fail_closed(CLOCK_SANITY_FLOOR_UNIX),
+        CLOCK_SANITY_FLOOR_UNIX
+    );
+    assert_eq!(clock_or_fail_closed(1_800_000_000), 1_800_000_000);
+}
+
 // ── config defaults (deserialization) ──────────────────────────────────────────────────────────
 
 #[test]

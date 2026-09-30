@@ -671,6 +671,13 @@ fn now_unix() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(i64::MAX);
+    clock_or_fail_closed(t)
+}
+
+/// The fail-closed mapping [`now_unix`] applies to a clock reading: a sane reading passes through,
+/// anything below [`CLOCK_SANITY_FLOOR_UNIX`] becomes `i64::MAX`. Pure, so the mapping itself is
+/// testable (`now_unix` reads the real host clock).
+fn clock_or_fail_closed(t: i64) -> i64 {
     if is_clock_sane(t) {
         t
     } else {
