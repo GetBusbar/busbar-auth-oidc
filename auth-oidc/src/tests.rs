@@ -453,6 +453,28 @@ fn non_jwt_bearer_passes() {
     ));
 }
 
+/// Malformed-but-dotted bearers are not this module's credential shape either (OIDC-21): too few
+/// or too many segments, an undecodable header, and a 5-segment JWE whose header DOES decode (and
+/// whose other segments are valid base64url) all Pass rather than Reject, so another chain module
+/// can take them.
+#[test]
+fn malformed_but_dotted_bearers_pass() {
+    let key = TestKey::generate(KID);
+    let m = module_with(&key, "groups");
+    let header = serde_json::json!({ "alg": "RSA-OAEP", "enc": "A256GCM", "kid": KID });
+    let jwe_header = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).unwrap());
+    let jwe = format!("{jwe_header}.AAAA.AAAA.AAAA.AAAA");
+    for bearer in ["a.b", "a.b.c.d", jwe.as_str(), "!!.x.y"] {
+        assert!(
+            matches!(
+                m.verify(bearer, 1_700_000_000, Instant::now()),
+                AuthVerdict::Pass
+            ),
+            "{bearer:?} is not a compact JWS and must Pass"
+        );
+    }
+}
+
 #[test]
 fn no_credential_passes() {
     let key = TestKey::generate(KID);
@@ -788,10 +810,12 @@ fn an_exp_at_i64_max_does_not_panic() {
     let now = 1_700_000_000;
     let mut c = base_claims(now);
     c["exp"] = serde_json::json!(i64::MAX);
-    // Not asserting Ok/Err here — the tie-break verdict is to SATURATE (accept), see lib.rs's
-    // comment at the `checked_add`/saturating_add call site — this test's job is only to prove the
-    // arithmetic no longer panics on an in-range-for-i64-but-overflowing-the-skew-add value.
-    let _ = verifier("groups").validate_claims(&c, now);
+    // The documented policy is to SATURATE and ACCEPT (see lib.rs's comment at the saturating_add
+    // call site): no panic, and the token verifies.
+    let p = verifier("groups")
+        .validate_claims(&c, now)
+        .expect("exp at i64::MAX saturates and is accepted");
+    assert_eq!(p.ttl_secs, Some(300), "ttl is still ceilinged");
 }
 
 #[test]
@@ -799,7 +823,35 @@ fn an_nbf_at_i64_min_does_not_panic() {
     let now = 1_700_000_000;
     let mut c = base_claims(now);
     c["nbf"] = serde_json::json!(i64::MIN);
-    let _ = verifier("groups").validate_claims(&c, now);
+    // Saturates to i64::MIN, which is trivially not in the future: accepted.
+    assert!(
+        verifier("groups").validate_claims(&c, now).is_ok(),
+        "nbf at i64::MIN saturates and is accepted"
+    );
+}
+
+/// The `exp` clock-skew window at its exact boundary, and the ttl clamp at 0 (OIDC-15): an `exp`
+/// exactly CLOCK_SKEW_SECS in the past still verifies, with a suggested cache ttl of 0 (not a
+/// negative value cast to a huge u64); one second further is expired.
+#[test]
+fn exp_at_the_skew_boundary_verifies_with_ttl_zero_and_one_past_is_expired() {
+    let now = 1_700_000_000;
+    let mut c = base_claims(now);
+    c["exp"] = serde_json::json!(now - CLOCK_SKEW_SECS);
+    let p = verifier("groups")
+        .validate_claims(&c, now)
+        .expect("exp within the skew window verifies");
+    assert_eq!(
+        p.ttl_secs,
+        Some(0),
+        "a just-expired-within-skew token is not cached"
+    );
+
+    c["exp"] = serde_json::json!(now - CLOCK_SKEW_SECS - 1);
+    let err = verifier("groups")
+        .validate_claims(&c, now)
+        .expect_err("exp one second past the skew window is expired");
+    assert!(err.contains("expired"), "got: {err}");
 }
 
 #[test]
@@ -1258,6 +1310,30 @@ fn build_authorize_url_has_pkce_state_no_secret() {
     );
 }
 
+/// The authorize URL's query encoding (OIDC-16): query delimiters in a value are escaped (never
+/// literal, or they would split or truncate the query), a configured `openid` is not repeated, and
+/// an absent nonce adds no `nonce=` parameter at all.
+#[test]
+fn build_authorize_url_escapes_delimiters_dedups_openid_and_omits_an_absent_nonce() {
+    let mut c = cfg("groups");
+    c.authorization_endpoint = Some("https://idp.test/authorize".to_string());
+    c.scopes = vec!["openid".to_string(), "email".to_string()];
+    let url = build_authorize_url(&c, "https://busbar.test/cb", "a&b=c#d+e%", "ch", None);
+    assert!(
+        url.contains("&state=a%26b%3Dc%23d%2Be%25&"),
+        "every query delimiter in a value must be percent-encoded: {url}"
+    );
+    assert!(
+        url.contains("&scope=openid%20email&"),
+        "a configured openid must not be repeated: {url}"
+    );
+    assert!(
+        !url.contains("nonce="),
+        "an absent nonce adds no parameter: {url}"
+    );
+    assert!(url.ends_with("&code_challenge_method=S256"), "{url}");
+}
+
 /// The token-exchange hop is an authorization-code POST that NAMES the secret form field for the
 /// core to fill — it carries the key, never a secret value.
 #[test]
@@ -1371,6 +1447,41 @@ fn discovery_populates_authorization_and_token_endpoints() {
     });
     let evil_fetcher = FixtureFetcher::new(evil.to_string());
     assert!(resolve_login_endpoints(&discovery_cfg(), &evil_fetcher).is_err());
+}
+
+/// Explicit login endpoints win over discovered ones, and when BOTH are explicit no discovery
+/// fetch happens at all (OIDC-17).
+#[test]
+fn explicit_login_endpoints_win_and_both_explicit_skip_discovery() {
+    let doc = serde_json::json!({
+        "issuer": ISSUER,
+        "authorization_endpoint": "https://issuer.test/discovered/authorize",
+        "token_endpoint": "https://issuer.test/discovered/token",
+    });
+
+    // (a) one explicit: it wins, the other is discovered.
+    let fetcher = FixtureFetcher::new(doc.to_string());
+    let mut c = discovery_cfg();
+    c.authorization_endpoint = Some("https://explicit.test/authorize".to_string());
+    let (auth_ep, tok_ep) = resolve_login_endpoints(&c, &fetcher).expect("resolves");
+    assert_eq!(auth_ep.as_deref(), Some("https://explicit.test/authorize"));
+    assert_eq!(
+        tok_ep.as_deref(),
+        Some("https://issuer.test/discovered/token")
+    );
+    assert_eq!(fetcher.calls(), 1);
+
+    // (b) both explicit: returned as given, with no fetch at all.
+    let fetcher = FixtureFetcher::new(doc.to_string());
+    c.token_endpoint = Some("https://explicit.test/token".to_string());
+    let (auth_ep, tok_ep) = resolve_login_endpoints(&c, &fetcher).expect("resolves");
+    assert_eq!(auth_ep.as_deref(), Some("https://explicit.test/authorize"));
+    assert_eq!(tok_ep.as_deref(), Some("https://explicit.test/token"));
+    assert_eq!(
+        fetcher.calls(),
+        0,
+        "both explicit must not fetch discovery"
+    );
 }
 
 /// ADDITIVE-CONFIG regression: a verify-only config that predates the login fields still parses (all
