@@ -396,6 +396,11 @@ fn extract_string_list(v: Option<&Value>) -> Vec<String> {
 /// The runtime OIDC auth module: a verifier + a JWKS cache. Implements [`busbar_contract::auth::AuthModule`].
 pub struct OidcModule {
     verifier: OidcVerifier,
+    /// The verifier for the browser-login `id_token`: the same issuer and role claim, but the
+    /// audience is the OAuth `client_id` (OIDC Core 1.0 §3.1.3.7 step 3: the id_token's `aud` MUST
+    /// contain the client_id). With `client_id` unset it resolves to `audience`, so the two
+    /// verifiers are identical.
+    login_verifier: OidcVerifier,
     jwks: JwksCache,
     /// The resolved config, retained so the browser-login path ([`LoginModule`]) can read the
     /// client-id, scopes, and the authorize/token endpoints. The verify-only path uses none of it.
@@ -415,6 +420,11 @@ impl OidcModule {
         );
         Self {
             verifier: OidcVerifier::new(&cfg.issuer, &cfg.audience, &cfg.role_claim),
+            login_verifier: OidcVerifier::new(
+                &cfg.issuer,
+                resolved_client_id(cfg),
+                &cfg.role_claim,
+            ),
             jwks,
             cfg: cfg.clone(),
         }
@@ -422,10 +432,11 @@ impl OidcModule {
 
     /// Verify a login token-endpoint response into an identity. Parses the token endpoint's JSON,
     /// extracts the `id_token`, and REUSES the full verify path ([`Self::verify`] — JWKS signature +
-    /// [`OidcVerifier::validate_claims`] for iss/aud/exp/nbf) to produce a [`Principal`]. A missing/
-    /// malformed body, a missing `id_token`, or any signature/claim failure is a fail-closed
-    /// `Reject`. `now_unix`/`now_mono` are injected so this is unit-testable with a fixture JWKS, the
-    /// same as [`Self::verify`].
+    /// [`OidcVerifier::validate_claims`] for iss/aud/exp/nbf) to produce a [`Principal`]. The
+    /// `aud` checked is the OAuth `client_id`, not the bearer `audience` (OIDC Core 1.0 §3.1.3.7
+    /// step 3). A missing/malformed body, a missing `id_token`, or any signature/claim failure is a
+    /// fail-closed `Reject`. `now_unix`/`now_mono` are injected so this is unit-testable with a
+    /// fixture JWKS, the same as [`Self::verify`].
     ///
     /// NOTE (committed ABI): OIDC `nonce` is minted by the CORE at begin and is NOT carried back on
     /// [`CompleteLogin`], so nonce binding is the core's to enforce; this reuses the existing
@@ -448,7 +459,7 @@ impl OidcModule {
             Some(t) => t,
             None => return LoginOutcome::Reject,
         };
-        match self.verify(id_token, now_unix, now_mono) {
+        match self.verify_with(&self.login_verifier, id_token, now_unix, now_mono) {
             AuthVerdict::Identify(p) => LoginOutcome::Identify(p),
             // A non-JWT / bad-sig / bad-claim id_token in a login callback is a hard failure — unlike
             // the verify chain, there is no "next module" to defer a `Pass` to. Enumerated (not `_`)
@@ -460,6 +471,18 @@ impl OidcModule {
     /// The full verification of one presented bearer token → an [`AuthVerdict`]. Split from
     /// `authenticate` so it can be driven with an injected `now` in tests.
     fn verify(&self, token: &str, now_unix: i64, now_mono: Instant) -> AuthVerdict {
+        self.verify_with(&self.verifier, token, now_unix, now_mono)
+    }
+
+    /// [`Self::verify`] against an explicit claim `verifier`: the bearer path passes the
+    /// `audience` verifier, the browser-login path the `client_id` one.
+    fn verify_with(
+        &self,
+        verifier: &OidcVerifier,
+        token: &str,
+        now_unix: i64,
+        now_mono: Instant,
+    ) -> AuthVerdict {
         let parts = match jwt::split(token) {
             Ok(p) => p,
             // Not a well-formed JWT ⇒ not our credential shape. `Pass` so a later chain module (or
@@ -486,7 +509,7 @@ impl OidcModule {
             }
         };
 
-        match self.verifier.validate_claims(&claims, now_unix) {
+        match verifier.validate_claims(&claims, now_unix) {
             Ok(principal) => AuthVerdict::Identify(principal),
             Err(e) => {
                 tracing::warn!(module = "oidc", error = %e, "OIDC token claim validation failed");

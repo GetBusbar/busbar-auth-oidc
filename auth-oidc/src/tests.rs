@@ -1423,6 +1423,57 @@ fn identity_from_token_response_verifies_id_token() {
     ));
 }
 
+/// OIDC-1 (OIDC Core 1.0 §3.1.3.7 step 3): the browser-login `id_token`'s `aud` must contain
+/// the OAuth `client_id`, not the bearer `audience`. With `audience` "api://x" and `client_id`
+/// "cid", an id_token for "cid" identifies and one for "api://x" is refused; the bearer path still
+/// checks `audience`.
+#[test]
+fn login_id_token_audience_is_the_client_id_not_the_bearer_audience() {
+    let key = TestKey::generate(KID);
+    let mut c = cfg("groups");
+    c.audience = "api://x".to_string();
+    c.client_id = Some("cid".to_string());
+    let m = OidcModule::new(
+        &c,
+        "https://jwks.test/keys".to_string(),
+        Box::new(FixtureFetcher::new(key.jwks())),
+    );
+    let now = 1_700_000_000;
+    let response_for = |aud: &str| {
+        let mut claims = base_claims(now);
+        claims["aud"] = serde_json::json!(aud);
+        LoginHttpResponse {
+            status: 200,
+            body: serde_json::json!({ "id_token": key.mint(&claims) }).to_string(),
+        }
+    };
+
+    match m.identity_from_token_response(&response_for("cid"), now, Instant::now()) {
+        LoginOutcome::Identify(p) => assert_eq!(p.id, "oidc:object-guid"),
+        other => panic!("an id_token whose aud is the client_id must Identify, got {other:?}"),
+    }
+    assert!(
+        matches!(
+            m.identity_from_token_response(&response_for("api://x"), now, Instant::now()),
+            LoginOutcome::Reject
+        ),
+        "an id_token whose aud is only the bearer audience, not the client_id, must Reject"
+    );
+
+    // The bearer path is unchanged: it checks `audience`.
+    let mut bearer = base_claims(now);
+    bearer["aud"] = serde_json::json!("api://x");
+    assert!(matches!(
+        m.verify(&key.mint(&bearer), now, Instant::now()),
+        AuthVerdict::Identify(_)
+    ));
+    bearer["aud"] = serde_json::json!("cid");
+    assert!(matches!(
+        m.verify(&key.mint(&bearer), now, Instant::now()),
+        AuthVerdict::Reject
+    ));
+}
+
 /// Discovery resolves BOTH login endpoints from the issuer's openid-configuration (issuer-match
 /// guarded, the same document `resolve_jwks_url` reads).
 #[test]
