@@ -70,11 +70,15 @@ fn load_and_exercise_auth_oidc_plugin_success() {
     const ISSUER: &str = "https://oidc-test.invalid/v2.0";
     const AUDIENCE: &str = "api://busbar-client";
 
+    // Explicit login endpoints, so `open` performs no discovery: without them it made a real
+    // discovery GET to the `.invalid` issuer (resolver-dependent, up to the 10s fetch timeout).
     let cfg = serde_json::json!({
         "issuer": ISSUER,
         "audience": AUDIENCE,
         "jwks_url": jwks_url,
         "ca_cert_pem": cert_pem,
+        "authorization_endpoint": format!("{ISSUER}/authorize"),
+        "token_endpoint": format!("{ISSUER}/token"),
     })
     .to_string();
 
@@ -410,6 +414,8 @@ fn install_oidc_plugin_via_admin_api_and_authenticate() {
              plugins:\n  enabled: true\n  dir: {}\n  trust:\n    allow_unsigned: true\n\
              identity-providers:\n  admin-tokens: {{ module: admin-tokens, token: {{ env: BUSBAR_ADMIN_TOKEN }} }}\n\
              \x20 oidc:\n    module: oidc\n    settings:\n      issuer: \"{ISSUER}\"\n      audience: \"{AUDIENCE}\"\n\
+             \x20     authorization_endpoint: \"{ISSUER}/authorize\"\n\
+             \x20     token_endpoint: \"{ISSUER}/token\"\n\
              \x20     jwks_url: \"{jwks_url}\"\n      ca_cert_pem: |\n{}\n\
              auth:\n  admin_auth: [admin-tokens]\n  chain: [oidc]\n\
              \x20 role_bindings:\n    oidc:\n      \"11111111-aaaa\": {{}}\n\
