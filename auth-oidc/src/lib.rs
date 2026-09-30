@@ -637,8 +637,11 @@ pub fn build_authorize_url(
     let endpoint = cfg.authorization_endpoint.as_deref().unwrap_or_default();
     let client_id = resolved_client_id(cfg);
     let scope = scope_value(cfg);
+    // RFC 6749 §3.1: an authorization endpoint MAY carry a query component (e.g. Azure AD B2C's
+    // `?p=<policy>`), which MUST be retained when adding parameters, so join with `&` then.
+    let sep = if endpoint.contains('?') { '&' } else { '?' };
     let mut url = format!(
-        "{endpoint}?response_type=code&client_id={}&redirect_uri={}&scope={}&state={}&code_challenge={}&code_challenge_method=S256",
+        "{endpoint}{sep}response_type=code&client_id={}&redirect_uri={}&scope={}&state={}&code_challenge={}&code_challenge_method=S256",
         pct(&client_id),
         pct(redirect_uri),
         pct(&scope),

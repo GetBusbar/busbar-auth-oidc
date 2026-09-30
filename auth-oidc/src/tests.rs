@@ -1334,6 +1334,20 @@ fn build_authorize_url_escapes_delimiters_dedups_openid_and_omits_an_absent_nonc
     assert!(url.ends_with("&code_challenge_method=S256"), "{url}");
 }
 
+/// OIDC-2 (RFC 6749 §3.1): an authorization endpoint that already carries a query (Azure AD B2C's
+/// `?p=<policy>`) keeps it, and the request parameters join it with `&`, not a second `?`.
+#[test]
+fn build_authorize_url_keeps_an_existing_endpoint_query() {
+    let mut c = cfg("groups");
+    c.authorization_endpoint = Some("https://idp/authorize?p=b2c_1".to_string());
+    let url = build_authorize_url(&c, "https://busbar.test/cb", "st", "ch", None);
+    assert!(
+        url.starts_with("https://idp/authorize?p=b2c_1&response_type=code&"),
+        "the endpoint's own query must be kept and joined with '&': {url}"
+    );
+    assert_eq!(url.matches('?').count(), 1, "exactly one '?': {url}");
+}
+
 /// The token-exchange hop is an authorization-code POST that NAMES the secret form field for the
 /// core to fill — it carries the key, never a secret value.
 #[test]
