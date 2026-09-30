@@ -230,10 +230,13 @@ impl JwksCache {
     fn refresh(&self, now: Instant, wait: bool) -> Result<Option<Arc<JwkSet>>, String> {
         // DESPERATE = the caller has nothing at all to serve. Such a caller must join the in-flight
         // fetch rather than be turned away by the rate limit — being rate-limited out of a fetch
-        // that is happening right now would fail the very first requests after boot.
+        // that is happening right now would fail the very first requests after boot. Cached keys
+        // past the staleness ceiling are nothing to serve either (`with_key` treats that caller
+        // exactly like a cold cache), so a waiting caller holding only those is desperate too:
+        // it waits for the in-flight or recovery fetch instead of being rejected.
         let desperate = {
             let inner = self.lock();
-            let desperate = wait && inner.keys.is_none();
+            let desperate = wait && (inner.keys.is_none() || self.past_ceiling(&inner, now));
             // RATE LIMIT, checked before taking the gate so a rate-limited caller never queues.
             if !desperate && !self.permits_attempt(&inner, now) {
                 return self.serve_within_ceiling(&inner, now);
@@ -259,7 +262,9 @@ impl JwksCache {
         // Gate acquired — but the fetch we queued behind may already have satisfied us.
         {
             let mut inner = self.lock();
-            if desperate && inner.keys.is_some() {
+            // Only keys within the ceiling satisfy a desperate caller; keys past it fall through to
+            // the rate-limit re-check (a recovery fetch, or the fail-closed ceiling error).
+            if desperate && inner.keys.is_some() && !self.past_ceiling(&inner, now) {
                 return self.serve_within_ceiling(&inner, now);
             }
             // Re-check the rate limit under the gate: the caller we queued behind has advanced it,
@@ -310,6 +315,13 @@ impl JwksCache {
             None => true,
             Some(t) => now.saturating_duration_since(t) >= self.min_refetch_interval,
         }
+    }
+
+    /// Whether the cached keys are past the absolute staleness ceiling (`max_stale`) at `now`.
+    fn past_ceiling(&self, inner: &Inner, now: Instant) -> bool {
+        inner
+            .fetched_at
+            .is_some_and(|t| now.saturating_duration_since(t) >= self.max_stale)
     }
 
     /// Return the currently cached keys, but ONLY if they are within the absolute staleness ceiling
@@ -372,6 +384,25 @@ mod tests {
             self.calls.fetch_add(1, Ordering::SeqCst);
             std::thread::sleep(self.delay);
             self.body.clone()
+        }
+    }
+
+    /// A fetcher whose first `ok_calls` fetches succeed and every later one fails, each after
+    /// `delay`: an IdP that serves, then goes down.
+    struct ScriptedFetcher {
+        ok_calls: usize,
+        delay: Duration,
+        calls: Arc<AtomicUsize>,
+    }
+    impl JwksFetcher for ScriptedFetcher {
+        fn fetch(&self, _url: &str) -> Result<String, String> {
+            let n = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            std::thread::sleep(self.delay);
+            if n <= self.ok_calls {
+                Ok(jwks("k1"))
+            } else {
+                Err("provider unreachable".into())
+            }
         }
     }
 
@@ -942,23 +973,24 @@ mod tests {
         );
     }
 
-    /// The staleness ceiling on the LOST-`fetch_gate`-RACE early return (`refresh`'s
-    /// `WouldBlock if !desperate` arm, line ~244) — the path a WARM caller takes when another thread is
-    /// mid-fetch. Modeled on `a_non_desperate_caller_that_loses_the_gate_race_returns_immediately`, but
-    /// the loser's `now` is PAST `max_stale`: losing the race must not hand back the ancient keys, it
-    /// must fail closed with the ceiling error like every other early return.
+    /// The staleness ceiling on the LOST-`fetch_gate`-RACE path: a caller whose cached keys are
+    /// past `max_stale` must never be served those keys, even when it loses the gate race. Since
+    /// OIDC-7 such a caller is treated as a cold cache (desperate), so it WAITS for the winner's
+    /// fetch; the winner's keys (fetched at `t0 + 1s`) are still past the ceiling for the loser's
+    /// `now`, so the loser falls through to its own recovery fetch, which fails here. It must fail
+    /// closed, not serve either stale set.
     ///
     /// `min_refetch_interval = ZERO` so the loser is never turned away by the OUTER rate-limit check
-    /// and genuinely reaches the gate-contention arm (same subtlety the gate-race test documents).
-    /// If that arm does not consult `max_stale`, the loser serves the ancient keys and succeeds.
+    /// and genuinely reaches the gate (same subtlety the gate-race test documents).
     #[test]
-    fn the_lost_gate_race_early_return_also_enforces_the_staleness_ceiling() {
+    fn a_lost_gate_race_past_the_ceiling_never_serves_keys_past_the_ceiling() {
         const FETCH: Duration = Duration::from_millis(1500);
         let calls = Arc::new(AtomicUsize::new(0));
         let c = JwksCache::new(
             "https://idp.example/jwks",
-            Box::new(TestFetcher {
-                body: Ok(jwks("k1")),
+            // Prime and the winner's refetch succeed; the loser's recovery fetch fails.
+            Box::new(ScriptedFetcher {
+                ok_calls: 2,
                 delay: FETCH,
                 calls: calls.clone(),
             }),
@@ -978,23 +1010,73 @@ mod tests {
             };
             wait_for_fetch_entries(&calls, 2); // the winner holds the gate, inside its fetch
 
-            // Loser races in PAST the 24h ceiling: loses the gate, takes the ~244 early return.
+            // Loser races in PAST the 24h ceiling: loses the gate and waits for it.
             let past_ceiling = t0 + Duration::from_secs(25 * 3600);
-            let err = c.with_key("k1", past_ceiling, |_| Ok(())).expect_err(
-                "a gate-race loser past max_stale must fail closed, not serve stale keys",
-            );
+            let err = c.with_key("k1", past_ceiling, |_| Ok(()));
             assert!(
-                err.contains("staleness ceiling"),
-                "expected the staleness-ceiling error on the lost-gate-race path, got: {err}"
+                err.is_err(),
+                "a gate-race loser past max_stale must fail closed, not serve stale keys: {err:?}"
             );
             winner.join().unwrap();
         });
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            3,
+            "the loser must try a recovery fetch, never serve the winner's too-old keys"
+        );
     }
 
-    /// The staleness ceiling on the POST-GATE DESPERATE re-check (`refresh` line ~256) — the path a
-    /// caller with NOTHING to serve takes after queueing behind an in-flight fetch that then satisfied
-    /// it. The desperate loser's `now` is past `max_stale`, so even the keys the winner just fetched
-    /// are already too old for it: it must fail closed, not serve them.
+    /// OIDC-7: a caller whose cached keys are past `max_stale` is treated as a COLD cache. When
+    /// it loses the gate race to a recovery fetch that succeeds, it waits for that fetch and serves
+    /// its fresh keys, rather than being rejected with the ceiling error while the recovery is in
+    /// flight.
+    #[test]
+    fn a_caller_past_the_ceiling_waits_for_the_in_flight_recovery_fetch() {
+        const FETCH: Duration = Duration::from_millis(1500);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = JwksCache::new(
+            "https://idp.example/jwks",
+            Box::new(TestFetcher {
+                body: Ok(jwks("k1")),
+                delay: FETCH,
+                calls: calls.clone(),
+            }),
+            Duration::from_secs(60),
+            Duration::from_millis(1),
+        );
+        let t0 = Instant::now();
+        c.with_key("k1", t0, |_| Ok(())).expect("prime");
+
+        // The IdP has been down for 25h (past the 24h ceiling) and is now back.
+        let now = t0 + Duration::from_secs(25 * 3600);
+        std::thread::scope(|s| {
+            let winner = {
+                let c = &c;
+                s.spawn(move || {
+                    c.with_key("k1", now, |_| Ok(()))
+                        .expect("the recovery fetch succeeds")
+                })
+            };
+            wait_for_fetch_entries(&calls, 2); // the winner holds the gate, inside its fetch
+
+            c.with_key("k1", now, |_| Ok(())).expect(
+                "a caller past the ceiling must wait for the in-flight recovery fetch like a cold \
+                 cache, not be rejected",
+            );
+            winner.join().unwrap();
+        });
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "the waiting caller takes the winner's fresh keys, it does not fetch again"
+        );
+    }
+
+    /// The staleness ceiling on the POST-GATE DESPERATE re-check (`refresh` line ~264) — the path a
+    /// caller with NOTHING to serve takes after queueing behind an in-flight fetch that then filled
+    /// the cache. The desperate loser's `now` is past `max_stale`, so even the keys the winner just
+    /// fetched are already too old for it: it must not serve them. Since OIDC-7 it falls through to
+    /// its own recovery fetch, which fails here, so it fails closed.
     ///
     /// If that arm does not consult `max_stale`, the loser serves the winner's keys and succeeds.
     #[test]
@@ -1003,8 +1085,9 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let c = JwksCache::new(
             "https://idp.example/jwks",
-            Box::new(TestFetcher {
-                body: Ok(jwks("k1")),
+            // The winner's fetch succeeds; the loser's recovery fetch fails.
+            Box::new(ScriptedFetcher {
+                ok_calls: 1,
                 delay: FETCH,
                 calls: calls.clone(),
             }),
@@ -1024,18 +1107,21 @@ mod tests {
             wait_for_fetch_entries(&calls, 1); // winner holds the gate and is fetching
 
             // Desperate loser (cache still empty when it enters) waits behind the gate; when it
-            // acquires, the winner has filled `keys`, so it hits the ~256 desperate re-check. Its `now`
+            // acquires, the winner has filled `keys`, so it hits the desperate re-check. Its `now`
             // is past the 24h ceiling, so the freshly-fetched keys are already too old for THIS caller.
             let past_ceiling = t0 + Duration::from_secs(25 * 3600);
-            let err = c
-                .with_key("k1", past_ceiling, |_| Ok(()))
-                .expect_err("a desperate post-gate re-check past max_stale must fail closed");
+            let err = c.with_key("k1", past_ceiling, |_| Ok(()));
             assert!(
-                err.contains("staleness ceiling"),
-                "expected the staleness-ceiling error on the post-gate desperate re-check, got: {err}"
+                err.is_err(),
+                "a desperate post-gate re-check past max_stale must fail closed: {err:?}"
             );
             winner.join().unwrap();
         });
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "the loser must try a recovery fetch, never serve the winner's too-old keys"
+        );
     }
 
     /// The POST-GATE RATE-LIMIT re-check (`refresh` line ~262) fails closed. A DESPERATE caller (cold
