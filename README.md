@@ -10,6 +10,8 @@ The OIDC auth module as a droppable busbar plugin: a cdylib exporting the auth C
 [![ci](https://github.com/GetBusbar/busbar-auth-oidc/actions/workflows/ci.yml/badge.svg?branch=dev)](https://github.com/GetBusbar/busbar-auth-oidc/actions/workflows/ci.yml)
 <!-- fleet:header:end -->
 
+## What it is for
+
 **This plugin's version: v1.0.0.** (Independently versioned from busbar
 itself — see [Versioning](#versioning) below.)
 
@@ -31,7 +33,7 @@ It is a `cdylib` that implements busbar's `AuthModule` trait (via
 and is loaded in-process by busbar over the signed hybrid plugin ABI —
 `dlopen`'d, not spawned as a separate process.
 
-## Versioning
+### Versioning
 
 This plugin is versioned **independently of busbar** — `v1.0.0` here says
 nothing about which busbar release it is. Compatibility with busbar is
@@ -39,7 +41,6 @@ stated separately: **requires busbar 1.5.0+** (the release that ships the
 signed hybrid plugin ABI this crate loads over). Pin both versions
 explicitly in production; do not assume they move together.
 
-## What it is for
 
 - **Verifying who's calling**: define an entry under `identity-providers:`
   with its `settings:` pointed at an IdP (Entra ID, Okta, Auth0, Keycloak,
@@ -54,7 +55,7 @@ explicitly in production; do not assume they move together.
   and policy layer can then gate on — so an operator's existing IdP
   groups drive busbar access without a second identity system.
 
-## Design
+### Design
 
 This repo is a same-repo, 2-crate Cargo workspace: `auth-oidc/` (the
 `busbar-auth-oidc` library — the real OIDC logic, no plugin ABI) and
@@ -76,6 +77,21 @@ at `open()` via the issuer's OIDC discovery document, so boot fails
 loudly if discovery can't find it rather than deferring the failure to
 the first request.
 
+## Config
+
+| Setting | Required | Default | Notes |
+|---|---|---|---|
+| `issuer` | yes | — | The IdP's OIDC issuer URL. Checked against the JWT's `iss` claim. |
+| `audience` | yes | — | The expected `aud` claim (busbar's registered client/resource identifier at the IdP). |
+| `jwks_url` | no | discovered from `issuer` | The IdP's JWKS endpoint. When omitted, resolved once at `open()` via OIDC discovery (`<issuer>/.well-known/openid-configuration`). |
+| `role_claim` | no | `groups` | The claim mapped onto the resulting `Principal`'s roles; set `roles` to use Entra app-roles instead. |
+| `jwks_min_refetch_secs` | no | `60` | JWKS refetch rate-limit (seconds) — the bound on how often a kid-rotation refetch can occur. |
+| `jwks_ttl_secs` | no | `3600` | JWKS cache TTL (seconds). |
+| `ca_cert_pem` | no | — | An extra root CA (PEM) to trust for the JWKS/discovery HTTPS fetch, in addition to the system trust store — for a private CA or a test fixture (this is exactly what `tests/e2e.rs` uses to trust its own self-signed local JWKS server). |
+
+Unknown config fields are rejected (`deny_unknown_fields`) — a typo'd or
+stray key fails loudly at boot instead of being silently ignored.
+
 ## Build
 
 Needs a Rust toolchain ([rustup](https://rustup.rs)); `rust-toolchain.toml` pins
@@ -89,7 +105,7 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
 
-## Dependencies
+### Dependencies
 
 `busbar-auth-oidc` (`auth-oidc/`) is a same-repo crate; `auth-oidc-plugin`
 depends on it as a normal workspace path dependency (`../auth-oidc`).
@@ -105,7 +121,7 @@ or test; the live end-to-end test (`tests/e2e.rs`) builds the real `busbar`
 binary from a checkout named by `BUSBAR_CHECKOUT` (CI's `e2e` job provides
 one at `.busbar-ref`).
 
-## Pack and sign
+### Pack and sign
 
 Once built, the cdylib is packed and signed like any other busbar plugin
 — see
@@ -154,21 +170,6 @@ auth:
 
 — see [`docs/configuration.md`](https://github.com/GetBusbar/busbar/blob/main/docs/configuration.md#auth-plugins)
 for the full `identity-providers:` / `auth.chain` config reference.
-
-## Config
-
-| Setting | Required | Default | Notes |
-|---|---|---|---|
-| `issuer` | yes | — | The IdP's OIDC issuer URL. Checked against the JWT's `iss` claim. |
-| `audience` | yes | — | The expected `aud` claim (busbar's registered client/resource identifier at the IdP). |
-| `jwks_url` | no | discovered from `issuer` | The IdP's JWKS endpoint. When omitted, resolved once at `open()` via OIDC discovery (`<issuer>/.well-known/openid-configuration`). |
-| `role_claim` | no | `groups` | The claim mapped onto the resulting `Principal`'s roles; set `roles` to use Entra app-roles instead. |
-| `jwks_min_refetch_secs` | no | `60` | JWKS refetch rate-limit (seconds) — the bound on how often a kid-rotation refetch can occur. |
-| `jwks_ttl_secs` | no | `3600` | JWKS cache TTL (seconds). |
-| `ca_cert_pem` | no | — | An extra root CA (PEM) to trust for the JWKS/discovery HTTPS fetch, in addition to the system trust store — for a private CA or a test fixture (this is exactly what `tests/e2e.rs` uses to trust its own self-signed local JWKS server). |
-
-Unknown config fields are rejected (`deny_unknown_fields`) — a typo'd or
-stray key fails loudly at boot instead of being silently ignored.
 
 ## Tests
 

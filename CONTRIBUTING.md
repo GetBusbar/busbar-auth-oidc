@@ -1,7 +1,6 @@
-# Contributing to auth-oidc
+# Contributing to busbar-auth-oidc
 
-Thanks for your interest in improving `auth-oidc`. This document covers how to
-build, test, and submit changes.
+Thanks for your interest in improving `busbar-auth-oidc`.
 
 ## Ground rules
 
@@ -11,61 +10,23 @@ build, test, and submit changes.
   [Apache-2.0](LICENSE) license.
 - Security issues go through [SECURITY.md](SECURITY.md), **not** public issues.
 
-## Development setup
+## Layout
 
-`auth-oidc` is a Cargo workspace of two crates — `auth-oidc/` (the
-`busbar-auth-oidc` logic library) and `auth-oidc-plugin/` (the
-`busbar-auth-oidc-plugin` cdylib). You need a recent stable toolchain
-(`rustup` recommended; `rust-toolchain.toml` pins CI's version). busbar is a
-git dependency pinned to the commit in `.busbar-ref` — no sibling checkout is
-needed; see the README's [Dependencies](README.md#dependencies) section.
-`ci.yml` builds and tests against that pin (its `pin` job refuses a manifest
-that disagrees with `.busbar-ref`); the `BUSBAR_REF` this repo owns lives in
-[`release.yml`](.github/workflows/release.yml) (used to check out the
-sibling `busbar` for packing/signing) and
-[`entra-live-check.yml`](.github/workflows/entra-live-check.yml) (used
-for the live Entra check).
-
-```bash
-cargo build --release                       # cdylib
-cargo test                                   # unit tests + the e2e dlopen/JWKS/JWT test
-cargo clippy --all-targets -- -D warnings    # lints must be clean
-cargo fmt --all -- --check                   # format before committing
-```
+Every busbar plugin repo has the same shape. This one is a two-crate Cargo workspace:
+`auth-oidc/` holds the plugin's logic and `auth-oidc-plugin/` is the thin `cdylib` that
+packages it as a droppable `kind: auth` plugin. busbar itself is a git dependency
+pinned to the commit in `.busbar-ref`. The CI, release and lint configuration are
+rendered from [busbar's plugin registry](https://github.com/GetBusbar/busbar/blob/main/plugins.yaml);
+change them there, not here.
 
 ## Before you open a pull request
 
-1. **`cargo fmt --all`** — code must be rustfmt-clean.
-2. **`cargo clippy --all-targets -- -D warnings`** — no warnings.
-3. **`cargo build && cargo test`** — green, including the end-to-end `dlopen`/JWKS/JWT
-   test in `auth-oidc-plugin/tests/e2e.rs` (see the README's [Tests](README.md#tests)
-   section — it must never be allowed to quietly skip under CI).
-4. Add or update tests for any behavior change.
-5. Update documentation (`README.md`, doc comments) when you change behavior or config.
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
+```
 
-## Architecture
-
-This repo is a same-repo, 2-crate Cargo workspace: `auth-oidc/` (the
-`busbar-auth-oidc` library — the real OIDC logic) and `auth-oidc-plugin/`
-(the `busbar-auth-oidc-plugin` cdylib adapter).
-
-`auth-oidc-plugin/src/lib.rs` is deliberately a thin adapter: it turns the
-engine's JSON config into an `OidcModule` and hands the trait object to
-[`busbar-contract`](https://github.com/GetBusbar/busbar/tree/main/crates/busbar-contract)'s `abi::sdk`,
-which emits the C ABI symbols the loader resolves. The actual OIDC logic (JWKS
-fetch/cache, JWT verification, claim policy) lives in `auth-oidc/`, the
-`busbar-auth-oidc` library crate this plugin wraps — a same-repo sibling
-crate, not the `busbar` monorepo — so most substantive OIDC-logic changes
-belong in `auth-oidc/`, not `auth-oidc-plugin/`. Changes to the auth/identity
-path deserve extra care and review: this plugin decides who busbar trusts.
-
-## Commit & PR conventions
-
-- Keep commits focused; squash noisy WIP commits before opening the PR.
-- Write a clear PR description: what changed, why, and how it was verified.
-- Reference any related issue.
-- Stage files by name; avoid sweeping `git add -A` that pulls in unrelated changes.
-
-## Questions
-
-Open a discussion or issue. We're happy to help you get oriented.
+The README's Tests section names any live backend the full suite needs. Add or update
+tests for any behavior change, and update the README when you change behavior or
+config. Keep commits focused and describe what changed, why, and how it was verified.
