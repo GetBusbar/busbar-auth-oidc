@@ -1477,11 +1477,7 @@ fn explicit_login_endpoints_win_and_both_explicit_skip_discovery() {
     let (auth_ep, tok_ep) = resolve_login_endpoints(&c, &fetcher).expect("resolves");
     assert_eq!(auth_ep.as_deref(), Some("https://explicit.test/authorize"));
     assert_eq!(tok_ep.as_deref(), Some("https://explicit.test/token"));
-    assert_eq!(
-        fetcher.calls(),
-        0,
-        "both explicit must not fetch discovery"
-    );
+    assert_eq!(fetcher.calls(), 0, "both explicit must not fetch discovery");
 }
 
 /// ADDITIVE-CONFIG regression: a verify-only config that predates the login fields still parses (all
