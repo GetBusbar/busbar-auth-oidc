@@ -108,13 +108,16 @@ fn open_with(
     Ok(Box::new(OidcModule::new(&cfg, jwks_url, cache_fetcher)))
 }
 
-/// The operator message for a failed browser-login endpoint discovery at load.
+/// The operator message for a failed browser-login endpoint discovery at load. Discovery runs only
+/// here, at load, and nothing retries it, so the message names the two ways out that actually
+/// work: explicit endpoints, or a restart once the IdP's discovery endpoint is back.
 fn login_discovery_failed_message(e: &str) -> String {
     format!(
         "busbar auth-oidc: browser-login endpoint discovery failed ({e}). The plugin is \
          loaded and token VERIFICATION is unaffected, but begin_login/complete_login will \
          refuse every attempt until `authorization_endpoint` and `token_endpoint` are \
-         configured explicitly or discovery succeeds."
+         configured explicitly, or busbar is restarted after the IdP's discovery endpoint \
+         recovers (discovery runs only at load)."
     )
 }
 

@@ -3,7 +3,7 @@
 // `busbar-auth-oidc`'s own job and is covered by that crate's own tests; these only cover what `open`
 // itself does with the config before handing off. The real over-the-ABI, real-network-fixture success
 // path lives in this crate's own `tests/e2e.rs`.
-use super::{open, open_with};
+use super::{login_discovery_failed_message, open, open_with};
 use busbar_auth_oidc::{JwksFetcher, OidcConfig};
 use busbar_contract::auth::{AuthPlugin, BeginLogin, CompleteLogin, LoginOutcome};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -247,4 +247,42 @@ fn open_merges_discovered_login_endpoints_into_the_module() {
         ),
         other => panic!("expected Exchange, got {other:?}"),
     }
+}
+
+#[test]
+fn a_failed_login_discovery_still_opens_and_the_message_names_the_restart() {
+    // OIDC-9: login-endpoint discovery runs only at load and nothing retries it, so the operator
+    // message must not promise recovery "when discovery succeeds"; it must name the restart.
+    let discovery = Discovery::serving(Err("connection refused".to_string()));
+    let module = match open_with(discovery_login_cfg(), &discovery, unused_cache_fetcher) {
+        Ok(m) => m,
+        Err(e) => panic!("a login-discovery failure must not fail open: {e}"),
+    };
+    assert_eq!(
+        discovery.calls.load(Ordering::SeqCst),
+        1,
+        "one discovery GET, no retry"
+    );
+    let begin = BeginLogin {
+        redirect_uri: "https://busbar.test/auth/token".to_string(),
+        state: "st".to_string(),
+        code_challenge: "ch".to_string(),
+        nonce: None,
+        scopes: vec![],
+    };
+    assert!(matches!(module.begin_login(&begin), LoginOutcome::Reject));
+
+    let msg = login_discovery_failed_message("connection refused");
+    assert!(
+        msg.contains("connection refused"),
+        "the cause is named: {msg}"
+    );
+    assert!(
+        !msg.contains("or discovery succeeds"),
+        "discovery never re-runs, so the message must not promise it: {msg}"
+    );
+    assert!(
+        msg.contains("restarted"),
+        "the message must name the restart: {msg}"
+    );
 }
