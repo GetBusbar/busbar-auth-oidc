@@ -14,7 +14,7 @@ use std::task::Poll;
 use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::auth::{LoginHop, LoginHttpResponse};
 
-use crate::fetch::{form, Doc, Fetch};
+use crate::fetch::{Doc, Fetch};
 use crate::flight::Step;
 
 /// The ticket a test's one op runs on.
@@ -44,9 +44,7 @@ pub fn ready<T>(step: Step<T>) -> T {
 pub struct Idp {
     body: Mutex<Result<String, String>>,
     calls: AtomicUsize,
-    urls: Mutex<Vec<String>>,
     reply: Mutex<Result<LoginHttpResponse, String>>,
-    forms: Mutex<Vec<Vec<(String, String)>>>,
 }
 
 impl Idp {
@@ -60,12 +58,10 @@ impl Idp {
         Self {
             body: Mutex::new(answer),
             calls: AtomicUsize::new(0),
-            urls: Mutex::new(Vec::new()),
             reply: Mutex::new(Ok(LoginHttpResponse {
                 status: 200,
                 body: "{}".to_string(),
             })),
-            forms: Mutex::new(Vec::new()),
         }
     }
 
@@ -80,27 +76,9 @@ impl Idp {
         *self.body.lock().unwrap() = answer;
     }
 
-    /// What the token endpoint answers from now on.
-    pub fn answer_post(&self, status: u16, body: &str) {
-        *self.reply.lock().unwrap() = Ok(LoginHttpResponse {
-            status,
-            body: body.to_string(),
-        });
-    }
-
     /// How many requests were made (GETs and POSTs).
     pub fn calls(&self) -> usize {
         self.calls.load(Ordering::SeqCst)
-    }
-
-    /// The URL of every request, in order.
-    pub fn urls(&self) -> Vec<String> {
-        self.urls.lock().unwrap().clone()
-    }
-
-    /// The form of every POST, in order.
-    pub fn forms(&self) -> Vec<Vec<(String, String)>> {
-        self.forms.lock().unwrap().clone()
     }
 
     /// One op on `ticket` whose requests answer at once.
@@ -123,9 +101,8 @@ impl Idp {
         }
     }
 
-    fn start(&self, url: &str) {
+    fn start(&self) {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        self.urls.lock().unwrap().push(url.to_string());
     }
 }
 
@@ -145,7 +122,7 @@ impl Caller<'_> {
             self.in_flight = None;
             return true;
         }
-        self.idp.start(url);
+        self.idp.start();
         if self.pend {
             self.in_flight = Some(url.to_string());
             return false;
@@ -166,15 +143,10 @@ impl Fetch for Caller<'_> {
         Poll::Ready(self.idp.body.lock().unwrap().clone())
     }
 
-    fn post(
-        &mut self,
-        hop: &LoginHop,
-        secret: Option<&str>,
-    ) -> Poll<Result<LoginHttpResponse, String>> {
+    fn post(&mut self, hop: &LoginHop, _: Option<&str>) -> Poll<Result<LoginHttpResponse, String>> {
         if !self.answered(&hop.url) {
             return Poll::Pending;
         }
-        self.idp.forms.lock().unwrap().push(form(hop, secret));
         Poll::Ready(self.idp.reply.lock().unwrap().clone())
     }
 }
