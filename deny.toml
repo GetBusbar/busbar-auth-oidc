@@ -1,6 +1,10 @@
-# RENDERED by `cargo xtask fleet render` from GetBusbar/busbar's plugins.yaml and .github/fleet/
-# templates. cargo-deny policy for a first-party plugin: the license allowlist busbar's own deny.toml
-# holds, and ONE reviewed git source (busbar itself, at the pin).
+# RENDERED by `busbar-release plugin sync` from GetBusbar/busbar-release template/ and busbar's
+# `.github/fleet/deps.toml` at 13595111921338a07736b79c1b3dc97d92213511; a hand edit is overwritten by the next sync. CI runs
+# `cargo deny check` on it (busbar's plugin-ci.yml at the pin). The license allowlist is busbar's own;
+# the one reviewed git source is busbar itself, at the pin.
+[graph]
+all-features = false
+
 [advisories]
 version = 2
 
@@ -30,6 +34,19 @@ confidence-threshold = 0.9
 multiple-versions = "warn"
 wildcards = "deny"
 allow-wildcard-paths = true
+# busbar .github/fleet/deps.toml [bans].deny: one stack per concern, fleet-wide.
+deny = [
+    { crate = "openssl", reason = "TLS is rustls (core-only); no OpenSSL anywhere in the fleet" },
+    { crate = "openssl-sys", reason = "TLS is rustls (core-only); no OpenSSL anywhere in the fleet" },
+    { crate = "native-tls", reason = "TLS is rustls (core-only); no platform TLS anywhere in the fleet" },
+    { crate = "hyper:<1", reason = "HTTP is hyper 1; no hyper 0.14 stack" },
+    { crate = "rustls:<0.23", reason = "one rustls major (0.23) fleet-wide" },
+    { crate = "ring:<0.17", reason = "one ring major (0.17) fleet-wide" },
+    { crate = "serde_yaml", reason = "unmaintained; busbar uses serde_yaml_ng" },
+]
+# busbar .github/fleet/deps.toml [bans].skip: duplicates the fleet accepts, each with its reason there.
+skip = [
+]
 
 [sources]
 unknown-registry = "deny"
