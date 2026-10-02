@@ -1,5 +1,5 @@
-# RENDERED by `cargo xtask fleet render busbar-auth-oidc` from GetBusbar/busbar's plugins.yaml and
-# .github/fleet/ templates; `cargo xtask fleet check` is red on any edit here. Daily: does the newest
+# RENDERED by `busbar-release plugin sync busbar-auth-oidc` from GetBusbar/busbar-release template/; a hand
+# edit is overwritten by the next sync. Daily: does the newest
 # PUBLISHED release still work for a user (busbar's plugin-consumer-verify.yml)? A publish-time check
 # cannot see an artifact that rots afterwards; release.yml verifies each release as it publishes.
 name: consumer-verify
@@ -21,7 +21,7 @@ permissions:
 
 jobs:
   consumer:
-    uses: GetBusbar/busbar/.github/workflows/plugin-consumer-verify.yml@23d8a6b46deb158839df8bc02115b09023633040
+    uses: GetBusbar/busbar/.github/workflows/plugin-consumer-verify.yml@e1d3d8b097201859751d77208e66249d98b50a4b
     with:
       version: ${{ inputs.version || '' }}
       asset_prefix: busbar-auth-oidc
