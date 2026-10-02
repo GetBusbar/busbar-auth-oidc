@@ -80,6 +80,7 @@ fn statement(kind: &str) -> Manifest {
         schema_derived: false,
         host: None,
         declares: Default::default(),
+        statement: None,
     }
 }
 

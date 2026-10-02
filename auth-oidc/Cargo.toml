@@ -36,6 +36,9 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 testkit = ["dep:rcgen", "dep:rustls"]
 
 [dev-dependencies]
+# The contract's test kit (`busbar_contract::testkit::WarnCapture`) for the cache's warning tests: it
+# is compiled only under the dev-only `test-seal` feature, which no non-dev edge enables.
+busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "e1d3d8b097201859751d77208e66249d98b50a4b", features = ["test-seal"] }
 # ring's ECDSA keygen/signing lets the tests mint real ES256 tokens + a matching JWKS fixture with no
 # network — the full signature path is exercised in-process.
 ring = { version = "0.17", features = ["std"] }
