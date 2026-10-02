@@ -15,7 +15,7 @@
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use ring::signature::{EcdsaKeyPair, KeyPair as _, ECDSA_P256_SHA256_FIXED_SIGNING};
-use std::io::{Read as _, Write as _};
+use std::io::Write as _;
 use std::sync::{Arc, Mutex, PoisonError};
 
 /// The token endpoint's reply (status, body) and the request bodies it was sent.
@@ -29,10 +29,7 @@ struct TokenEndpoint {
 fn read_request(stream: &mut impl std::io::Read) -> String {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 4096];
-    loop {
-        let Ok(n) = stream.read(&mut chunk) else {
-            break;
-        };
+    while let Ok(n) = stream.read(&mut chunk) {
         if n == 0 {
             break;
         }
