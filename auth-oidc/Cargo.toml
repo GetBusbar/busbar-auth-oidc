@@ -27,7 +27,6 @@ base64 = "0.22"
 # already in the graph (`http` through busbar-contract).
 url = "2"
 http = "1"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking"] }
 tracing = "0.1"
 # The lent client secret is wiped when the instance drops it; already in the graph (busbar-contract).
 zeroize = "1"

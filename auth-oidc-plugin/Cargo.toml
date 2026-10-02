@@ -26,9 +26,11 @@ busbar-auth-oidc = { path = "../auth-oidc" }
 # and the linked door through the REAL loader's door validation and dispatcher; the end-to-end test
 # loads the built cdylib through the same door.
 busbar-plugin-loader = { git = "https://github.com/GetBusbar/busbar", rev = "934a016e20fc1a67c209b671d137c8cc28092767" }
-# Both tests verify REAL ES256 tokens against a REAL JWKS served over a certificate-verified loopback
-# endpoint: the logic crate's own local issuer (`busbar_auth_oidc::testkit`), so
-# busbar-auth-oidc's ReqwestFetcher does a genuine fetch + verify rather than a stub.
+# Both tests verify REAL ES256 tokens minted by the logic crate's own local issuer
+# (`busbar_auth_oidc::testkit`); the conformance and dlopen tests serve its JWKS through a
+# connection table playing the IdP (the plugin never dials), and the admin-API e2e has the real
+# busbar's connector fetch it from the issuer's certificate-verified loopback endpoint. Dev-only:
+# the testkit's TLS server never reaches the shipped closure.
 busbar-auth-oidc = { path = "../auth-oidc", features = ["testkit"] }
 serde_json = "1"
 # The e2e decodes the login cookie (base64url JSON) the live admin install flow sets.
