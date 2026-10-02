@@ -341,8 +341,8 @@ fn the_linked_and_the_dropped_in_oidc_module_are_one_module() {
     let posts = linked.idp.sent_to("/token");
     assert_eq!(
         posts.len(),
-        4,
-        "codes 1, 3, 4 and 5; code 2's short re-call made none: {text}"
+        5,
+        "one per code; code 2's short re-call made none (`exchanges 1`): {text}"
     );
     assert!(posts.iter().all(|p| p.need == 2 && p.method == "POST"));
     for field in [
