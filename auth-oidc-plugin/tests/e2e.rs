@@ -8,7 +8,7 @@
 //! signature verification and claim-to-identity mapping.
 //!
 //! The admin-API install test drives a real `busbar` binary built from `BUSBAR_CHECKOUT`, whose
-//! connector dials the logic crate's testkit issuer (a real self-signed cert, a real `rustls`
+//! connector dials the tests' local issuer (`support/issuer.rs`) (a real self-signed cert, a real `rustls`
 //! listener — a test server, never the plugin's).
 
 use busbar_plugin_loader::plugin_library_filename;
@@ -254,7 +254,7 @@ fn wait_for_admin_ready(
 /// modules are, like store, restart-to-apply — a fresh process is the real mechanism, not an invented
 /// shortcut). This test: boots a real busbar with the admin listener up, installs the built
 /// auth-oidc-plugin cdylib over that live HTTP API, restarts onto `auth.chain: [oidc]` pointing at a
-/// REAL local HTTPS JWKS fixture (the same `busbar_auth_oidc::testkit::Issuer` the direct-ABI test
+/// REAL local HTTPS JWKS fixture (the same `support::Issuer` the direct-ABI test
 /// above uses — a real self-signed TLS cert, a real ES256 keypair), then drives a REAL data-plane
 /// HTTP request carrying a REAL signed bearer JWT through the live process and confirms it is
 /// authenticated (not 401) — and that a token from the WRONG key is rejected (401), proving the full

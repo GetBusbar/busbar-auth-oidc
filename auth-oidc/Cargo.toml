@@ -30,17 +30,7 @@ http = { workspace = true }
 tracing = { workspace = true }
 # The lent client secret is wiped when the instance drops it; already in the graph (busbar-contract).
 zeroize = { workspace = true }
-# `testkit` only (off by default, never in a shipped build, enabled only through dev-dependencies):
-# the local issuer's certificate and its loopback HTTPS endpoint (src/testkit.rs), for a host whose
-# connector dials it. A test server, never this module's own connection.
-rcgen = { workspace = true, optional = true }
-rustls = { workspace = true, optional = true }
 
-[features]
-# A LOCAL OIDC ISSUER for tests of hosts that load this module (busbar's auth-chain and stdio-serve
-# proofs, this repo's own conformance and e2e tests): an ES256 key, its JWKS served over a
-# certificate-verified loopback endpoint, and genuinely signed tokens. Off by default.
-testkit = ["dep:rcgen", "dep:rustls"]
 
 [dev-dependencies]
 # The contract's test kit (`busbar_contract::testkit::WarnCapture`) for the cache's warning tests: it

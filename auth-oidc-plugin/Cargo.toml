@@ -26,12 +26,14 @@ busbar-auth-oidc = { path = "../auth-oidc" }
 # and the linked door through the REAL loader's door validation and dispatcher; the end-to-end test
 # loads the built cdylib through the same door.
 busbar-plugin-loader = { workspace = true }
-# Both tests verify REAL ES256 tokens minted by the logic crate's own local issuer
-# (`busbar_auth_oidc::testkit`); the conformance and dlopen tests serve its JWKS through a
-# connection table playing the IdP (the plugin never dials), and the admin-API e2e has the real
-# busbar's connector fetch it from the issuer's certificate-verified loopback endpoint. Dev-only:
-# the testkit's TLS server never reaches the shipped closure.
-busbar-auth-oidc = { path = "../auth-oidc", features = ["testkit"] }
+# THE TESTS' LOCAL ISSUER (tests/support/issuer.rs): an ES256 key (ring), its JWKS (base64url,
+# serde_json), genuinely signed tokens, and a certificate-verified loopback HTTPS endpoint (rcgen,
+# rustls) for the admin-API e2e, whose real busbar connector dials it. Test-side only: no feature of
+# the shipped crates turns a TLS stack on, so `cargo metadata`'s resolve carries none on a normal
+# edge (the fleet net ban).
+ring = { workspace = true, features = ["std"] }
+rcgen = { workspace = true }
+rustls = { workspace = true }
 serde_json = { workspace = true }
 # The e2e decodes the login cookie (base64url JSON) the live admin install flow sets.
 base64 = "0.22"

@@ -134,10 +134,8 @@ dependencies = [
  "base64 0.22.1",
  "busbar-contract",
  "http",
- "rcgen",
  "reqwest",
  "ring",
- "rustls",
  "serde",
  "serde_json",
  "tracing",
@@ -153,7 +151,10 @@ dependencies = [
  "busbar-auth-oidc",
  "busbar-contract",
  "busbar-plugin-loader",
+ "rcgen",
  "reqwest",
+ "ring",
+ "rustls",
  "serde_json",
 ]
 

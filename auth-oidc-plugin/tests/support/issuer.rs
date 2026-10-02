@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! **A LOCAL OIDC ISSUER FOR TESTS** (feature `testkit`, off by default, never in a shipped build).
+//! **A LOCAL OIDC ISSUER FOR TESTS** (test-side only: never in a shipped crate).
 //!
 //! A host that loads this module — busbar's own auth-chain and stdio-serve tests, this repo's
 //! conformance tests — needs a real issuer to point it at: an ES256 key whose JWKS the host's
@@ -12,8 +12,8 @@
 //! request with the JWKS (a `POST /token` with the token endpoint's reply, [`Issuer::answer_token`],
 //! recording the form it was sent), and [`Issuer::mint`] signing tokens with the matching key. A
 //! test that plays the IdP as a connection table itself serves [`Issuer::jwks`] and signs with
-//! [`Issuer::sign`]. This server is a TEST'S: the feature is enabled only through dev-dependencies,
-//! so its TLS stack is never in a shipped closure.
+//! [`Issuer::sign`]. This server is a TEST'S: it lives in the plugin crate's tests, so its TLS stack is
+//! never in a shipped closure.
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use ring::signature::{EcdsaKeyPair, KeyPair as _, ECDSA_P256_SHA256_FIXED_SIGNING};

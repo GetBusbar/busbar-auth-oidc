@@ -48,8 +48,6 @@ pub mod fetch;
 pub mod jwks;
 pub mod jwt;
 mod open;
-#[cfg(feature = "testkit")]
-pub mod testkit;
 
 pub use cache::JwksCache;
 pub use discovery::Discovery;

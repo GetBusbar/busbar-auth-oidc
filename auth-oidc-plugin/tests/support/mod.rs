@@ -3,7 +3,7 @@
 
 //! Shared by this crate's integration tests (`e2e.rs`, `conformance.rs`):
 //!
-//! * the logic crate's own local issuer (`busbar_auth_oidc::testkit`, feature `testkit`) — a REAL
+//! * the tests' own local issuer (`issuer.rs`) — a REAL
 //!   ES256 key, its JWKS, and genuinely signed tokens;
 //! * THE IdP AS THE HOST'S CONNECTION TABLE ([`Idp`]): the module never dials, its needs do, so the
 //!   far end is what the host's connector hands its framed requests to. It answers each request by
@@ -46,7 +46,8 @@ use busbar_plugin_loader::dispatch::{
     Dispatcher, Done, Frame, InFrame, LinkedRow, LoadError, NoSink, OutFrame, Plugin, NO_BLOB,
 };
 
-pub use busbar_auth_oidc::testkit::Issuer;
+mod issuer;
+pub use issuer::Issuer;
 
 /// The `iss` of a key used only for its signature (the tests configure the issuer they check).
 pub const UNUSED_ISSUER: &str = "https://issuer.unused.invalid";
