@@ -456,6 +456,18 @@ fn red_an_unreachable_issuer_and_a_ticketless_call_fail_verify_in_1_5_5_s_words(
 /// discovery request and ONE JWKS request between them, and both identify.
 #[test]
 fn concurrent_cold_verifies_make_one_discovery_and_one_jwks_request() {
+    cold_verifies(true);
+}
+
+/// The same two cold verifies submitted back to back, neither waiting for the other to pend.
+#[test]
+fn simultaneous_cold_verifies_make_one_discovery_and_one_jwks_request() {
+    cold_verifies(false);
+}
+
+/// Two cold verifies on one instance; the second submitted once the first pended (`staggered`) or
+/// at once.
+fn cold_verifies(staggered: bool) {
     let key = Issuer::start(UNUSED_ISSUER, KID);
     let token = key.sign(&claims(AUDIENCE));
     let idp = Idp::new(&key);
@@ -475,7 +487,7 @@ fn concurrent_cold_verifies_make_one_discovery_and_one_jwks_request() {
     // discovery request: the second arrives while the first's fetch is in flight.
     let mut replies = Vec::new();
     for (i, (bytes, groups)) in bufs.iter_mut().enumerate() {
-        if i == 1 {
+        if i == 1 && staggered {
             let until = std::time::Instant::now() + Duration::from_secs(10);
             while idp.pended() == 0 {
                 assert!(
