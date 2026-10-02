@@ -134,6 +134,33 @@ pub struct Sent {
     pub body: String,
 }
 
+/// THE DECLARED NEEDS AND THEIR TARGETS: `(need index, the URL the operator's config names for
+/// it)` — discovery on need 0, the JWKS on need 1, the token endpoint on need 2.
+pub fn declared_targets() -> Vec<(u32, String)> {
+    vec![
+        (
+            0,
+            format!("https://idp.conformance.example{DISCOVERY_PATH}"),
+        ),
+        (1, JWKS_URL.to_string()),
+        (2, TOKEN_URL.to_string()),
+    ]
+}
+
+/// Every request in `sent` that is NOT on a declared need index (`< needs`) or whose target is not
+/// the one `allowed` names for its need: the plugin reaching anywhere but its declared needs.
+pub fn strays(sent: &[Sent], needs: u32, allowed: &[(u32, String)]) -> Vec<String> {
+    sent.iter()
+        .filter_map(|s| {
+            if s.need >= needs {
+                return Some(format!("undeclared need {} -> {}", s.need, s.target));
+            }
+            (!allowed.iter().any(|(n, t)| *n == s.need && *t == s.target))
+                .then(|| format!("need {} to a foreign target {}", s.need, s.target))
+        })
+        .collect()
+}
+
 /// One reply being read: how far, and what.
 struct Reply {
     step: u8,

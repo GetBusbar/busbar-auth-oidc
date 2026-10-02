@@ -108,6 +108,10 @@ fn load_and_exercise_auth_oidc_plugin_success() {
     let sent = idp.sent();
     assert_eq!(sent.len(), 1, "one JWKS GET, no discovery: {sent:?}");
     assert_eq!(
+        support::strays(&sent, 3, &support::declared_targets()),
+        Vec::<String>::new()
+    );
+    assert_eq!(
         (sent[0].need, sent[0].target.as_str(), sent[0].path.as_str()),
         (1, support::JWKS_URL, "/keys")
     );

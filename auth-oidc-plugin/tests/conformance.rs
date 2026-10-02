@@ -35,6 +35,9 @@ mod support;
 #[path = "support/net_ban.rs"]
 mod net_ban;
 
+#[path = "support/import_ban.rs"]
+mod import_ban;
+
 use std::time::Duration;
 
 use busbar_contract::abi::auth::{slot, IdentifyOut, IDENTITY_BUF_BYTES, IDENTITY_GROUPS};
@@ -326,6 +329,16 @@ fn the_linked_and_the_dropped_in_oidc_module_are_one_module() {
     // the cache), each to the URL the module named, on its own need; the token POSTs on the token
     // need, carrying the lent secret.
     let sent = linked.idp.sent();
+    // NO CONNECTION OUTSIDE THE DECLARED NEEDS: every establish names a declared need index and
+    // that need's configured target.
+    let needs = rendering::read(&row.statement).expect("reads").needs.len() as u32;
+    for idp in [&linked.idp, &dropped.idp] {
+        assert_eq!(
+            support::strays(&idp.sent(), needs, &support::declared_targets()),
+            Vec::<String>::new(),
+            "{text}"
+        );
+    }
     let discovery: Vec<_> = sent.iter().filter(|s| s.path == DISCOVERY_PATH).collect();
     let jwks: Vec<_> = sent.iter().filter(|s| s.path == "/keys").collect();
     assert_eq!(discovery.len(), 1, "{text}");
@@ -529,6 +542,44 @@ fn cold_verifies(staggered: bool) {
     );
     assert_eq!(idp.sent_to(DISCOVERY_PATH).len(), 1, "{seen}");
     assert_eq!(idp.sent_to("/keys").len(), 1, "{seen}");
+}
+
+/// RED: a request on an undeclared need index, or to a target its need does not name, is caught by
+/// the check the conformance transcript holds every establish to.
+#[test]
+fn red_an_undeclared_need_or_a_foreign_target_is_caught() {
+    let sent = |need: u32, target: &str| support::Sent {
+        conn: 1,
+        need,
+        target: target.to_string(),
+        method: "GET".into(),
+        path: "/".into(),
+        body: String::new(),
+    };
+    let allowed = support::declared_targets();
+    assert_eq!(
+        support::strays(
+            &[
+                sent(1, support::JWKS_URL),
+                sent(7, support::JWKS_URL),
+                sent(1, "https://attacker.example/keys"),
+                sent(2, support::JWKS_URL),
+            ],
+            3,
+            &allowed,
+        ),
+        vec![
+            format!("undeclared need 7 -> {}", support::JWKS_URL),
+            "need 1 to a foreign target https://attacker.example/keys".to_string(),
+            format!("need 2 to a foreign target {}", support::JWKS_URL),
+        ]
+    );
+    assert!(support::strays(
+        &[sent(0, &allowed[0].1), sent(2, support::TOKEN_URL)],
+        3,
+        &allowed
+    )
+    .is_empty());
 }
 
 /// RED: the rendered Statement declares exactly the three needs — outbound, open-web, `https`,
