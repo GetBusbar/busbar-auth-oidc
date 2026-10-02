@@ -1,26 +1,34 @@
-// ── unit tests for THIS crate's own responsibility: adapting the engine's JSON config into a real
-// OIDC module. Hermetic — no network. The underlying verification logic (JWKS/JWT/claims) is
-// `busbar-auth-oidc`'s own job and is covered by that crate's own tests; these only cover what `open`
-// itself does with the config before handing off. The real over-the-ABI, real-network-fixture success
-// path lives in this crate's own `tests/e2e.rs`.
-use super::{login_discovery_failed_message, open, open_with};
-use crate::{JwksFetcher, OidcConfig};
-use busbar_contract::auth::{AuthPlugin, BeginLogin, CompleteLogin, LoginOutcome};
-use std::sync::atomic::{AtomicUsize, Ordering};
+// ── unit tests for THIS module's own responsibility: adapting the engine's JSON config into a real
+// OIDC module. Hermetic — no network. Nothing is fetched at open; the discovery the first op makes
+// is driven here through the scripted IdP (`crate::script`).
+use super::module;
+use crate::script::{ready, Idp, ME};
+use crate::OidcModule;
+use busbar_contract::auth::{BeginLogin, LoginOutcome};
+use std::time::{Duration, Instant};
 
-/// `open` returns `Result<Box<dyn AuthPlugin>, String>`, and `dyn AuthPlugin` is not `Debug` (it
-/// carries no such bound), so the standard `.unwrap_err()` doesn't compile here. This is the
-/// equivalent for this specific `Result` shape.
-fn expect_err(result: Result<Box<dyn AuthPlugin>, String>) -> String {
+/// `module` answers `Result<OidcModule, String>`, and `OidcModule` is not `Debug`, so the standard
+/// `.unwrap_err()` doesn't compile here. This is the equivalent for this specific `Result` shape.
+fn expect_err(result: Result<OidcModule, String>) -> String {
     match result {
-        Ok(_) => panic!("expected open() to fail, but it succeeded"),
+        Ok(_) => panic!("expected open to fail, but it succeeded"),
         Err(e) => e,
+    }
+}
+
+fn begin() -> BeginLogin {
+    BeginLogin {
+        redirect_uri: "https://busbar.test/auth/token".to_string(),
+        state: "st".to_string(),
+        code_challenge: "ch".to_string(),
+        nonce: Some("nc".to_string()),
+        scopes: vec![],
     }
 }
 
 #[test]
 fn empty_config_is_rejected() {
-    let err = expect_err(open(""));
+    let err = expect_err(module(""));
     assert!(
         err.contains("config"),
         "error should name that config is required: {err}"
@@ -29,13 +37,13 @@ fn empty_config_is_rejected() {
 
 #[test]
 fn whitespace_only_config_is_rejected() {
-    let err = expect_err(open("   \n\t  "));
+    let err = expect_err(module("   \n\t  "));
     assert!(err.contains("config"), "got: {err}");
 }
 
 #[test]
 fn malformed_json_is_rejected() {
-    let err = expect_err(open("{ this is not json"));
+    let err = expect_err(module("{ this is not json"));
     assert!(
         err.contains("invalid oidc plugin config"),
         "error should name the config as invalid: {err}"
@@ -46,13 +54,13 @@ fn malformed_json_is_rejected() {
 fn config_missing_issuer_is_rejected() {
     // `issuer` has no `#[serde(default)]` in `OidcConfig` — it is required. `deny_unknown_fields`
     // is also on, so this proves the missing-required-field path specifically, not a stray typo.
-    let err = expect_err(open(r#"{"audience":"api://busbar"}"#));
+    let err = expect_err(module(r#"{"audience":"api://busbar"}"#));
     assert!(err.contains("invalid oidc plugin config"), "got: {err}");
 }
 
 #[test]
 fn config_missing_audience_is_rejected() {
-    let err = expect_err(open(r#"{"issuer":"https://idp.example/v2.0"}"#));
+    let err = expect_err(module(r#"{"issuer":"https://idp.example/v2.0"}"#));
     assert!(err.contains("invalid oidc plugin config"), "got: {err}");
 }
 
@@ -60,97 +68,39 @@ fn config_missing_audience_is_rejected() {
 fn unknown_config_field_is_rejected() {
     // `OidcConfig` is `#[serde(deny_unknown_fields)]` — a typo'd or stray operator key must fail
     // loud at boot, not be silently ignored.
-    let err = expect_err(open(
+    let err = expect_err(module(
         r#"{"issuer":"https://idp.example/v2.0","audience":"a","jwks_url":"https://idp.example/keys","bogus_field":true}"#,
     ));
     assert!(err.contains("invalid oidc plugin config"), "got: {err}");
 }
 
 #[test]
-fn explicit_jwks_url_skips_discovery_and_open_succeeds_without_network() {
-    // `jwks_url` is present, so `resolve_jwks_url` returns it immediately without ever calling
-    // out — discovery is skipped entirely. `open()` itself only builds HTTP clients and resolves
-    // the JWKS url; it does NOT eagerly fetch the JWKS document (that's lazy, on first
-    // `authenticate()`, via `JwksCache`). So this succeeds fully hermetically, proving the
-    // "explicit jwks_url" success-shaped path with zero network I/O, even though the issuer host
-    // below does not exist. The login endpoints are ALSO given explicitly so `resolve_login_endpoints`
-    // short-circuits without a discovery fetch — keeping this hermetic now that `open()` resolves them.
-    let cfg = r#"{
-        "issuer": "https://issuer.invalid.example",
-        "audience": "api://busbar-client",
-        "jwks_url": "https://issuer.invalid.example/keys",
-        "authorization_endpoint": "https://issuer.invalid.example/authorize",
-        "token_endpoint": "https://issuer.invalid.example/token"
-    }"#;
-    let module = open(cfg).expect("explicit jwks_url must skip discovery and succeed");
-    assert_eq!(module.name(), "oidc");
-    assert!(module.cacheable());
-}
-
-#[test]
-fn open_yields_login_capable_module_whose_begin_login_returns_authorize() {
-    // The plugin is now exported via `export_login_plugin!`, so `open()` yields a login-capable
-    // `Box<dyn AuthPlugin>` (AuthModule + LoginModule), NOT a verify-only handle. With an explicit
-    // `authorization_endpoint`, `begin_login` must drive the browser flow and return an Authorize URL
-    // (a plain `export_auth_plugin!` verify-only handle would mask this and `Reject`). Explicit
-    // jwks_url + login endpoints keep this hermetic (no discovery fetch).
-    let cfg = r#"{
-        "issuer": "https://issuer.invalid.example",
-        "audience": "api://busbar-client",
-        "jwks_url": "https://issuer.invalid.example/keys",
-        "authorization_endpoint": "https://issuer.invalid.example/authorize",
-        "token_endpoint": "https://issuer.invalid.example/token"
-    }"#;
-    let module = open(cfg).expect("open must succeed with explicit endpoints");
-
-    let begin = BeginLogin {
-        redirect_uri: "https://busbar.test/auth/token".to_string(),
-        state: "st".to_string(),
-        code_challenge: "ch".to_string(),
-        nonce: Some("nc".to_string()),
-        scopes: vec![],
-    };
-    match module.begin_login(&begin) {
-        LoginOutcome::Authorize(url) => {
-            assert!(
-                url.starts_with("https://issuer.invalid.example/authorize?"),
-                "begin_login must redirect to the configured authorize endpoint, got: {url}"
-            );
-        }
-        other => panic!("expected Authorize from a login-capable module, got {other:?}"),
-    }
-}
-
-#[test]
-fn missing_jwks_url_with_malformed_issuer_fails_fast_without_network() {
-    // No `jwks_url` ⇒ discovery is attempted from `issuer`. An issuer with no URL scheme produces
-    // a discovery URL reqwest cannot even parse — the failure is a client-side URL-parse error
-    // raised before any socket/DNS activity, so this is still hermetic (no real network access),
-    // while genuinely exercising the "discovery required, resolution fails" path.
-    let cfg = r#"{
-        "issuer": "not-a-valid-url-at-all",
-        "audience": "api://busbar-client"
-    }"#;
-    let err = expect_err(open(cfg));
-    assert!(
-        err.contains("OIDC discovery fetch failed"),
-        "expected a descriptive discovery-failure message naming the failed step, got: {err}"
+fn an_explicit_jwks_url_opens_and_resolves_without_a_request() {
+    let m = module(
+        r#"{"issuer":"https://issuer.invalid.example","audience":"api://busbar-client",
+            "jwks_url":"https://issuer.invalid.example/keys"}"#,
+    )
+    .expect("an explicit https jwks_url opens");
+    let idp = Idp::answering(Err("never asked".to_string()));
+    assert_eq!(
+        ready(m.jwks_url(Instant::now(), &mut idp.at_once(Some(ME)))).as_deref(),
+        Ok("https://issuer.invalid.example/keys")
+    );
+    assert_eq!(
+        idp.calls(),
+        0,
+        "an explicit jwks_url never triggers discovery"
     );
 }
 
 #[test]
 fn an_explicit_http_jwks_url_is_refused_at_open() {
-    // OIDC-5 (owner-approved 2026-09-30): the JWKS fetcher is https-only, so an http `jwks_url`
-    // used to boot and then reject every token. It is refused at open, naming the field. Hermetic:
-    // the refusal happens before any fetch.
-    let cfg = r#"{
-        "issuer": "https://issuer.invalid.example",
-        "audience": "api://busbar-client",
-        "jwks_url": "http://issuer.invalid.example/keys",
-        "authorization_endpoint": "https://issuer.invalid.example/authorize",
-        "token_endpoint": "https://issuer.invalid.example/token"
-    }"#;
-    let err = expect_err(open(cfg));
+    // OIDC-5 (owner-approved 2026-09-30): every request is https-only, so an http `jwks_url` would
+    // open and then reject every token. It is refused at open, naming the field.
+    let err = expect_err(module(
+        r#"{"issuer":"https://issuer.invalid.example","audience":"api://busbar-client",
+            "jwks_url":"http://issuer.invalid.example/keys"}"#,
+    ));
     assert!(
         err.contains("jwks_url"),
         "the error must name jwks_url: {err}"
@@ -161,128 +111,95 @@ fn an_explicit_http_jwks_url_is_refused_at_open() {
     );
 }
 
-/// A discovery fetcher serving one fixed body (or failing), counting its GETs. No network.
-struct Discovery {
-    body: Result<String, String>,
-    calls: AtomicUsize,
-}
-impl Discovery {
-    fn serving(body: Result<String, String>) -> Self {
-        Self {
-            body,
-            calls: AtomicUsize::new(0),
-        }
-    }
-}
-impl JwksFetcher for Discovery {
-    fn fetch(&self, _url: &str) -> Result<String, String> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        self.body.clone()
-    }
-}
+/// THE SEAM, as implemented: `open` runs on no ticket with no connector, so it fetches nothing; a
+/// config that needs discovery opens, and the first op that needs the document fetches it. Its
+/// failure fails THAT op with 1.5.5's discovery text (1.5.5 refused boot with it).
+#[test]
+fn discovery_runs_on_the_first_op_and_its_failure_fails_that_op() {
+    let m =
+        module(r#"{"issuer":"https://issuer.invalid.example","audience":"api://busbar-client"}"#)
+            .expect("a config that needs discovery opens: nothing is fetched at open");
+    let idp = Idp::answering(Err("connection refused".to_string()));
+    let now = Instant::now();
+    let err = ready(m.jwks_url(now, &mut idp.at_once(Some(ME))))
+        .expect_err("an unreachable issuer fails the op");
+    assert!(
+        err.starts_with(
+            "OIDC discovery fetch failed (https://issuer.invalid.example/.well-known/openid-configuration): \
+             connection refused"
+        ) && err.ends_with("; set jwks_url explicitly"),
+        "1.5.5's discovery text: {err}"
+    );
+    assert_eq!(idp.calls(), 1);
 
-/// The cache fetcher `open_with` hands the live module. These tests never authenticate, so it is
-/// never called.
-fn unused_cache_fetcher(_: &OidcConfig) -> Result<Box<dyn JwksFetcher>, String> {
-    Ok(Box::new(Discovery::serving(Err("unused".to_string()))))
+    // Inside the retry bound (jwks_min_refetch_secs, 60s by default) the failure is answered
+    // without asking again; past it the issuer is asked again.
+    let again = ready(m.jwks_url(now + Duration::from_secs(1), &mut idp.at_once(Some(ME))));
+    assert_eq!(again, Err(err));
+    assert_eq!(
+        idp.calls(),
+        1,
+        "no fetch storm against an unreachable issuer"
+    );
+    let _ = ready(m.jwks_url(now + Duration::from_secs(61), &mut idp.at_once(Some(ME))));
+    assert_eq!(idp.calls(), 2, "one retry per interval");
 }
 
 const DISCOVERY_ISSUER: &str = "https://issuer.invalid.example";
 
-/// A verify-capable config with an explicit https jwks_url and NO login endpoints, so open resolves
-/// the login endpoints from discovery.
-fn discovery_login_cfg() -> OidcConfig {
-    serde_json::from_str(&format!(
+#[test]
+fn the_discovered_login_endpoints_reach_both_login_steps_from_one_document() {
+    // OIDC-18: the discovered authorization/token endpoints must reach the live module, or every
+    // discovery-configured deployment's login dead-ends.
+    let m = module(&format!(
         r#"{{"issuer":"{DISCOVERY_ISSUER}","audience":"api://busbar-client",
             "jwks_url":"https://issuer.invalid.example/keys"}}"#
     ))
-    .expect("a valid config")
-}
-
-#[test]
-fn open_merges_discovered_login_endpoints_into_the_module() {
-    // OIDC-18: the discovered authorization/token endpoints must reach the live module, or every
-    // discovery-configured deployment's login dead-ends. Hermetic: discovery is a fixture.
+    .expect("opens");
     let doc = serde_json::json!({
         "issuer": DISCOVERY_ISSUER,
         "jwks_uri": "https://issuer.invalid.example/keys",
         "authorization_endpoint": "https://issuer.invalid.example/discovered/authorize",
         "token_endpoint": "https://issuer.invalid.example/discovered/token",
     });
-    let discovery = Discovery::serving(Ok(doc.to_string()));
-    let module = match open_with(discovery_login_cfg(), &discovery, unused_cache_fetcher) {
-        Ok(m) => m,
-        Err(e) => panic!("open_with must succeed with a matching discovery document: {e}"),
-    };
-    assert_eq!(
-        discovery.calls.load(Ordering::SeqCst),
-        1,
-        "one discovery GET"
-    );
-
-    let begin = BeginLogin {
-        redirect_uri: "https://busbar.test/auth/token".to_string(),
-        state: "st".to_string(),
-        code_challenge: "ch".to_string(),
-        nonce: None,
-        scopes: vec![],
-    };
-    match module.begin_login(&begin) {
-        LoginOutcome::Authorize(url) => assert!(
+    let idp = Idp::new(doc.to_string());
+    let now = Instant::now();
+    match ready(m.begin_login(&begin(), now, &mut idp.at_once(Some(ME)))) {
+        Ok(LoginOutcome::Authorize(url)) => assert!(
             url.starts_with("https://issuer.invalid.example/discovered/authorize?"),
             "begin_login must redirect to the DISCOVERED authorize endpoint, got: {url}"
         ),
         other => panic!("expected Authorize, got {other:?}"),
     }
-    let complete = CompleteLogin {
-        code: Some("code".to_string()),
-        redirect_uri: Some("https://busbar.test/auth/token".to_string()),
-        code_verifier: Some("verifier".to_string()),
-        ..Default::default()
-    };
-    match module.complete_login(&complete) {
-        LoginOutcome::Exchange(hop) => assert_eq!(
-            hop.url, "https://issuer.invalid.example/discovered/token",
-            "the token exchange must target the DISCOVERED token endpoint"
-        ),
-        other => panic!("expected Exchange, got {other:?}"),
-    }
+    let hop = ready(m.token_exchange(
+        Some("code"),
+        Some("https://busbar.test/auth/token"),
+        Some("verifier"),
+        now,
+        &mut idp.at_once(Some(ME)),
+    ))
+    .expect("discovered")
+    .expect("a hop");
+    assert_eq!(
+        hop.url, "https://issuer.invalid.example/discovered/token",
+        "the token exchange must target the DISCOVERED token endpoint"
+    );
+    assert_eq!(idp.calls(), 1, "one discovery GET serves both login steps");
 }
 
 #[test]
-fn a_failed_login_discovery_still_opens_and_the_message_names_the_restart() {
-    // OIDC-9: login-endpoint discovery runs only at load and nothing retries it, so the operator
-    // message must not promise recovery "when discovery succeeds"; it must name the restart.
-    let discovery = Discovery::serving(Err("connection refused".to_string()));
-    let module = match open_with(discovery_login_cfg(), &discovery, unused_cache_fetcher) {
-        Ok(m) => m,
-        Err(e) => panic!("a login-discovery failure must not fail open: {e}"),
-    };
-    assert_eq!(
-        discovery.calls.load(Ordering::SeqCst),
-        1,
-        "one discovery GET, no retry"
-    );
-    let begin = BeginLogin {
-        redirect_uri: "https://busbar.test/auth/token".to_string(),
-        state: "st".to_string(),
-        code_challenge: "ch".to_string(),
-        nonce: None,
-        scopes: vec![],
-    };
-    assert!(matches!(module.begin_login(&begin), LoginOutcome::Reject));
-
-    let msg = login_discovery_failed_message("connection refused");
+fn a_failed_login_discovery_fails_begin_login_with_its_cause() {
+    let m = module(&format!(
+        r#"{{"issuer":"{DISCOVERY_ISSUER}","audience":"api://busbar-client",
+            "jwks_url":"https://issuer.invalid.example/keys"}}"#
+    ))
+    .expect("a login-discovery failure cannot fail open: open fetches nothing");
+    let idp = Idp::answering(Err("connection refused".to_string()));
+    let err = ready(m.begin_login(&begin(), Instant::now(), &mut idp.at_once(Some(ME))))
+        .expect_err("begin_login names the discovery failure");
     assert!(
-        msg.contains("connection refused"),
-        "the cause is named: {msg}"
+        err.contains("connection refused"),
+        "the cause is named: {err}"
     );
-    assert!(
-        !msg.contains("or discovery succeeds"),
-        "discovery never re-runs, so the message must not promise it: {msg}"
-    );
-    assert!(
-        msg.contains("restarted"),
-        "the message must name the restart: {msg}"
-    );
+    assert_eq!(idp.calls(), 1);
 }

@@ -6,16 +6,17 @@
 //! (iss/aud/exp/nbf, overage, unmapped) drive [`OidcVerifier::validate_claims`] directly.
 
 use super::*;
+use crate::script::{ready, Idp, ME};
 use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
     Engine,
 };
+use busbar_contract::auth::CompleteLogin;
 use ring::rand::SystemRandom;
 use ring::signature::{
     EcdsaKeyPair, KeyPair, RsaKeyPair, ECDSA_P256_SHA256_FIXED_SIGNING, RSA_PKCS1_SHA256,
 };
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 const ISSUER: &str = "https://login.microsoftonline.com/tenant-guid/v2.0";
 const AUDIENCE: &str = "api://busbar-client-id";
@@ -68,45 +69,101 @@ impl TestKey {
     }
 }
 
-/// A fetcher serving a fixed body, counting fetches (to prove caching + bounded refetch). The body can
-/// be swapped to simulate a key rotation (`set_body`), and `calls` counts every fetch attempt so a
-/// test can assert exactly how many refetches a scenario triggered.
-struct FixtureFetcher {
-    body: Mutex<String>,
-    calls: AtomicUsize,
+/// The scripted IdP serving the JWKS (`crate::script`): a fixed body, swappable to simulate a key
+/// rotation (`set_body`), counting every fetch (`calls`) so a test can assert exactly how many
+/// refetches a scenario triggered.
+type FixtureFetcher = Idp;
+
+/// A module over a scripted IdP whose requests answer at once: the module's sans-IO answers, as
+/// 1.5.5's synchronous ones read.
+struct Module {
+    m: OidcModule,
+    idp: Arc<Idp>,
 }
-impl FixtureFetcher {
-    fn new(body: String) -> Self {
+
+impl Module {
+    fn new(c: &OidcConfig, idp: impl Into<Arc<Idp>>) -> Self {
         Self {
-            body: Mutex::new(body),
-            calls: AtomicUsize::new(0),
+            m: OidcModule::new(c),
+            idp: idp.into(),
         }
     }
 
-    /// Swap the served body in place — simulates the provider rotating its JWKS underneath an
-    /// already-running module, without rebuilding the module (and therefore without resetting the
-    /// cache or the refetch rate-limit clock).
-    fn set_body(&self, body: String) {
-        *self.body.lock().unwrap() = body;
+    fn verify(&self, token: &str, now: i64, mono: Instant) -> AuthVerdict {
+        ready(
+            self.m
+                .verify(Some(token), now, mono, &mut self.idp.at_once(Some(ME))),
+        )
+        .expect("the JWKS url is configured")
     }
 
-    fn calls(&self) -> usize {
-        self.calls.load(Ordering::SeqCst)
+    fn authenticate(&self, token: Option<&str>) -> AuthVerdict {
+        let mut io = self.idp.at_once(Some(ME));
+        ready(self.m.verify(token, now_unix(), Instant::now(), &mut io)).expect("no discovery")
+    }
+
+    fn begin_login(&self, req: &BeginLogin) -> LoginOutcome {
+        let mut io = self.idp.at_once(Some(ME));
+        ready(self.m.begin_login(req, Instant::now(), &mut io)).expect("no discovery")
+    }
+
+    /// 1.5.5's `complete_login`: a token response verified into an identity, else the callback's
+    /// exchange hop (or a fail-closed reject).
+    fn complete_login(&self, req: &CompleteLogin) -> LoginOutcome {
+        let mut io = self.idp.at_once(Some(ME));
+        if let Some(resp) = &req.token_response {
+            return ready(self.m.identity_from_token_response(
+                resp,
+                now_unix(),
+                Instant::now(),
+                &mut io,
+            ))
+            .expect("no discovery");
+        }
+        match ready(self.m.token_exchange(
+            req.code.as_deref(),
+            req.redirect_uri.as_deref(),
+            req.code_verifier.as_deref(),
+            Instant::now(),
+            &mut io,
+        ))
+        .expect("no discovery")
+        {
+            Some(hop) => LoginOutcome::Exchange(hop),
+            None => LoginOutcome::Reject,
+        }
+    }
+
+    fn identity_from_token_response(
+        &self,
+        resp: &LoginHttpResponse,
+        now: i64,
+        mono: Instant,
+    ) -> LoginOutcome {
+        let mut io = self.idp.at_once(Some(ME));
+        ready(
+            self.m
+                .identity_from_token_response(resp, now, mono, &mut io),
+        )
+        .expect("no discovery")
     }
 }
-impl JwksFetcher for FixtureFetcher {
-    fn fetch(&self, _url: &str) -> Result<String, String> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        Ok(self.body.lock().unwrap().clone())
-    }
+
+/// 1.5.5's `resolve_jwks_url`: the explicit URL (held to https), else discovered.
+fn resolve_jwks_url(c: &OidcConfig, idp: &Idp) -> Result<String, String> {
+    check_jwks_url(c)?;
+    ready(OidcModule::new(c).jwks_url(Instant::now(), &mut idp.at_once(Some(ME))))
 }
-// `OidcModule::new` takes ownership of a `Box<dyn JwksFetcher>`, but the test needs a live handle to
-// swap the body after construction — so hand the module an `Arc<FixtureFetcher>` through this
-// blanket impl rather than changing `OidcModule::new`'s signature.
-impl JwksFetcher for Arc<FixtureFetcher> {
-    fn fetch(&self, url: &str) -> Result<String, String> {
-        (**self).fetch(url)
-    }
+
+/// 1.5.5's `resolve_login_endpoints`: explicit ones win, the others discovered.
+fn resolve_login_endpoints(
+    c: &OidcConfig,
+    idp: &Idp,
+) -> Result<(Option<String>, Option<String>), String> {
+    let (m, now) = (OidcModule::new(c), Instant::now());
+    let authorize = ready(m.authorization_endpoint(now, &mut idp.at_once(Some(ME))))?;
+    let token = ready(m.token_endpoint(now, &mut idp.at_once(Some(ME))))?;
+    Ok((authorize, token))
 }
 
 fn base_claims(now: i64) -> Value {
@@ -139,13 +196,8 @@ fn cfg(role_claim: &str) -> OidcConfig {
     }
 }
 
-fn module_with(key: &TestKey, role_claim: &str) -> OidcModule {
-    let fetcher = Box::new(FixtureFetcher::new(key.jwks()));
-    OidcModule::new(
-        &cfg(role_claim),
-        "https://jwks.test/keys".to_string(),
-        fetcher,
-    )
+fn module_with(key: &TestKey, role_claim: &str) -> Module {
+    Module::new(&cfg(role_claim), FixtureFetcher::new(key.jwks()))
 }
 
 // ── signature + full-path tests ─────────────────────────────────────────────────────────────────
@@ -285,12 +337,8 @@ impl RsaTestKey {
     }
 }
 
-fn rsa_module(key: &RsaTestKey, role_claim: &str) -> OidcModule {
-    OidcModule::new(
-        &cfg(role_claim),
-        "https://jwks.test/keys".to_string(),
-        Box::new(FixtureFetcher::new(key.jwks())),
-    )
+fn rsa_module(key: &RsaTestKey, role_claim: &str) -> Module {
+    Module::new(&cfg(role_claim), FixtureFetcher::new(key.jwks()))
 }
 
 #[test]
@@ -494,11 +542,7 @@ fn kid_rotation_triggers_bounded_refetch() {
     let old = TestKey::generate("old-kid");
     let new = TestKey::generate("new-kid");
     let fetcher = Arc::new(FixtureFetcher::new(old.jwks()));
-    let m = OidcModule::new(
-        &cfg("groups"),
-        "https://jwks.test/keys".to_string(),
-        Box::new(fetcher.clone()),
-    );
+    let m = Module::new(&cfg("groups"), fetcher.clone());
     let t0 = Instant::now();
     let now = 1_700_000_000;
 
@@ -1253,19 +1297,6 @@ fn role_claim_as_a_single_scalar_string_is_accepted() {
     assert_eq!(p.roles, vec!["single-role"]);
 }
 
-// ── AuthModule trivia: name/cacheable ──────────────────────────────────────────────────────────
-
-#[test]
-fn module_name_and_cacheable() {
-    let key = TestKey::generate(KID);
-    let m = module_with(&key, "groups");
-    assert_eq!(m.name(), "oidc");
-    assert!(
-        m.cacheable(),
-        "OIDC does real I/O and its verdicts are worth caching"
-    );
-}
-
 // ── browser-login primitives (auth ABI v2, 1.5.2 token-exchange) ─────────────────────────────────
 
 /// The authorize URL is an OAuth authorization-code request carrying PKCE + state + nonce, and
@@ -1447,11 +1478,7 @@ fn login_id_token_audience_is_the_client_id_not_the_bearer_audience() {
     let mut c = cfg("groups");
     c.audience = "api://x".to_string();
     c.client_id = Some("cid".to_string());
-    let m = OidcModule::new(
-        &c,
-        "https://jwks.test/keys".to_string(),
-        Box::new(FixtureFetcher::new(key.jwks())),
-    );
+    let m = Module::new(&c, FixtureFetcher::new(key.jwks()));
     let now = 1_700_000_000;
     let response_for = |aud: &str| {
         let mut claims = base_claims(now);
@@ -1587,11 +1614,7 @@ fn begin_and_complete_login_drive_the_full_flow() {
     let mut c = cfg("groups");
     c.authorization_endpoint = Some("https://idp.test/authorize".to_string());
     c.token_endpoint = Some("https://idp.test/token".to_string());
-    let m = OidcModule::new(
-        &c,
-        "https://jwks.test/keys".to_string(),
-        Box::new(FixtureFetcher::new(key.jwks())),
-    );
+    let m = Module::new(&c, FixtureFetcher::new(key.jwks()));
 
     let begin = BeginLogin {
         redirect_uri: "https://busbar.test/auth/token".to_string(),
@@ -1662,11 +1685,7 @@ fn complete_login_verifies_the_token_response_and_rejects_a_forged_one() {
     let mut c = cfg("groups");
     c.authorization_endpoint = Some("https://idp.test/authorize".to_string());
     c.token_endpoint = Some("https://idp.test/token".to_string());
-    let m = OidcModule::new(
-        &c,
-        "https://jwks.test/keys".to_string(),
-        Box::new(FixtureFetcher::new(key.jwks())),
-    );
+    let m = Module::new(&c, FixtureFetcher::new(key.jwks()));
 
     let good = serde_json::json!({ "id_token": key.mint(&base_claims(real_now)) }).to_string();
     match m.complete_login(&CompleteLogin {
@@ -1713,12 +1732,14 @@ fn complete_login_verifies_the_token_response_and_rejects_a_forged_one() {
     }
 }
 
-/// Fail-closed: a module with no login endpoints (a verify-only deployment) rejects both login
-/// steps rather than emitting a malformed authorize URL or exchange.
+/// Fail-closed: a module with no login endpoints configured whose issuer's discovery document names
+/// none either (a verify-only deployment) rejects both login steps rather than emitting a malformed
+/// authorize URL or exchange.
 #[test]
 fn login_fails_closed_without_endpoints() {
-    let key = TestKey::generate(KID);
-    let m = module_with(&key, "groups"); // cfg() leaves both endpoints None
+    // cfg() leaves both endpoints None; the issuer's document names neither.
+    let doc = serde_json::json!({ "issuer": ISSUER, "jwks_uri": "https://jwks.test/keys" });
+    let m = Module::new(&cfg("groups"), FixtureFetcher::new(doc.to_string()));
     let begin = BeginLogin {
         redirect_uri: "https://busbar.test/auth/token".to_string(),
         state: "st".to_string(),
@@ -1751,15 +1772,16 @@ fn login_fails_closed_without_endpoints() {
 #[test]
 fn untrusted_kid_and_alg_are_escaped_in_error_text() {
     let key = TestKey::generate(KID);
-    let c = crate::cache::JwksCache::new(
+    let c = crate::cache::JwksCache::new(Duration::from_secs(60), Duration::from_secs(3600));
+    let idp = FixtureFetcher::new(key.jwks());
+    let err = ready(c.with_key(
         "https://jwks.test/keys",
-        Box::new(FixtureFetcher::new(key.jwks())),
-        Duration::from_secs(60),
-        Duration::from_secs(3600),
-    );
-    let err = c
-        .with_key("a\nb\u{1b}[31m", Instant::now(), |_| Ok(()))
-        .expect_err("an unknown kid must not verify");
+        "a\nb\u{1b}[31m",
+        Instant::now(),
+        &mut idp.at_once(Some(ME)),
+        |_| Ok(()),
+    ))
+    .expect_err("an unknown kid must not verify");
     assert!(
         !err.contains('\n') && !err.contains('\u{1b}'),
         "the unknown-kid error must escape the header's kid: {err:?}"
@@ -1851,11 +1873,7 @@ fn one_malformed_jwk_is_skipped_not_fatal_to_the_whole_set() {
     assert_eq!(set.keys.len(), 1, "the unusable entries are skipped");
 
     // End to end: a token signed by the valid key verifies against that set.
-    let m = OidcModule::new(
-        &cfg("groups"),
-        "https://jwks.test/keys".to_string(),
-        Box::new(FixtureFetcher::new(body)),
-    );
+    let m = Module::new(&cfg("groups"), FixtureFetcher::new(body));
     let now = 1_700_000_000;
     assert!(matches!(
         m.verify(&key.mint(&base_claims(now)), now, Instant::now()),

@@ -2,16 +2,15 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! End-to-end coverage of the `busbar-auth-oidc-plugin` cdylib DROPPED IN through the real loader's
-//! door validation and dispatcher (`load_dropped`), the auth kind's memory ABI. This is not a stub:
-//! it stands up a genuine local HTTPS JWKS (the logic crate's testkit issuer: a real self-signed
-//! cert, a real `rustls` listener), mints a real ES256-signed JWT, and `dlopen`s the actually-built
-//! plugin cdylib to verify it end to end — a genuine JWKS fetch, a genuine signature verification,
-//! and a genuine claim-to-identity mapping across the door.
+//! door validation and dispatcher (`load_dropped`), the auth kind's memory ABI: a real ES256-signed
+//! JWT verified across the door against the JWKS the plugin fetched through the host's connection
+//! table (`support::Idp`, the IdP as the host's connector hands it the request), a genuine
+//! signature verification and claim-to-identity mapping.
 //!
-//! The admin-API install test drives a real `busbar` binary built from `BUSBAR_CHECKOUT`.
+//! The admin-API install test drives a real `busbar` binary built from `BUSBAR_CHECKOUT`, whose
+//! connector dials the logic crate's testkit issuer (a real self-signed cert, a real `rustls`
+//! listener — a test server, never the plugin's).
 
-use busbar_plugin_loader::dispatch::kinds::auth::Auth;
-use busbar_plugin_loader::dispatch::{load_dropped, rendering_of_library, Plugin};
 use busbar_plugin_loader::plugin_library_filename;
 
 /// Locate the built `busbar_auth_oidc_plugin` cdylib in the target dir (mirrors the loader's own
@@ -51,20 +50,12 @@ fn plugin_path() -> Option<std::path::PathBuf> {
 }
 
 mod support;
-use support::{Issuer, UNUSED_ISSUER};
+use support::{Arm, Idp, Issuer, UNUSED_ISSUER};
 
-/// The built cdylib, admitted through the door against the Statement it renders (what
-/// `busbar-plugin-pack` signs into its manifest).
-fn dropped(path: &std::path::Path, d: &busbar_plugin_loader::dispatch::Dispatcher) -> Plugin<Auth> {
-    let stated = rendering_of_library(path)
-        .expect("the cdylib opens")
-        .expect("the cdylib exports the door");
-    load_dropped(path, &stated, support::bind(d)).expect("the dropped-in door loads")
-}
-
-/// End-to-end SUCCESS: dlopen the real auth-oidc-plugin cdylib, `open` it against a config pointing
-/// at a real local HTTPS JWKS fixture (trusted via `ca_cert_pem`), then `verify` a real ES256-signed
-/// JWT across the door and confirm the identity + mapped groups come back.
+/// End-to-end SUCCESS: dlopen the real auth-oidc-plugin cdylib, `open` it against a config naming
+/// the IdP's JWKS explicitly (so no discovery), then `verify` a real ES256-signed JWT across the
+/// door: the JWKS is fetched through the host's connection table on the JWKS need, and the identity
+/// + mapped groups come back.
 #[test]
 fn load_and_exercise_auth_oidc_plugin_success() {
     let Some(path) = plugin_path() else {
@@ -73,34 +64,25 @@ fn load_and_exercise_auth_oidc_plugin_success() {
     };
 
     let key = Issuer::start(UNUSED_ISSUER, "test-kid-1");
-    let (jwks_url, cert_pem) = (key.jwks_url().to_string(), key.cert_pem().to_string());
-
-    const ISSUER: &str = "https://oidc-test.invalid/v2.0";
     const AUDIENCE: &str = "api://busbar-client";
-
-    // Explicit login endpoints, so `open` performs no discovery: without them it made a real
-    // discovery GET to the `.invalid` issuer (resolver-dependent, up to the 10s fetch timeout).
     let cfg = serde_json::json!({
-        "issuer": ISSUER,
+        "issuer": support::ISSUER,
         "audience": AUDIENCE,
-        "jwks_url": jwks_url,
-        "ca_cert_pem": cert_pem,
-        "authorization_endpoint": format!("{ISSUER}/authorize"),
-        "token_endpoint": format!("{ISSUER}/token"),
+        "jwks_url": support::JWKS_URL,
     })
     .to_string();
 
-    let d = support::dispatcher();
-    let module = dropped(&path, &d);
-    assert_eq!(module.name(), "busbar-auth-oidc");
-    support::open(&module, &cfg, None).expect("the module opens across the door");
+    let idp = Idp::new(&key);
+    let module = support::bind(&Arm::File(&path), &idp);
+    assert_eq!(module.plugin.name(), "busbar-auth-oidc");
+    support::open(&module.plugin, &cfg, None).expect("the module opens across the door");
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64;
     let claims = serde_json::json!({
-        "iss": ISSUER,
+        "iss": support::ISSUER,
         "aud": AUDIENCE,
         "exp": now + 3600,
         "nbf": now - 10,
@@ -113,20 +95,26 @@ fn load_and_exercise_auth_oidc_plugin_success() {
 
     // No `oid` claim in this fixture, so the IMMUTABLE `sub` is the identity of record —
     // `preferred_username` is display-only, never identity.
-    let identified = support::verify(&module, Some(&token), None);
+    let identified = module.verify(Some(&token), None);
     assert!(
         identified.starts_with(
             "verdict 1 subject=Some(\"oidc:subject-guid\") name=Some(\"Alice Example\") \
              groups=[\"11111111-aaaa\", \"22222222-bbbb\"]"
         ),
-        "expected the real JWKS fetch + real signature verification to identify the caller, \
-         got {identified}"
+        "expected the JWKS fetch through the host + real signature verification to identify the \
+         caller, got {identified}"
+    );
+    let sent = idp.sent();
+    assert_eq!(sent.len(), 1, "one JWKS GET, no discovery: {sent:?}");
+    assert_eq!(
+        (sent[0].need, sent[0].target.as_str(), sent[0].path.as_str()),
+        (1, support::JWKS_URL, "/keys")
     );
 
     // A token signed by a DIFFERENT key (same kid) must fail closed across the door too.
     let forged_token = Issuer::start(UNUSED_ISSUER, "test-kid-1").sign(&claims);
     assert_eq!(
-        support::verify(&module, Some(&forged_token), None),
+        module.verify(Some(&forged_token), None),
         "verdict 2 ",
         "a token signed by the wrong key must be rejected across the door"
     );
@@ -523,9 +511,10 @@ fn load_and_exercise_auth_oidc_plugin_bad_config_fails_over_abi() {
         eprintln!("skip: auth-oidc plugin cdylib not built (run under --workspace)");
         return;
     };
-    let d = support::dispatcher();
+    let key = Issuer::start(UNUSED_ISSUER, "k");
+    let dropped = || support::bind(&Arm::File(&path), &Idp::new(&key));
 
-    let err = support::open(&dropped(&path, &d), "", None)
+    let err = support::open(&dropped().plugin, "", None)
         .expect_err("empty config must fail to open, not silently succeed");
     assert!(
         err.contains("config"),
@@ -533,7 +522,7 @@ fn load_and_exercise_auth_oidc_plugin_bad_config_fails_over_abi() {
     );
 
     let err = support::open(
-        &dropped(&path, &d),
+        &dropped().plugin,
         r#"{"issuer": "https://idp.example/v2.0"}"#, // missing required `audience`
         None,
     )
