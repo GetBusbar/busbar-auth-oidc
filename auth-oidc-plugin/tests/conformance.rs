@@ -471,23 +471,34 @@ fn concurrent_cold_verifies_make_one_discovery_and_one_jwks_request() {
             )
         })
         .collect();
-    let replies: Vec<_> = bufs
-        .iter_mut()
-        .map(|(bytes, groups)| {
-            let ticket = b.dispatcher.mint(0).expect("a ticket");
-            let mut out: IdentifyOut = z();
-            out.head = out_head();
-            let reply = b.dispatcher.submit(
-                &b.plugin,
-                ticket,
-                slot::VERIFY,
-                Frame::new(verify_in(Some(&token), identity_buf(bytes, groups)), out),
-                busbar_contract::abi::mechanism::call::DeadlineClass::Call,
-                now_ns() + 20_000_000_000,
-            );
-            (ticket, reply)
-        })
-        .collect();
+    // The first verify is submitted, and the second only once the first has pended on its
+    // discovery request: the second arrives while the first's fetch is in flight.
+    let mut replies = Vec::new();
+    for (i, (bytes, groups)) in bufs.iter_mut().enumerate() {
+        if i == 1 {
+            let until = std::time::Instant::now() + Duration::from_secs(10);
+            while idp.pended() == 0 {
+                assert!(
+                    std::time::Instant::now() < until,
+                    "the first verify never pended"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+        let ticket = b.dispatcher.mint(0).expect("a ticket");
+        let mut out: IdentifyOut = z();
+        out.head = out_head();
+        let reply = b.dispatcher.submit(
+            &b.plugin,
+            ticket,
+            slot::VERIFY,
+            Frame::new(verify_in(Some(&token), identity_buf(bytes, groups)), out),
+            busbar_contract::abi::mechanism::call::DeadlineClass::Call,
+            now_ns() + 20_000_000_000,
+        );
+        replies.push((ticket, reply));
+    }
+    let tickets: Vec<_> = replies.iter().map(|(t, _)| *t).collect();
     for (ticket, reply) in replies {
         let done = reply
             .wait(Duration::from_secs(30))
@@ -496,8 +507,13 @@ fn concurrent_cold_verifies_make_one_discovery_and_one_jwks_request() {
         assert_eq!(done.frame.expect("the frame").out.verdict, 1, "identified");
         b.dispatcher.recycle(ticket);
     }
-    assert_eq!(idp.sent_to(DISCOVERY_PATH).len(), 1, "{:?}", idp.sent());
-    assert_eq!(idp.sent_to("/keys").len(), 1, "{:?}", idp.sent());
+    let seen = format!(
+        "tickets {tickets:?}; requests {:?}; first reads (conn, ticket) {:?}",
+        idp.sent(),
+        idp.woken()
+    );
+    assert_eq!(idp.sent_to(DISCOVERY_PATH).len(), 1, "{seen}");
+    assert_eq!(idp.sent_to("/keys").len(), 1, "{seen}");
 }
 
 /// RED: the rendered Statement declares exactly the three needs — outbound, open-web, `https`,

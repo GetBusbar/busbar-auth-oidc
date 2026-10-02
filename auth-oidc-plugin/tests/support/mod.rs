@@ -114,6 +114,7 @@ type Wake = Arc<dyn Fn(u64) + Send + Sync>;
 /// One request as the host's framer was handed it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sent {
+    pub conn: u64,
     pub need: u32,
     pub target: String,
     pub method: String,
@@ -134,6 +135,8 @@ struct Reply {
 /// `delay` later from another thread.
 pub struct Idp {
     wake: Mutex<Option<Wake>>,
+    /// `(connection, the waking ticket)` of every first read: which op made each request.
+    woken: Mutex<Vec<(u64, u64)>>,
     answers: Mutex<HashMap<String, (u32, Vec<u8>)>>,
     sent: Mutex<Vec<Sent>>,
     declared: Mutex<Vec<String>>,
@@ -149,6 +152,7 @@ impl Idp {
     pub fn new(key: &Issuer) -> Arc<Self> {
         let idp = Arc::new(Self {
             wake: Mutex::new(None),
+            woken: Mutex::new(Vec::new()),
             answers: Mutex::new(HashMap::new()),
             sent: Mutex::new(Vec::new()),
             declared: Mutex::new(Vec::new()),
@@ -192,6 +196,11 @@ impl Idp {
         self.sent().into_iter().filter(|s| s.path == path).collect()
     }
 
+    /// `(connection, waking ticket)` of every first read, in order.
+    pub fn woken(&self) -> Vec<(u64, u64)> {
+        self.woken.lock().unwrap().clone()
+    }
+
     /// How many reads answered PENDING.
     pub fn pended(&self) -> u32 {
         self.pended.load(Ordering::SeqCst)
@@ -222,7 +231,9 @@ fn piece(kind: PieceKind, len: usize) -> Piece {
 impl Conns for Idp {
     fn open(&self, _: InstanceId, need: NeedId, desc: &OpenDesc<'_>) -> Result<ConnId, ConnError> {
         let path = String::from_utf8_lossy(desc.head_target).into_owned();
+        let id = self.next.fetch_add(1, Ordering::SeqCst);
         self.sent.lock().unwrap().push(Sent {
+            conn: id,
             need: need.0,
             target: desc.target.to_owned(),
             method: String::from_utf8_lossy(desc.method).into_owned(),
@@ -236,7 +247,6 @@ impl Conns for Idp {
             .get(&path)
             .cloned()
             .unwrap_or((404, b"{}".to_vec()));
-        let id = self.next.fetch_add(1, Ordering::SeqCst);
         self.reads.lock().unwrap().insert(
             id,
             Reply {
@@ -265,6 +275,7 @@ impl Conns for Idp {
                 // The far end has not answered yet: the wake comes later, from elsewhere.
                 r.step = 1;
                 self.pended.fetch_add(1, Ordering::SeqCst);
+                self.woken.lock().unwrap().push((conn.0, ticket));
                 let wake = self
                     .wake
                     .lock()

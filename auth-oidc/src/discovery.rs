@@ -150,3 +150,7 @@ impl Discovery {
         Step::Ready(checked)
     }
 }
+
+#[cfg(test)]
+#[path = "tests/discovery_tests.rs"]
+mod tests;

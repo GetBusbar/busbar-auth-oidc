@@ -462,6 +462,21 @@ impl OidcModule {
         )
     }
 
+    /// BOOT-TIME DISCOVERY, the one resolution the host's `ready` lifecycle entry (after `open`,
+    /// before the listener binds; a busbar lane adds it) will run: the JWKS url from the issuer's
+    /// discovery document, a failure refusing boot in 1.5.5's words. An explicit `jwks_url` skips
+    /// it. Until that entry exists the first op that needs the document runs the same resolution
+    /// ([`Self::jwks_url`]), single-flight.
+    ///
+    /// # Errors
+    /// The discovery error, or a document with no `jwks_uri`.
+    pub fn ready(&self, now: Instant, io: &mut dyn Fetch) -> Step<Result<(), String>> {
+        if self.cfg.jwks_url.is_some() {
+            return Step::Ready(Ok(()));
+        }
+        Step::Ready(step!(self.jwks_url(now, io)).map(|_| ()))
+    }
+
     /// The login endpoint `configured`, else the discovery document's `field` (the SAME
     /// issuer-match–guarded document [`Self::jwks_url`] reads); `None` when the document omits it
     /// too (that half of browser login is then unavailable and fails closed).
