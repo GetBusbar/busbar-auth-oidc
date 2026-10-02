@@ -12,12 +12,12 @@ license = "Apache-2.0"
 # The ONE busbar crate a plugin names (#40: contract only). Pinned by git rev to the busbar commit in
 # `.busbar-ref`; a busbar build that links this crate `[patch]`es the busbar git source to its own
 # tree, so ONE copy of the contract links.
-busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "934a016e20fc1a67c209b671d137c8cc28092767" }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+busbar-contract = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 # Signature verification on the workspace's existing crypto backend — NO jsonwebtoken/rsa (avoids
 # RUSTSEC-2023-0071 and a second crypto stack). ring is already in the graph (rustls' backend).
-ring = "0.17"
+ring = { workspace = true }
 # base64url for the JWT segments and JWKS key material; already in the graph.
 base64 = "0.22"
 # NO HTTP CLIENT, NO TLS, NO SOCKET: discovery, the JWKS and the login's token exchange go out
@@ -25,16 +25,16 @@ base64 = "0.22"
 # `url` parses the URLs the module is configured with or discovers (the request target, the https
 # check, 1.5.5's `jwks_url` parse error); `http` names a status as 1.5.5's client printed it. Both
 # already in the graph (`http` through busbar-contract).
-url = "2"
-http = "1"
-tracing = "0.1"
+url = { workspace = true }
+http = { workspace = true }
+tracing = { workspace = true }
 # The lent client secret is wiped when the instance drops it; already in the graph (busbar-contract).
-zeroize = "1"
+zeroize = { workspace = true }
 # `testkit` only (off by default, never in a shipped build, enabled only through dev-dependencies):
 # the local issuer's certificate and its loopback HTTPS endpoint (src/testkit.rs), for a host whose
 # connector dials it. A test server, never this module's own connection.
-rcgen = { version = "0.14", optional = true }
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
+rcgen = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
 
 [features]
 # A LOCAL OIDC ISSUER for tests of hosts that load this module (busbar's auth-chain and stdio-serve
@@ -43,12 +43,12 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 testkit = ["dep:rcgen", "dep:rustls"]
 
 [dev-dependencies]
-# The contract's test kit (`busbar_contract::testkit`: the warn capture the JWKS cache tests read)
-# is behind the DEV-ONLY `test-seal` feature; this dev edge enables it, the normal one above never does.
-busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "934a016e20fc1a67c209b671d137c8cc28092767", features = ["test-seal"] }
+# The contract's test kit (`busbar_contract::testkit::WarnCapture`) for the cache's warning tests: it
+# is compiled only under the dev-only `test-seal` feature, which no non-dev edge enables.
+busbar-contract = { workspace = true, features = ["test-seal"] }
 # ring's ECDSA keygen/signing lets the tests mint real ES256 tokens + a matching JWKS fixture with no
 # network — the full signature path is exercised in-process.
-ring = { version = "0.17", features = ["std"] }
+ring = { workspace = true, features = ["std"] }
 # The live Entra example (examples/entra_live_check.rs) drives the module's sans-IO fetches with a
 # real blocking HTTPS client: an example, never the shipped image.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking"] }
+reqwest = { workspace = true, features = ["blocking"] }
