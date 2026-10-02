@@ -6,8 +6,8 @@
 //! refuses login, so this plugin writes its own `plugin_door!` (THE DESIGN 11, the auth row of the
 //! per-kind table): the SDK's generic lifecycle over [`Oidc`] (`lifecycle: life(Oidc)`), and
 //!
-//! * `verify` — the bearer credential judged by [`OidcModule`](crate::OidcModule)'s verify path:
-//!   an identity, REJECT or PASS, written into the host's identity buffer;
+//! * `verify` — the bearer credential judged by [`OidcModule`]'s verify path: an identity, REJECT or
+//!   PASS, written into the host's identity buffer;
 //! * `begin_login` — the IdP authorize URL, held under the answer's lease;
 //! * `complete_login` — the token exchange made by the plugin itself, with the client secret the
 //!   host lends at `open` (THE DESIGN 6.7: an IdP login holds its own client secret and makes its
@@ -15,12 +15,20 @@
 //! * `open_outbound`, `outbound_ready`, `fields` — not served (the tail states no
 //!   [`CAP_OUTBOUND`](busbar_contract::abi::auth::CAP_OUTBOUND)): REFUSED.
 //!
+//! Every request goes out through the HOST's connector, over the needs the Statement declares
+//! ([`crate::fetch::NEEDS`]): the plugin never dials. An op whose request is in flight answers
+//! PENDING with its exchange parked on its ticket and is re-entered on the wake; an op waiting on
+//! ANOTHER op's discovery or JWKS fetch (single-flight) answers PENDING with a short timer
+//! (`wake_at` on the host's clock) and asks again.
+//!
 //! A linked build registers [`door`]; the dropped-in `cdylib` (`busbar-auth-oidc-plugin`) exports
 //! the same door as its one symbol.
 
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
+use std::task::Poll;
+use std::time::Instant;
 
 use busbar_contract::abi::auth::{
     AuthTail, BeginLoginIn, BeginLoginOut, CompleteLoginIn, FieldsIn, FieldsOut, IdentifyOut,
@@ -33,16 +41,16 @@ use busbar_contract::abi::mechanism::call::{AbiStr, Blob, Outcome, Span, BLOB_AB
 use busbar_contract::abi::mechanism::door::{Rewrite, Statement, REWRITE_ALIAS};
 use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::sdk::auth_door::{verify_tail, with_tail};
+use busbar_contract::abi::sdk::conn::{ConnFailure, Host};
 use busbar_contract::abi::sdk::door::{abi_str, statement, AbiIn, AbiOut};
 use busbar_contract::abi::sdk::life::{Held, Life, Refreshed, Refusal};
 use busbar_contract::abi::sdk::{Instance, Lent, Out, Safe, SafeSlot};
-use busbar_contract::auth::{
-    AuthPlugin, AuthVerdict, BeginLogin, CompleteLogin, LoginOutcome, Principal,
-};
+use busbar_contract::auth::{AuthVerdict, BeginLogin, LoginHttpResponse, LoginOutcome, Principal};
 use zeroize::Zeroizing;
 
-use crate::open::{config, open_parts};
-use crate::ReqwestFetcher;
+use crate::fetch::{Fetch, HostIo, IoState, NEEDS};
+use crate::open::{config, module};
+use crate::{now_unix, OidcModule, Step};
 
 /// The plugin's name: the manifest name its release packs it under.
 pub const NAME: &str = "busbar-auth-oidc";
@@ -71,23 +79,27 @@ const REWRITES: &[Rewrite] = &[Rewrite {
 }];
 
 /// This plugin's Statement: its name and alias, its version, the most calls one instance holds in
-/// flight, its one secret reference and its auth tail.
+/// flight, its one secret reference, its three outbound needs and its auth tail.
 pub const STATEMENT: Statement = Statement {
     secret_refs: SECRET_REFS.as_ptr(),
     secret_refs_len: SECRET_REFS.len(),
     rewrites: REWRITES.as_ptr(),
     rewrites_len: REWRITES.len(),
+    needs: NEEDS.as_ptr(),
+    needs_len: NEEDS.len(),
     ..with_tail(statement(NAME, env!("CARGO_PKG_VERSION"), 64), &TAIL)
 };
 
 /// The most short answers kept for their re-call at once.
 const REACHED_MAX: usize = 1024;
 
+/// How long an op waiting on another op's fetch waits before it asks again, nanoseconds on the
+/// host's monotonic clock.
+const WAIT_NS: u64 = 25_000_000;
+
 /// One opened module: what `open` built from one settings blob and its lent secrets.
 struct Opened {
-    module: Box<dyn AuthPlugin>,
-    /// The HTTPS client the login token exchange goes through (the module's own trust settings).
-    exchange: ReqwestFetcher,
+    module: OidcModule,
     /// The confidential-client secret the host lent, if any.
     secret: Option<Zeroizing<String>>,
     /// The settings and secret it was opened with: a `refresh` with the same ones keeps it.
@@ -96,7 +108,7 @@ struct Opened {
 
 impl Opened {
     fn new(settings: &[u8], secrets: &[&[u8]]) -> Result<Self, Refusal> {
-        let (module, exchange) = open_parts(text(settings)?).map_err(Refusal::failed)?;
+        let module = module(text(settings)?).map_err(Refusal::failed)?;
         let secret = secrets
             .first()
             .map(|s| {
@@ -107,47 +119,56 @@ impl Opened {
             .transpose()?;
         Ok(Self {
             module,
-            exchange,
             secret,
             settings: settings.to_vec(),
         })
     }
 
-    /// The callback's code exchanged at the token endpoint, and the `id_token` it answers verified.
+    /// The callback's code exchanged at the token endpoint (once: the answer is kept in `answer`
+    /// across PENDING, the code redeems once), and the `id_token` it answers verified.
     fn login(
         &self,
         code: Option<&str>,
         redirect_uri: Option<&str>,
         verifier: Option<&str>,
-    ) -> Login {
-        let callback = CompleteLogin {
-            code: code.map(str::to_string),
-            redirect_uri: redirect_uri.map(str::to_string),
-            code_verifier: verifier.map(str::to_string),
-            ..Default::default()
-        };
-        let hop = match self.module.complete_login(&callback) {
-            LoginOutcome::Exchange(hop) => hop,
-            _ => return Login::Bad,
-        };
-        let response = match self
-            .exchange
-            .exchange(&hop, self.secret.as_deref().map(String::as_str))
-        {
-            Ok(r) if r.status < 500 => r,
-            Ok(r) => {
-                return Login::Outage(format!("the token endpoint answered HTTP {}", r.status))
+        answer: &mut Option<LoginHttpResponse>,
+        io: &mut HostIo<'_>,
+    ) -> Step<Login> {
+        let now = Instant::now();
+        if answer.is_none() {
+            let hop = match step!(self
+                .module
+                .token_exchange(code, redirect_uri, verifier, now, io))
+            {
+                Ok(Some(hop)) => hop,
+                Ok(None) => return Step::Ready(Login::Bad),
+                Err(e) => return Step::Ready(Login::Outage(e)),
+            };
+            match io.post(&hop, self.secret.as_deref().map(String::as_str)) {
+                Poll::Pending => return Step::Pending,
+                Poll::Ready(Ok(r)) if r.status < 500 => *answer = Some(r),
+                Poll::Ready(Ok(r)) => {
+                    return Step::Ready(Login::Outage(format!(
+                        "the token endpoint answered HTTP {}",
+                        r.status
+                    )))
+                }
+                Poll::Ready(Err(e)) => return Step::Ready(Login::Outage(e)),
             }
-            Err(e) => return Login::Outage(e),
-        };
-        let answered = CompleteLogin {
-            token_response: Some(response),
-            ..Default::default()
-        };
-        match self.module.complete_login(&answered) {
-            LoginOutcome::Identify(p) => Login::Identity(p),
-            _ => Login::Bad,
         }
+        let Some(response) = answer.as_ref() else {
+            return Step::Ready(Login::Bad);
+        };
+        Step::Ready(
+            match step!(self
+                .module
+                .identity_from_token_response(response, now_unix(), now, io))
+            {
+                Ok(LoginOutcome::Identify(p)) => Login::Identity(p),
+                Ok(_) => Login::Bad,
+                Err(e) => Login::Outage(e),
+            },
+        )
     }
 }
 
@@ -196,7 +217,7 @@ fn text(settings: &[u8]) -> Result<&str, Refusal> {
 
 impl Life for Oidc {
     const CANCEL: u32 = CANCEL_ABANDONED;
-    /// No op pends, so there is no driver ticket.
+    /// Ops pend on their own tickets only, so there is no driver ticket.
     const DRIVE: Outcome = Outcome::Refused;
 
     fn validate(settings: &[u8]) -> Result<(), Refusal> {
@@ -227,6 +248,54 @@ impl Life for Oidc {
         }
         Ok(Refreshed::default())
     }
+}
+
+/// What an op parks on its ticket across PENDING: its requests' state and, for a login, the token
+/// endpoint's answer (the code redeems once).
+#[derive(Default)]
+struct Parked {
+    io: IoState,
+    answer: Option<LoginHttpResponse>,
+}
+
+/// The op's requests on its ticket, resumed from what it parked.
+fn resume<'h>(instance: &Instance<'_, Held<Oidc>>, h: &'h Held<Oidc>) -> (HostIo<'h>, Parked) {
+    let mut parked = instance
+        .resume::<Parked>()
+        .map_or_else(Parked::default, |p| *p);
+    let io = HostIo::new(h.host(), instance.ticket(), std::mem::take(&mut parked.io));
+    (io, parked)
+}
+
+/// Answer PENDING with `parked` (the requests' state from `io`) on the op's ticket: on its own
+/// exchange's wake, or — `wait` — on a short timer while another op's fetch is in flight.
+fn pend<O: AbiOut>(
+    instance: &Instance<'_, Held<Oidc>>,
+    host: Option<&Host>,
+    io: HostIo<'_>,
+    mut parked: Parked,
+    out: &mut Out<'_, O>,
+    wait: bool,
+) -> Outcome {
+    if wait {
+        let clock = host.map_or(Err(ConnFailure::Unarmed), |h| {
+            match h.connector(instance.ticket()).clock_now() {
+                Poll::Ready(r) => r,
+                Poll::Pending => Err(ConnFailure::Fault),
+            }
+        });
+        match clock {
+            Ok(r) => out.wake_at(r.mono_ns.saturating_add(WAIT_NS)),
+            Err(e) => {
+                return out.fail(Refusal::failed(format!(
+                    "oidc: cannot wait for the fetch another call is making: {e}"
+                )))
+            }
+        }
+    }
+    parked.io = io.into_state();
+    instance.park(parked);
+    Outcome::Pending
 }
 
 /// A blob's bytes as text; `None` when absent or not UTF-8.
@@ -305,11 +374,25 @@ impl SafeSlot for Verify {
         };
         let c = input.field(|i| &i.credential);
         let credential = (c.fmt != BLOB_ABSENT && !c.ptr.is_null()).then(|| c.bytes());
-        let verdict = match credential.map(std::str::from_utf8) {
+        let token = match credential.map(std::str::from_utf8) {
             // Bytes that are not text are no JWT: not this module's credential.
-            Some(Err(_)) => AuthVerdict::Pass,
-            Some(Ok(token)) => h.life().now().module.authenticate(Some(token)),
-            None => h.life().now().module.authenticate(None),
+            Some(Err(_)) => {
+                out.set(|o| &o.verdict, VERDICT_PASS);
+                return Outcome::Ready;
+            }
+            Some(Ok(token)) => Some(token),
+            None => None,
+        };
+        let (mut io, parked) = resume(&instance, h);
+        let opened = h.life().now();
+        let verdict = match opened
+            .module
+            .verify(token, now_unix(), Instant::now(), &mut io)
+        {
+            Step::Ready(Ok(v)) => v,
+            Step::Ready(Err(e)) => return out.fail(Refusal::failed(e)),
+            Step::Pending => return pend(&instance, h.host(), io, parked, &mut out, false),
+            Step::Wait => return pend(&instance, h.host(), io, parked, &mut out, true),
         };
         match verdict {
             AuthVerdict::Identify(p) => {
@@ -359,16 +442,21 @@ impl SafeSlot for Begin {
             nonce: str_text(input.field(|i| &i.nonce)).map(str::to_string),
             scopes: Vec::new(),
         };
-        match h.life().now().module.begin_login(&begin) {
-            LoginOutcome::Authorize(url) => {
+        let (mut io, parked) = resume(&instance, h);
+        let opened = h.life().now();
+        match opened.module.begin_login(&begin, Instant::now(), &mut io) {
+            Step::Ready(Ok(LoginOutcome::Authorize(url))) => {
                 out.set(|o| &o.shape, BEGIN_AUTHORIZE);
                 out.lease_str(|o| &o.authorize_url, h.leases(), url);
                 Outcome::Ready
             }
-            _ => out.fail(Refusal::failed(
+            Step::Ready(Ok(_)) => out.fail(Refusal::failed(
                 "oidc: browser login is unavailable: no authorization_endpoint is configured or \
                  was discovered",
             )),
+            Step::Ready(Err(e)) => out.fail(Refusal::failed(e)),
+            Step::Pending => pend(&instance, h.host(), io, parked, &mut out, false),
+            Step::Wait => pend(&instance, h.host(), io, parked, &mut out, true),
         }
     }
 }
@@ -399,22 +487,30 @@ impl SafeSlot for Complete {
         drop(reached);
         let principal = match kept {
             Some(r) => r.principal,
-            None => match oidc.now().login(
-                code,
-                str_text(input.field(|i| &i.redirect_uri)),
-                blob_text(input.field(|i| &i.code_verifier)),
-            ) {
-                Login::Identity(p) => p,
-                Login::Bad => {
-                    out.set(|o| &o.verdict, LOGIN_BAD_CREDENTIAL);
-                    return Outcome::Ready;
+            None => {
+                let (mut io, mut parked) = resume(&instance, h);
+                let login = oidc.now().login(
+                    code,
+                    str_text(input.field(|i| &i.redirect_uri)),
+                    blob_text(input.field(|i| &i.code_verifier)),
+                    &mut parked.answer,
+                    &mut io,
+                );
+                match login {
+                    Step::Ready(Login::Identity(p)) => p,
+                    Step::Ready(Login::Bad) => {
+                        out.set(|o| &o.verdict, LOGIN_BAD_CREDENTIAL);
+                        return Outcome::Ready;
+                    }
+                    Step::Ready(Login::Outage(e)) => {
+                        tracing::warn!(module = "oidc", error = %e, "OIDC token exchange failed");
+                        out.set(|o| &o.verdict, LOGIN_OUTAGE);
+                        return Outcome::Ready;
+                    }
+                    Step::Pending => return pend(&instance, h.host(), io, parked, &mut out, false),
+                    Step::Wait => return pend(&instance, h.host(), io, parked, &mut out, true),
                 }
-                Login::Outage(e) => {
-                    tracing::warn!(module = "oidc", error = %e, "OIDC token exchange failed");
-                    out.set(|o| &o.verdict, LOGIN_OUTAGE);
-                    return Outcome::Ready;
-                }
-            },
+            }
         };
         let answered = identify(
             &principal,

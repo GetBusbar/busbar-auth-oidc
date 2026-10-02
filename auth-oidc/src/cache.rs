@@ -5,60 +5,45 @@
 //! absent from the cached set (the provider rotated its signing key), refetch once, rate-limited,
 //! and retry. Guards against a bogus-`kid` flood turning into a fetch storm.
 //!
-//! ## What the locking here is for, and what it must never do
+//! ## Sans-IO single-flight (THE DESIGN, auth)
 //!
-//! `with_key` is called on EVERY OIDC-authenticated request, synchronously, from the engine's auth
-//! middleware — which is an `async fn` on a Tokio worker thread. Two things therefore must not
-//! happen under this cache's lock, and the whole shape of this file is that constraint:
+//! The cache never blocks and never dials: its fetch is the caller's [`Fetch`], which answers
+//! PENDING while the caller's own exchange is in flight. A cold key id pends `verify`; ONE caller
+//! claims the fetch (the [`Flight`]) and its op re-enters on its exchange's wake; every other caller
+//! with nothing to serve answers [`Step::Wait`] and asks again shortly, taking the winner's keys once
+//! they land. A caller that already holds a usable key set never waits on another's fetch: it serves
+//! from what it has while the winner refreshes. The cache's lock is held for the microseconds it
+//! takes to clone an `Arc` or write one back — never across a fetch, never across a signature
+//! verification (`f` runs on a snapshot with nothing held).
 //!
-//! * **The HTTPS fetch must not run under the lock.** It is `reqwest::blocking` with a 10s timeout,
-//!   so a slow IdP would otherwise park one worker for 10s *and* every other request behind a
-//!   `std::sync::Mutex::lock()` — which, unlike an `.await`, cannot yield. `/healthz` is exempt from
-//!   the auth chain but still needs a worker thread to be polled, so the node fails its liveness
-//!   probe and gets killed. A slow identity provider must not take down traffic that never presented
-//!   an OIDC token.
-//! * **Signature verification must not run under the lock.** `f` is RSA/ECDSA verification, pure
-//!   CPU. Holding the cache lock across it caps OIDC auth throughput at one signature at a time
-//!   PROCESS-WIDE, on reactor threads.
-//!
-//! So the mutex protects only the cached *data*, held for the microseconds it takes to clone an
-//! `Arc` or write one back. The key set is an `Arc<JwkSet>` precisely so a caller can take a
-//! snapshot and then verify against it with nothing held.
-//!
-//! ## Single-flight, and why every fetch trigger is rate-limited
-//!
-//! Fetches are coordinated by a separate gate so that N concurrent requests that all need a refresh
-//! produce ONE fetch, not N serial 10-second ones. A caller that already holds a usable key set
-//! never waits on that gate at all — it serves from what it has and lets the winner refresh in the
-//! background. Only a caller with NOTHING to serve (a cold cache) waits, and then only for the one
-//! in-flight fetch.
+//! ## Why every fetch trigger is rate-limited
 //!
 //! Every trigger — cold start, TTL-stale, and unknown-`kid` rotation alike — goes through the same
 //! `min_refetch_interval` rate limit anchored on the last fetch ATTEMPT (failures included).
 //! Bounding the rotation path alone is not enough: because `fetched_at` advances only on success, an
 //! unreachable IdP would leave the set permanently TTL-stale and every single request would issue its
-//! own fresh GET — an unbounded fetch storm against the provider, each request stalling for the full
-//! timeout.
+//! own fresh GET — an unbounded fetch storm against the provider.
 
-use crate::jwks::JwkSet;
+use crate::fetch::{failed, Doc, Fetch};
+use crate::flight::{Flight, Step};
+use crate::jwks::{Jwk, JwkSet};
+use busbar_contract::abi::sdk::conn::ConnFailure;
 use std::sync::{Arc, Mutex};
+use std::task::Poll;
 use std::time::{Duration, Instant};
 
-/// How a JWKS is fetched. A trait so the verification logic is testable WITHOUT network: the plugin
-/// wires an HTTPS-fetching implementor; tests wire a fixture.
-pub trait JwksFetcher: Send + Sync {
-    /// GET the JWKS document body from the configured `jwks_uri`. Returns the raw JSON text or an
-    /// error message. MUST be bounded both in TIME (a timeout — a hung provider must not hang auth)
-    /// and in BODY SIZE (the real implementation caps at `reqwest_fetcher::MAX_JWKS_BYTES`, since
-    /// the fetch also runs under this cache's single-flight gate and would otherwise park every
-    /// cold-cache caller behind one unbounded read).
-    fn fetch(&self, url: &str) -> Result<String, String>;
+/// Where in a [`JwksCache::with_key`] call its fetch was claimed: the cold/stale refresh before the
+/// first lookup, or the bounded rotation refetch after a miss. A caller re-entering its own fetch
+/// carries on from there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Point {
+    Refresh,
+    Rotation,
 }
 
-/// A JWKS cache over a fetcher. Holds the last-fetched key set and the timestamps that bound refresh.
+/// A JWKS cache. Holds the last-fetched key set, the timestamps that bound refresh and the fetch in
+/// flight.
 pub struct JwksCache {
-    url: String,
-    fetcher: Box<dyn JwksFetcher>,
     /// Minimum gap between fetch ATTEMPTS — the bound on every refetch trigger (cold, TTL-stale,
     /// kid-rotation), so no flood of requests can turn into a fetch storm.
     min_refetch_interval: Duration,
@@ -66,17 +51,13 @@ pub struct JwksCache {
     ttl: Duration,
     /// Absolute ceiling on how long a cached key set may keep serving while every refetch attempt
     /// fails. `ttl`-staleness alone has no upper bound — a transient blip correctly keeps serving the
-    /// last-known-good keys (see `refresh`'s doc comment), but with no ceiling an IdP outage of days
-    /// would keep validating signatures against a key the provider may have rotated out BECAUSE it was
+    /// last-known-good keys (see `settle`), but with no ceiling an IdP outage of days would keep
+    /// validating signatures against a key the provider may have rotated out BECAUSE it was
     /// compromised. Derived from `ttl` (not a new config field): `max(ttl * 24, 24h)`, so a short-TTL
     /// deployment gets a generous-but-bounded window and a long-TTL one still has SOME bound.
     max_stale: Duration,
     /// The cached data. Held for microseconds only — NEVER across a fetch or a signature verify.
     inner: Mutex<Inner>,
-    /// The SINGLE-FLIGHT gate. Held by whichever caller is performing a fetch, for the duration of
-    /// that fetch. Deliberately separate from `inner` so a fetch in progress blocks neither a cache
-    /// read nor a verification. Nothing but the fetch itself is done under it.
-    fetch_gate: Mutex<()>,
 }
 
 struct Inner {
@@ -86,20 +67,15 @@ struct Inner {
     fetched_at: Option<Instant>,
     /// When the last fetch ATTEMPT started (success or failure) — the rate-limit anchor.
     last_attempt: Option<Instant>,
+    /// THE SINGLE FLIGHT: the fetch in progress, and where its caller claimed it.
+    flight: Option<(Flight, Point)>,
 }
 
 impl JwksCache {
-    /// A cache for `url` over `fetcher`, with the given rate limit and TTL.
-    pub fn new(
-        url: impl Into<String>,
-        fetcher: Box<dyn JwksFetcher>,
-        min_refetch_interval: Duration,
-        ttl: Duration,
-    ) -> Self {
+    /// A cache with the given rate limit and TTL.
+    pub fn new(min_refetch_interval: Duration, ttl: Duration) -> Self {
         let max_stale = std::cmp::max(ttl.saturating_mul(24), Duration::from_secs(24 * 3600));
         Self {
-            url: url.into(),
-            fetcher,
             min_refetch_interval,
             ttl,
             max_stale,
@@ -107,70 +83,94 @@ impl JwksCache {
                 keys: None,
                 fetched_at: None,
                 last_attempt: None,
+                flight: None,
             }),
-            fetch_gate: Mutex::new(()),
         }
     }
 
-    /// Run `f` against the key matching `kid`. If the cache is empty or stale, fetch first. If `kid`
-    /// still misses after that (key ROTATION), refetch ONCE — rate-limited by `min_refetch_interval`
-    /// — and retry. `f` receives the found key; a miss after the bounded refetch is a precise error.
+    /// Run `f` against the key matching `kid`, the JWKS fetched from `url` through `io`. If the
+    /// cache is empty or stale, fetch first. If `kid` still misses after that (key ROTATION),
+    /// refetch ONCE — rate-limited by `min_refetch_interval` — and retry. `f` receives the found
+    /// key; a miss after the bounded refetch is a precise error.
     ///
-    /// `f` is invoked with NO cache lock held (see the module docs): concurrent verifications run
-    /// concurrently, and a fetch in flight never blocks one.
+    /// PENDING while this caller's fetch is in flight (re-enter with the same `io` state: the call
+    /// carries on from where it fetched, at the instant it claimed the fetch); WAIT while another
+    /// caller's is and this one has nothing to serve.
     pub fn with_key<T>(
         &self,
+        url: &str,
         kid: &str,
         now: Instant,
-        f: impl Fn(&crate::jwks::Jwk) -> Result<T, String>,
-    ) -> Result<T, String> {
-        let (mut keys, stale, expired) = self.snapshot(now);
-        // Past the absolute staleness ceiling: treat exactly like a cold cache. `refresh` itself
-        // refuses to fall back to these same keys once they are this old (see its Err branch), so
-        // forcing the "nothing to serve" path here — rather than trying `keys` first — means an
-        // outage this long surfaces the honest "cannot verify" error instead of silently keeping a
-        // possibly-revoked key alive.
-        if expired {
-            keys = None;
-        }
-
-        // Ensure we have a (fresh enough) key set. A cold cache has nothing to serve, so it WAITS
-        // for the in-flight fetch; a merely TTL-stale one does not — stale keys still verify tokens,
-        // and blocking on the refresh is the behaviour that turns a slow IdP into an outage.
-        if keys.is_none() || stale {
-            keys = self.refresh(now, /* wait = */ keys.is_none())?;
-        }
+        io: &mut dyn Fetch,
+        f: impl Fn(&Jwk) -> Result<T, String>,
+    ) -> Step<Result<T, String>> {
+        // RESUME: this caller's own fetch, then on from the point it claimed it.
+        let mine = self.lock().flight.filter(|(fl, _)| fl.mine(io.caller()));
+        let (keys, now) = match mine {
+            Some((flight, point)) => {
+                let fetched = match io.get(Doc::Jwks, url) {
+                    Poll::Pending => return Step::Pending,
+                    Poll::Ready(r) => r,
+                };
+                let keys = match self.settle(io, url, flight.at, fetched) {
+                    Ok(keys) => keys,
+                    Err(e) => return Step::Ready(Err(e)),
+                };
+                if point == Point::Rotation {
+                    return Step::Ready(Self::after_rotation(keys.as_deref(), kid, &f));
+                }
+                (keys, flight.at)
+            }
+            None => {
+                let (mut keys, stale, expired) = self.snapshot(now);
+                // Past the absolute staleness ceiling: treat exactly like a cold cache. `settle`
+                // itself refuses to fall back to these same keys once they are this old, so forcing
+                // the "nothing to serve" path here — rather than trying `keys` first — means an
+                // outage this long surfaces the honest "cannot verify" error instead of silently
+                // keeping a possibly-revoked key alive.
+                if expired {
+                    keys = None;
+                }
+                // Ensure we have a (fresh enough) key set. A cold cache has nothing to serve, so it
+                // WAITS for the in-flight fetch; a merely TTL-stale one does not — stale keys still
+                // verify tokens, and waiting on the refresh is what turns a slow IdP into an outage.
+                if keys.is_none() || stale {
+                    let wait = keys.is_none();
+                    keys = step_ok!(self.refresh(io, url, now, wait, Point::Refresh));
+                }
+                (keys, now)
+            }
+        };
         // Still nothing: the provider is unreachable AND we are inside the retry bound, so we are
         // deliberately not asking again yet. Say that, rather than the "unknown kid" error below —
-        // which would blame the token for the provider being down. Also the path a caller past the
-        // staleness ceiling lands on if the refetch still could not produce a fresh set.
-        if keys.is_none() {
-            return Err(format!(
-                "no JWKS has been fetched from {} yet (the last fetch attempt failed and the \
-                 refetch rate limit is holding off the next one); cannot verify any token",
-                self.url
-            ));
-        }
-
+        // which would blame the token for the provider being down.
+        let Some(set) = keys else {
+            return Step::Ready(Err(format!(
+                "no JWKS has been fetched from {url} yet (the last fetch attempt failed and the \
+                 refetch rate limit is holding off the next one); cannot verify any token"
+            )));
+        };
         // First lookup. More than one key can share `kid` (RFC 7517 §4.5 — e.g. an RSA and an EC key
-        // coexisting under one `kid` during an algorithm migration), so try every match and return the
-        // first that verifies; keep the last error if none do.
-        if let Some(set) = &keys {
-            if let Some(result) = Self::try_all(set, kid, &f) {
-                return result;
-            }
+        // coexisting under one `kid` during an algorithm migration), so try every match and return
+        // the first that verifies; keep the last error if none do.
+        if let Some(result) = Self::try_all(&set, kid, &f) {
+            return Step::Ready(result);
         }
-
         // Miss ⇒ possible key rotation. Refetch ONCE if the rate limit permits, then retry. Never
-        // waits: a caller in this branch is about to reject the token anyway, and making it queue
-        // behind another caller's fetch only converts one bad token into a stalled worker.
-        let keys = self.refresh(now, /* wait = */ false)?;
-        if let Some(set) = &keys {
-            if let Some(result) = Self::try_all(set, kid, &f) {
-                return result;
-            }
-        }
+        // waits: a caller in this branch is about to reject the token anyway.
+        let keys = step_ok!(self.refresh(io, url, now, false, Point::Rotation));
+        Step::Ready(Self::after_rotation(keys.as_deref(), kid, &f))
+    }
 
+    /// The lookup after the bounded rotation refetch: a match, or the unknown-`kid` error.
+    fn after_rotation<T>(
+        keys: Option<&JwkSet>,
+        kid: &str,
+        f: &impl Fn(&Jwk) -> Result<T, String>,
+    ) -> Result<T, String> {
+        if let Some(result) = keys.and_then(|set| Self::try_all(set, kid, f)) {
+            return result;
+        }
         // `kid` comes from the UNSIGNED header of an untrusted bearer and this error reaches a
         // warn log before any signature has been accepted, so it is escaped: a kid carrying a
         // newline or a terminal escape must not forge or colour log records. Printable kids are
@@ -185,12 +185,11 @@ impl JwksCache {
     /// Try `f` against every key in `set` matching `kid`, returning the first `Ok`. If at least one
     /// key matched but all errored, returns the LAST error. Returns `None` when zero keys matched
     /// `kid` at all, so the caller can distinguish "no key with this kid" from "keys existed but none
-    /// verified" (the latter is a real verification failure worth reporting precisely; the former
-    /// falls through to the caller's own "no JWKS key matches" message).
+    /// verified".
     fn try_all<T>(
         set: &JwkSet,
         kid: &str,
-        f: &impl Fn(&crate::jwks::Jwk) -> Result<T, String>,
+        f: &impl Fn(&Jwk) -> Result<T, String>,
     ) -> Option<Result<T, String>> {
         let mut last_err = None;
         for k in set.find_all(kid) {
@@ -210,14 +209,10 @@ impl JwksCache {
             None => true,
             Some(t) => now.saturating_duration_since(t) >= self.ttl,
         };
-        let expired = match inner.fetched_at {
-            None => false,
-            Some(t) => now.saturating_duration_since(t) >= self.max_stale,
-        };
-        (inner.keys.clone(), stale, expired)
+        (inner.keys.clone(), stale, self.past_ceiling(&inner, now))
     }
 
-    /// Bring the cache up to date if the rate limit allows, and return the current key set.
+    /// Bring the cache up to date if the rate limit allows, and answer the current key set.
     ///
     /// Never fails on a fetch error when the cache already holds keys: a transient provider blip
     /// must not stop tokens signed by keys we already have from verifying. A cold cache DOES
@@ -225,80 +220,89 @@ impl JwksCache {
     /// reason.
     ///
     /// `wait` distinguishes the two single-flight behaviours: `false` (the common case) means "if
-    /// someone else is already fetching, don't queue — use what we have"; `true` means "we have
+    /// someone else is already fetching, don't wait — use what we have"; `true` means "we have
     /// nothing to serve, so wait for the in-flight fetch and take its result".
-    fn refresh(&self, now: Instant, wait: bool) -> Result<Option<Arc<JwkSet>>, String> {
-        // DESPERATE = the caller has nothing at all to serve. Such a caller must join the in-flight
-        // fetch rather than be turned away by the rate limit — being rate-limited out of a fetch
-        // that is happening right now would fail the very first requests after boot. Cached keys
-        // past the staleness ceiling are nothing to serve either (`with_key` treats that caller
-        // exactly like a cold cache), so a waiting caller holding only those is desperate too:
-        // it waits for the in-flight or recovery fetch instead of being rejected.
-        let desperate = {
-            let inner = self.lock();
-            let desperate = wait && (inner.keys.is_none() || self.past_ceiling(&inner, now));
-            // RATE LIMIT, checked before taking the gate so a rate-limited caller never queues.
-            if !desperate && !self.permits_attempt(&inner, now) {
-                return self.serve_within_ceiling(&inner, now);
-            }
-            desperate
-        };
-
-        // SINGLE-FLIGHT. The winner fetches; a loser with usable keys returns immediately rather
-        // than queueing behind a fetch it does not need.
-        let _gate = match self.fetch_gate.try_lock() {
-            Ok(g) => g,
-            Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
-            Err(std::sync::TryLockError::WouldBlock) if !desperate => {
-                return self.serve_within_ceiling(&self.lock(), now);
-            }
-            // Cold cache: wait for the ONE in-flight fetch rather than failing, and rather than
-            // starting a second one.
-            Err(std::sync::TryLockError::WouldBlock) => {
-                self.fetch_gate.lock().unwrap_or_else(|p| p.into_inner())
-            }
-        };
-
-        // Gate acquired — but the fetch we queued behind may already have satisfied us.
+    fn refresh(
+        &self,
+        io: &mut dyn Fetch,
+        url: &str,
+        now: Instant,
+        wait: bool,
+        point: Point,
+    ) -> Step<Result<Option<Arc<JwkSet>>, String>> {
+        let me = io.caller();
         {
             let mut inner = self.lock();
-            // Only keys within the ceiling satisfy a desperate caller; keys past it fall through to
-            // the rate-limit re-check (a recovery fetch, or the fail-closed ceiling error).
-            if desperate && inner.keys.is_some() && !self.past_ceiling(&inner, now) {
-                return self.serve_within_ceiling(&inner, now);
+            // DESPERATE = the caller has nothing at all to serve: no keys, or only keys past the
+            // staleness ceiling. Such a caller must wait for the in-flight fetch rather than be
+            // turned away by the rate limit — being rate-limited out of a fetch that is happening
+            // right now would fail the very first requests after boot.
+            let desperate = wait && (inner.keys.is_none() || self.past_ceiling(&inner, now));
+            // RATE LIMIT, checked before the flight so a rate-limited caller never waits.
+            if !desperate && !self.permits_attempt(&inner, now) {
+                return Step::Ready(self.serve_within_ceiling(&inner, url, now));
             }
-            // Re-check the rate limit under the gate: the caller we queued behind has advanced it,
-            // and re-fetching immediately would defeat the bound.
+            // SINGLE-FLIGHT. A caller with usable keys serves them rather than waiting on a fetch
+            // it does not need; a desperate one waits for it.
+            if inner.flight.is_some_and(|(fl, _)| fl.held_against(me, now)) {
+                if !desperate {
+                    return Step::Ready(self.serve_within_ceiling(&inner, url, now));
+                }
+                if me.is_none() {
+                    return Step::Ready(Err(failed(url, ConnFailure::NoTicket)));
+                }
+                return Step::Wait;
+            }
+            // Re-check the rate limit for the desperate caller: the fetch it would have waited for
+            // has already been made, and re-fetching immediately would defeat the bound.
             if !self.permits_attempt(&inner, now) {
-                return self.serve_within_ceiling(&inner, now);
+                return Step::Ready(self.serve_within_ceiling(&inner, url, now));
             }
+            // A call on no ticket may not pend, so it may not claim a fetch either: it would hold
+            // the rate-limit window without ever asking.
+            let Some(owner) = me else {
+                return Step::Ready(Err(failed(url, ConnFailure::NoTicket)));
+            };
             // Claim the window BEFORE the fetch so concurrent callers see it and back off. This is
             // also what makes the rate limit apply to FAILURES — the anchor advances either way.
             inner.last_attempt = Some(now);
+            inner.flight = Some((Flight { owner, at: now }, point));
         }
+        // THE FETCH — no lock held.
+        match io.get(Doc::Jwks, url) {
+            Poll::Pending => Step::Pending,
+            Poll::Ready(fetched) => Step::Ready(self.settle(io, url, now, fetched)),
+        }
+    }
 
-        // THE FETCH — no `inner` lock held, only the single-flight gate.
-        let fetched = self
-            .fetcher
-            .fetch(&self.url)
-            .and_then(|body| JwkSet::parse(&body));
-
+    /// The fetch claimed at `at` answered `fetched`: install a parsed set, or keep the previous keys
+    /// (a transient provider blip must not blow away a working key set) — UNLESS those are already
+    /// past the absolute staleness ceiling, in which case a days-long outage must not keep
+    /// validating signatures against keys the provider may have rotated out specifically because
+    /// they were compromised. Ends the caller's flight.
+    fn settle(
+        &self,
+        io: &dyn Fetch,
+        url: &str,
+        at: Instant,
+        fetched: Result<String, String>,
+    ) -> Result<Option<Arc<JwkSet>>, String> {
+        let fetched = fetched.and_then(|body| JwkSet::parse(&body));
         let mut inner = self.lock();
+        if inner.flight.is_some_and(|(fl, _)| fl.mine(io.caller())) {
+            inner.flight = None;
+        }
         match fetched {
-            Ok(set) => {
+            // A late answer to a flight another caller has since taken over never replaces keys
+            // fetched after it was claimed.
+            Ok(set) if inner.fetched_at.is_none_or(|t| t <= at) => {
                 inner.keys = Some(Arc::new(set));
-                inner.fetched_at = Some(now);
+                inner.fetched_at = Some(at);
                 Ok(inner.keys.clone())
             }
-            // Keep the previous keys (a transient provider blip must not blow away a working key
-            // set) and keep serving from them; surface the error only when there is nothing else —
-            // UNLESS those previous keys are already past the absolute staleness ceiling, in which
-            // case a days-long outage must not keep validating signatures against keys the provider
-            // may have rotated out specifically because they were compromised.
+            Ok(_) => Ok(inner.keys.clone()),
             Err(e) => {
-                let too_stale = inner
-                    .fetched_at
-                    .is_some_and(|t| now.saturating_duration_since(t) >= self.max_stale);
+                let too_stale = self.past_ceiling(&inner, at);
                 let previous = inner.keys.clone();
                 drop(inner);
                 match previous {
@@ -309,7 +313,7 @@ impl JwksCache {
                         // window rate-limits this. The error names the URL and the cause only.
                         tracing::warn!(
                             module = "oidc",
-                            url = %self.url,
+                            url = %url,
                             error = %e,
                             "JWKS refresh failed; serving the previous key set"
                         );
@@ -339,28 +343,24 @@ impl JwksCache {
     }
 
     /// Return the currently cached keys, but ONLY if they are within the absolute staleness ceiling
-    /// (`max_stale`). Every early-return path in [`Self::refresh`] that would otherwise serve the
-    /// cached set — the outer rate-limit escape, the lost-`fetch_gate` race, the post-gate desperate
-    /// re-check, and the post-gate rate-limit re-check — routes through here, so `max_stale` is
-    /// enforced UNIFORMLY, not only on the fetch-failure branch. Without this, a sustained IdP outage
-    /// under traffic (where nearly every request takes one of those early returns) would keep
-    /// verifying tokens against a key set old enough that the provider may have rotated it out
-    /// precisely because it was compromised — the exact thing the ceiling exists to stop. Past the
-    /// ceiling it fails closed with the same "cannot verify" posture the fetch-failure path uses.
+    /// (`max_stale`). Every early return in [`Self::refresh`] that would otherwise serve the cached
+    /// set routes through here, so `max_stale` is enforced UNIFORMLY, not only on the fetch-failure
+    /// branch. Without this, a sustained IdP outage under traffic (where nearly every request takes
+    /// one of those early returns) would keep verifying tokens against a key set old enough that the
+    /// provider may have rotated it out precisely because it was compromised. Past the ceiling it
+    /// fails closed with the same "cannot verify" posture the fetch-failure path uses.
     fn serve_within_ceiling(
         &self,
         inner: &Inner,
+        url: &str,
         now: Instant,
     ) -> Result<Option<Arc<JwkSet>>, String> {
-        let too_stale = inner
-            .fetched_at
-            .is_some_and(|t| now.saturating_duration_since(t) >= self.max_stale);
-        if too_stale {
+        if self.past_ceiling(inner, now) {
             Err(format!(
-                "cached JWKS from {} is past the absolute staleness ceiling ({:?}) while every \
+                "cached JWKS from {url} is past the absolute staleness ceiling ({:?}) while every \
                  refetch attempt is failing or rate-limited; refusing to verify against a key set \
                  the provider may have rotated out because it was compromised",
-                self.url, self.max_stale
+                self.max_stale
             ))
         } else {
             Ok(inner.keys.clone())
@@ -375,852 +375,5 @@ impl JwksCache {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Barrier;
-
-    /// A minimal but real JWKS document. These tests exercise the CACHE's concurrency contract, not
-    /// the crypto — `f` is whatever the test needs it to be — so the key material only has to parse.
-    fn jwks(kid: &str) -> String {
-        format!(r#"{{"keys":[{{"kty":"EC","crv":"P-256","kid":"{kid}","x":"AAAA","y":"BBBB"}}]}}"#)
-    }
-
-    /// A fetcher that counts its calls and can be made arbitrarily slow or broken — a stand-in for
-    /// the IdP having a bad day, which is the whole failure mode under test.
-    struct TestFetcher {
-        body: Result<String, String>,
-        delay: Duration,
-        calls: Arc<AtomicUsize>,
-    }
-    impl JwksFetcher for TestFetcher {
-        fn fetch(&self, _url: &str) -> Result<String, String> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            std::thread::sleep(self.delay);
-            self.body.clone()
-        }
-    }
-
-    /// A fetcher whose first `ok_calls` fetches succeed and every later one fails, each after
-    /// `delay`: an IdP that serves, then goes down.
-    struct ScriptedFetcher {
-        ok_calls: usize,
-        delay: Duration,
-        calls: Arc<AtomicUsize>,
-    }
-    impl JwksFetcher for ScriptedFetcher {
-        fn fetch(&self, _url: &str) -> Result<String, String> {
-            let n = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
-            std::thread::sleep(self.delay);
-            if n <= self.ok_calls {
-                Ok(jwks("k1"))
-            } else {
-                Err("provider unreachable".into())
-            }
-        }
-    }
-
-    fn cache(
-        body: Result<String, String>,
-        delay: Duration,
-        ttl: Duration,
-    ) -> (JwksCache, Arc<AtomicUsize>) {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let c = JwksCache::new(
-            "https://idp.example/jwks",
-            Box::new(TestFetcher {
-                body,
-                delay,
-                calls: calls.clone(),
-            }),
-            Duration::from_secs(60),
-            ttl,
-        );
-        (c, calls)
-    }
-
-    /// Block until the fetcher has been ENTERED `n` times in total. `calls` is bumped on entry to
-    /// `fetch`, and `fetch` only ever runs with the single-flight gate held (and after the
-    /// rate-limit anchor is set), so once the count is reached the gate winner is provably inside
-    /// its fetch.
-    /// Ordering the racing threads on this, not on a sleep, keeps these tests deterministic on a
-    /// loaded runner: a descheduled winner can no longer let the "loser" become the fetcher.
-    fn wait_for_fetch_entries(calls: &AtomicUsize, n: usize) {
-        let deadline = Instant::now() + Duration::from_secs(60);
-        while calls.load(Ordering::SeqCst) < n {
-            assert!(
-                Instant::now() < deadline,
-                "the gate winner never entered its fetch"
-            );
-            std::thread::sleep(Duration::from_millis(1));
-        }
-    }
-
-    /// THE CLASS TEST, half 1: signature verification must not be serialised.
-    ///
-    /// `f` is RSA/ECDSA verification, and it used to run WITH the cache mutex held — so every OIDC
-    /// request in the process verified one at a time, on Tokio worker threads. The property is
-    /// concurrency, so the test measures it directly: `f` records how many callers are inside it at
-    /// once.
-    ///
-    /// With the lock held across `f`, observed concurrency is exactly 1. As implemented, several
-    /// verifications overlap.
-    #[test]
-    fn concurrent_verifications_are_not_serialised() {
-        let (c, _calls) = cache(Ok(jwks("k1")), Duration::ZERO, Duration::from_secs(3600));
-        // Prime the cache so the fetch is out of the picture and only `f`'s locking is measured.
-        c.with_key("k1", Instant::now(), |_| Ok(())).expect("prime");
-
-        const N: usize = 8;
-        let inside = Arc::new(AtomicUsize::new(0));
-        let peak = Arc::new(AtomicUsize::new(0));
-        let start = Arc::new(Barrier::new(N));
-        let now = Instant::now();
-
-        std::thread::scope(|s| {
-            for _ in 0..N {
-                let (c, inside, peak, start) = (&c, inside.clone(), peak.clone(), start.clone());
-                s.spawn(move || {
-                    start.wait();
-                    c.with_key("k1", now, |_| {
-                        let here = inside.fetch_add(1, Ordering::SeqCst) + 1;
-                        peak.fetch_max(here, Ordering::SeqCst);
-                        std::thread::sleep(Duration::from_millis(80));
-                        inside.fetch_sub(1, Ordering::SeqCst);
-                        Ok(())
-                    })
-                    .expect("verify");
-                });
-            }
-        });
-
-        assert!(
-            peak.load(Ordering::SeqCst) > 1,
-            "OIDC signature verification is serialised process-wide: {} of {N} concurrent \
-             verifications ever overlapped. The cache lock must not be held across `f`.",
-            peak.load(Ordering::SeqCst)
-        );
-    }
-
-    /// THE CLASS TEST, half 2: a slow JWKS endpoint must not stall callers that have a usable key.
-    ///
-    /// This is the liveness failure. One request triggers a TTL-stale refetch against an IdP that
-    /// takes seconds; every other request — including ones whose token is signed by a key already
-    /// cached — used to block on `lock()`, which cannot yield, parking worker threads until
-    /// `/healthz` could not be polled and the orchestrator killed the node.
-    ///
-    /// With the fetch under the lock, the second caller waits out the full fetch. As implemented, it
-    /// serves from the cached key set immediately.
-    #[test]
-    fn a_slow_jwks_fetch_does_not_stall_a_caller_that_already_has_the_key() {
-        const FETCH: Duration = Duration::from_millis(1500);
-        let (c, calls) = cache(Ok(jwks("k1")), FETCH, Duration::from_millis(1));
-        let t0 = Instant::now();
-        c.with_key("k1", t0, |_| Ok(())).expect("prime");
-
-        // Past TTL AND past the 60s refetch interval the priming fetch anchored, so the next caller
-        // really does refetch against the slow provider (inside the rate-limit window it would
-        // serve the cache without fetching, and the test would prove nothing).
-        let now = t0 + Duration::from_secs(61);
-
-        std::thread::scope(|s| {
-            let slow = {
-                let c = &c;
-                s.spawn(move || {
-                    c.with_key("k1", now, |_| Ok(()))
-                        .expect("refetching caller")
-                })
-            };
-            // The refetcher is inside the fetch (priming was fetch #1).
-            wait_for_fetch_entries(&calls, 2);
-
-            let began = Instant::now();
-            c.with_key("k1", now, |_| Ok(())).expect("unblocked caller");
-            let waited = began.elapsed();
-            assert!(
-                waited < FETCH / 3,
-                "a caller holding a usable cached key waited {waited:?} on another caller's JWKS \
-                 fetch (fetch takes {FETCH:?}); a slow IdP must not stall requests it has nothing \
-                 to do with"
-            );
-            slow.join().unwrap();
-        });
-    }
-
-    /// SINGLE-FLIGHT on a cold cache: N concurrent first-requests must produce ONE fetch, not N
-    /// serial ones. Without it, N unknown-kid or cold requests each pay the full 10s timeout in
-    /// turn — the "one 10s stall each" behaviour that made a slow IdP compound.
-    #[test]
-    fn concurrent_cold_starts_produce_exactly_one_fetch() {
-        let (c, calls) = cache(
-            Ok(jwks("k1")),
-            Duration::from_millis(300),
-            Duration::from_secs(3600),
-        );
-        const N: usize = 6;
-        let start = Arc::new(Barrier::new(N));
-        let now = Instant::now();
-
-        std::thread::scope(|s| {
-            for _ in 0..N {
-                let (c, start) = (&c, start.clone());
-                s.spawn(move || {
-                    start.wait();
-                    c.with_key("k1", now, |_| Ok(())).expect("cold caller");
-                });
-            }
-        });
-
-        // The fetch COUNT is the signal: callers serialised behind one another's fetches would each
-        // have fetched. (A wall-clock bound here only measured the runner's load.)
-        assert_eq!(
-            calls.load(Ordering::SeqCst),
-            1,
-            "a cold cache must single-flight: {N} concurrent callers issued {} fetches",
-            calls.load(Ordering::SeqCst)
-        );
-    }
-
-    /// The TTL-stale path must obey the SAME rate limit the kid-rotation path already did. Because
-    /// `fetched_at` only advances on success, an unreachable IdP leaves the set permanently stale —
-    /// so without this bound every single request issues its own GET, forever.
-    ///
-    /// With only the rotation path rate-limited: one fetch per request. As implemented: one fetch
-    /// per `min_refetch_interval`.
-    #[test]
-    fn a_failing_provider_does_not_produce_a_fetch_storm() {
-        // Fetch #1 primes the cache; after that the provider is unreachable. Simulated by a TTL of
-        // ~0 (always stale) plus a fetcher that fails — the second and later calls all fail.
-        let calls = Arc::new(AtomicUsize::new(0));
-        let c = JwksCache::new(
-            "https://idp.example/jwks",
-            Box::new(TestFetcher {
-                body: Err("connection timed out".into()),
-                delay: Duration::ZERO,
-                calls: calls.clone(),
-            }),
-            Duration::from_secs(60),
-            Duration::from_millis(1),
-        );
-        let t0 = Instant::now();
-        // Cold + failing ⇒ the error surfaces (nothing to fall back to), and it counts as ONE
-        // attempt.
-        assert!(c.with_key("k1", t0, |_| Ok(())).is_err());
-        for i in 0..100u64 {
-            let _ = c.with_key("k1", t0 + Duration::from_millis(i), |_| Ok(()));
-        }
-        assert_eq!(
-            calls.load(Ordering::SeqCst),
-            1,
-            "an unreachable IdP must be retried once per min_refetch_interval, not once per \
-             request: {} GETs for 101 requests",
-            calls.load(Ordering::SeqCst)
-        );
-
-        // Past the rate limit: exactly one more attempt, then quiet again.
-        let later = t0 + Duration::from_secs(61);
-        for i in 0..50u64 {
-            let _ = c.with_key("k1", later + Duration::from_millis(i), |_| Ok(()));
-        }
-        assert_eq!(calls.load(Ordering::SeqCst), 2, "one retry per interval");
-    }
-
-    /// A transient provider failure must not blow away a working key set: tokens signed by keys we
-    /// already hold keep verifying while the IdP is down.
-    #[test]
-    fn a_fetch_failure_keeps_serving_the_previously_fetched_keys() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        struct Flaky {
-            first: Mutex<bool>,
-            body: String,
-            calls: Arc<AtomicUsize>,
-        }
-        impl JwksFetcher for Flaky {
-            fn fetch(&self, _url: &str) -> Result<String, String> {
-                self.calls.fetch_add(1, Ordering::SeqCst);
-                let mut first = self.first.lock().unwrap();
-                if *first {
-                    *first = false;
-                    return Ok(self.body.clone());
-                }
-                Err("provider unreachable".into())
-            }
-        }
-        let c = JwksCache::new(
-            "https://idp.example/jwks",
-            Box::new(Flaky {
-                first: Mutex::new(true),
-                body: jwks("k1"),
-                calls: calls.clone(),
-            }),
-            Duration::from_millis(1),
-            Duration::from_millis(1),
-        );
-        let t0 = Instant::now();
-        c.with_key("k1", t0, |_| Ok(())).expect("prime");
-
-        // Stale, and every refetch from here fails — the cached key must still verify.
-        c.with_key("k1", t0 + Duration::from_secs(10), |_| Ok(()))
-            .expect("a fetch failure must not invalidate keys we already hold");
-        assert!(
-            calls.load(Ordering::SeqCst) >= 2,
-            "the refetch was attempted"
-        );
-    }
-
-    /// OIDC-8: a failed refresh that falls back to the previous keys logs a warn carrying the
-    /// fetch error, so an IdP outage is visible before the first rotated-key token is rejected.
-    #[test]
-    fn a_failed_refresh_that_keeps_the_previous_keys_logs_a_warn_with_the_error() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let c = JwksCache::new(
-            "https://idp.example/jwks",
-            Box::new(ScriptedFetcher {
-                ok_calls: 1,
-                delay: Duration::ZERO,
-                calls: calls.clone(),
-            }),
-            Duration::from_millis(1),
-            Duration::from_millis(1),
-        );
-        let t0 = Instant::now();
-        let cap = busbar_contract::testkit::WarnCapture::default();
-        tracing::subscriber::with_default(cap.clone(), || {
-            c.with_key("k1", t0, |_| Ok(())).expect("prime");
-            c.with_key("k1", t0 + Duration::from_secs(10), |_| Ok(()))
-                .expect("the previous keys still serve");
-        });
-        assert_eq!(calls.load(Ordering::SeqCst), 2, "the refetch was attempted");
-        assert_eq!(
-            cap.count("JWKS refresh failed; serving the previous key set"),
-            1,
-            "one warn for the one failed refresh: {:?}",
-            cap.messages()
-        );
-        assert!(
-            cap.contains("provider unreachable") && cap.contains("https://idp.example/jwks"),
-            "the warn names the fetch error and the URL: {:?}",
-            cap.messages()
-        );
-    }
-
-    /// Two keys sharing a `kid` with different `kty` (RFC 7517 §4.5 — e.g. an RSA/EC pair
-    /// coexisting during an algorithm migration). The first key in the set is the WRONG `kty` for
-    /// what `f` needs; only the second matches. `with_key` must try both, not just the first found.
-    ///
-    /// With a single-key `find` and an `FnOnce` closure, only the first (RSA) key is ever tried, so
-    /// `f` (which only succeeds for an EC key) always fails, and `with_key` returns
-    /// "no JWKS key matches" even though a matching key is right there in the cache. As implemented,
-    /// `with_key` tries every same-`kid` key and succeeds on the second.
-    #[test]
-    fn with_key_tries_every_key_sharing_a_kid_until_one_verifies() {
-        let body = r#"{"keys":[
-            {"kty":"RSA","kid":"shared","n":"AAAA","e":"AQAB"},
-            {"kty":"EC","kid":"shared","crv":"P-256","x":"AAAA","y":"BBBB"}
-        ]}"#
-        .to_string();
-        let (c, _calls) = cache(Ok(body), Duration::ZERO, Duration::from_secs(3600));
-
-        let result = c.with_key("shared", Instant::now(), |key| {
-            if key.kty == "EC" {
-                Ok("verified with the EC key")
-            } else {
-                Err(format!("wrong kty for this token: {}", key.kty))
-            }
-        });
-
-        assert_eq!(
-            result,
-            Ok("verified with the EC key"),
-            "with_key must try every key sharing a kid, not just the first match"
-        );
-    }
-
-    /// All keys sharing a `kid` fail `f`: the LAST error must surface (not silently "no key found").
-    #[test]
-    fn with_key_reports_the_last_error_when_no_key_sharing_a_kid_verifies() {
-        let body = r#"{"keys":[
-            {"kty":"RSA","kid":"shared","n":"AAAA","e":"AQAB"},
-            {"kty":"EC","kid":"shared","crv":"P-256","x":"AAAA","y":"BBBB"}
-        ]}"#
-        .to_string();
-        let (c, _calls) = cache(Ok(body), Duration::ZERO, Duration::from_secs(3600));
-
-        let err = c
-            .with_key("shared", Instant::now(), |key| {
-                Err::<(), _>(format!("rejected: {}", key.kty))
-            })
-            .unwrap_err();
-
-        assert_eq!(
-            err, "rejected: EC",
-            "when every same-kid key fails, the error from the LAST one tried should surface"
-        );
-    }
-
-    /// The absolute staleness ceiling: once every refetch has failed for longer than `max_stale`
-    /// (derived from `ttl`), the cache must stop serving the ancient key set — a days-long IdP outage
-    /// must not keep validating signatures against a key the provider may have rotated out because it
-    /// was compromised.
-    ///
-    /// With no ceiling, `with_key` keeps succeeding forever off the primed keys. As implemented, once
-    /// `now` passes the ceiling, `with_key` returns the "cannot verify" error instead.
-    #[test]
-    fn a_permanently_unreachable_provider_stops_serving_keys_past_the_staleness_ceiling() {
-        let ttl = Duration::from_millis(1);
-
-        // A fetcher that succeeds exactly once (priming the cache) and fails on every attempt after
-        // — standing in for an IdP that goes down and stays down.
-        struct FailAfterFirst {
-            first: Mutex<bool>,
-            body: String,
-            calls: Arc<AtomicUsize>,
-        }
-        impl JwksFetcher for FailAfterFirst {
-            fn fetch(&self, _url: &str) -> Result<String, String> {
-                self.calls.fetch_add(1, Ordering::SeqCst);
-                let mut first = self.first.lock().unwrap();
-                if *first {
-                    *first = false;
-                    return Ok(self.body.clone());
-                }
-                Err("provider unreachable".into())
-            }
-        }
-        let calls = Arc::new(AtomicUsize::new(0));
-        let c = JwksCache::new(
-            "https://idp.example/jwks",
-            Box::new(FailAfterFirst {
-                first: Mutex::new(true),
-                body: jwks("k1"),
-                calls: calls.clone(),
-            }),
-            Duration::from_millis(1),
-            ttl,
-        );
-        let t0 = Instant::now();
-        c.with_key("k1", t0, |_| Ok(())).expect("prime");
-
-        // Still within the ceiling (max_stale = max(ttl*24, 24h) = 24h here): stale keys keep serving.
-        let still_within = t0 + Duration::from_secs(3600);
-        c.with_key("k1", still_within, |_| Ok(()))
-            .expect("within the ceiling, a transient-looking outage must keep serving cached keys");
-
-        // Past the 24h ceiling, with every refetch attempt still failing: must now error out rather
-        // than silently keep validating against a key that old.
-        let past_ceiling = t0 + Duration::from_secs(25 * 3600);
-        let err = c.with_key("k1", past_ceiling, |_| Ok(()));
-        assert!(
-            err.is_err(),
-            "a key set this stale (>24h with every refetch failing) must stop being served, got {err:?}"
-        );
-    }
-
-    /// The absolute staleness ceiling on an EARLY-RETURN path, not the fetch-failure path. The
-    /// existing `a_permanently_unreachable_provider_stops_serving_keys_past_the_staleness_ceiling`
-    /// test only exercises the ceiling on the real-fetch branch (`refresh`'s `Err` arm). This one
-    /// drives the far more common outage shape: once a request past the ceiling has already
-    /// triggered (and failed) a fetch, the NEXT request lands inside the `min_refetch_interval`
-    /// rate-limit window and takes an EARLY RETURN (`refresh`'s outer rate-limit escape) — which used
-    /// to hand back the ancient cached keys WITHOUT consulting `max_stale`. Under a sustained outage
-    /// with traffic that early-return is nearly every request, so the ceiling was effectively
-    /// bypassed.
-    ///
-    /// If the early returns do not check `max_stale`, the rate-limited follow-up call succeeds off
-    /// the ancient key set. As implemented, it fails closed with the ceiling error, exactly like the
-    /// fetch-failure path.
-    #[test]
-    fn the_rate_limited_early_return_also_enforces_the_staleness_ceiling() {
-        // Prime once, then fail forever. min_refetch = 60s so the second past-ceiling call is
-        // rate-limited into an early return rather than doing its own fetch.
-        struct FailAfterFirst {
-            first: Mutex<bool>,
-            body: String,
-            calls: Arc<AtomicUsize>,
-        }
-        impl JwksFetcher for FailAfterFirst {
-            fn fetch(&self, _url: &str) -> Result<String, String> {
-                self.calls.fetch_add(1, Ordering::SeqCst);
-                let mut first = self.first.lock().unwrap();
-                if *first {
-                    *first = false;
-                    return Ok(self.body.clone());
-                }
-                Err("provider unreachable".into())
-            }
-        }
-        let calls = Arc::new(AtomicUsize::new(0));
-        let c = JwksCache::new(
-            "https://idp.example/jwks",
-            Box::new(FailAfterFirst {
-                first: Mutex::new(true),
-                body: jwks("k1"),
-                calls: calls.clone(),
-            }),
-            Duration::from_secs(60), // min_refetch: rate-limits the follow-up call
-            Duration::from_millis(1), // ttl: always stale
-        );
-        let t0 = Instant::now();
-        c.with_key("k1", t0, |_| Ok(())).expect("prime");
-
-        // First call PAST the 24h ceiling: does a fetch (fails) and errors on the fetch-failure
-        // branch. This also advances `last_attempt`, arming the rate limit for the next call.
-        let past = t0 + Duration::from_secs(25 * 3600);
-        assert!(
-            c.with_key("k1", past, |_| Ok(())).is_err(),
-            "the fetch-failure branch past the ceiling must already fail closed"
-        );
-
-        // Second call, 1ms later: still past the ceiling, but now inside the 60s rate-limit window,
-        // so it takes the OUTER rate-limit early return in `refresh`. It must NOT serve the ancient
-        // keys — it must fail closed with the ceiling error, same as the fetch-failure path.
-        let past_again = past + Duration::from_millis(1);
-        let err = c.with_key("k1", past_again, |_| Ok(())).expect_err(
-            "a rate-limited early-return call past max_stale must fail closed, not serve stale keys",
-        );
-        assert!(
-            err.contains("staleness ceiling"),
-            "expected the staleness-ceiling error on the early-return path, got: {err}"
-        );
-        assert_eq!(
-            calls.load(Ordering::SeqCst),
-            2,
-            "the second call must have been rate-limited (no third fetch), proving it took the \
-             early-return path, not another real fetch"
-        );
-    }
-
-    /// `snapshot`'s `expired` flag (the absolute staleness ceiling) at its exact boundary:
-    /// `elapsed >= max_stale`. `ttl = 3600s` makes `max_stale = max(3600*24, 24h) = 86400s` exactly
-    /// (both terms tie), so the boundary instant is precisely computable.
-    #[test]
-    fn snapshot_expired_flag_is_true_at_the_exact_max_stale_boundary() {
-        let (c, _calls) = cache(Ok(jwks("k1")), Duration::ZERO, Duration::from_secs(3600));
-        let t0 = Instant::now();
-        c.with_key("k1", t0, |_| Ok(())).expect("prime");
-
-        let (_, _, expired_just_before) = c.snapshot(t0 + Duration::from_secs(86400 - 1));
-        assert!(
-            !expired_just_before,
-            "one second before the max_stale ceiling must not be expired yet"
-        );
-
-        let (_, _, expired_at_boundary) = c.snapshot(t0 + Duration::from_secs(86400));
-        assert!(
-            expired_at_boundary,
-            "exactly at the max_stale ceiling must already be considered expired (>=, not >)"
-        );
-    }
-
-    /// The `ttl * 24` term of `max_stale` (OIDC-22): with `ttl = 7200s` the ceiling is 48h, not the
-    /// 24h floor. Behind a failing provider the primed keys still serve at +47h and stop at +48h.
-    #[test]
-    fn max_stale_scales_with_a_long_ttl() {
-        struct FailAfterFirst {
-            first: Mutex<bool>,
-            body: String,
-        }
-        impl JwksFetcher for FailAfterFirst {
-            fn fetch(&self, _url: &str) -> Result<String, String> {
-                let mut first = self.first.lock().unwrap();
-                if *first {
-                    *first = false;
-                    return Ok(self.body.clone());
-                }
-                Err("provider unreachable".into())
-            }
-        }
-        let c = JwksCache::new(
-            "https://idp.example/jwks",
-            Box::new(FailAfterFirst {
-                first: Mutex::new(true),
-                body: jwks("k1"),
-            }),
-            Duration::from_millis(1),
-            Duration::from_secs(7200),
-        );
-        let t0 = Instant::now();
-        c.with_key("k1", t0, |_| Ok(())).expect("prime");
-
-        c.with_key("k1", t0 + Duration::from_secs(47 * 3600), |_| Ok(()))
-            .expect("at +47h a ttl of 2h (ceiling 48h) must still serve the cached keys");
-        assert!(
-            c.with_key("k1", t0 + Duration::from_secs(48 * 3600), |_| Ok(()))
-                .is_err(),
-            "at +48h the cached keys are past the ceiling and must not serve"
-        );
-    }
-
-    /// A NON-desperate caller (one that already holds a usable cached key set) that loses the
-    /// `fetch_gate` race — another caller is mid-fetch — must return the cached keys immediately,
-    /// not block waiting for the gate. This is distinct from the existing
-    /// `a_slow_jwks_fetch_does_not_stall_a_caller_that_already_has_the_key` test: that test's second
-    /// caller is turned away by the OUTER rate-limit check (`refresh`'s `!desperate &&
-    /// !self.permits_attempt(...)`, line ~232) and never actually reaches the `fetch_gate`
-    /// contention branch at all.
-    ///
-    /// Reaching the actual `fetch_gate` `WouldBlock` arm (rather than the outer rate-limit escape
-    /// hatch) requires `min_refetch_interval = Duration::ZERO`, and this is subtle enough to be worth
-    /// stating: ANY positive duration lets the winner's `last_attempt = Some(now)` write (set the
-    /// instant it acquires the gate, well before its 1500ms fetch even starts) satisfy the loser's
-    /// OUTER check too, since both threads pass the identical fake `now` and
-    /// `now.saturating_duration_since(now) == 0` is `< min_refetch_interval` for any positive value.
-    /// The loser is then always turned away by the outer check and never reaches the arm under test
-    /// -- a test that would pass even with the `!desperate` guard hardcoded to `false`. With
-    /// `min_refetch_interval = ZERO`, `0 >= 0` is always true, so the outer check never turns anyone
-    /// away regardless of timing, and the ONLY way a second caller can be short-circuited is by
-    /// genuinely losing the `fetch_gate` race.
-    ///
-    /// Asserts on FETCH COUNT (not just wall-clock time) as the primary, deterministic signal: under
-    /// the real code the loser must never fetch at all (`calls == 1`); with `if !desperate` reduced
-    /// to `if false`, the loser instead blocks for the gate then performs its OWN real fetch
-    /// (`calls == 2`) once it acquires it (the inner re-check also always permits under
-    /// `min_refetch_interval = ZERO`, so nothing stops the second fetch). Wall-clock timing is kept
-    /// as a secondary corroborating signal, not the sole one.
-    #[test]
-    fn a_non_desperate_caller_that_loses_the_gate_race_returns_immediately() {
-        const FETCH: Duration = Duration::from_millis(1500);
-        let calls = Arc::new(AtomicUsize::new(0));
-        let c = JwksCache::new(
-            "https://idp.example/jwks",
-            Box::new(TestFetcher {
-                body: Ok(jwks("k1")),
-                delay: FETCH,
-                calls: calls.clone(),
-            }),
-            Duration::ZERO, // never turns a caller away at the OUTER rate-limit check
-            Duration::from_millis(1), // tiny ttl: stale immediately after priming
-        );
-        let t0 = Instant::now();
-        c.with_key("k1", t0, |_| Ok(())).expect("prime"); // keys now Some — every later caller is non-desperate
-        assert_eq!(calls.load(Ordering::SeqCst), 1, "priming fetch");
-
-        let now = t0 + Duration::from_secs(10); // well past the 1ms ttl
-
-        std::thread::scope(|s| {
-            let slow = {
-                let c = &c;
-                s.spawn(move || c.with_key("k1", now, |_| Ok(())).expect("gate winner"))
-            };
-            // The winner holds the gate and is inside its fetch before we race in.
-            wait_for_fetch_entries(&calls, 2);
-
-            let began = Instant::now();
-            c.with_key("k1", now, |_| Ok(())).expect("gate loser");
-            let waited = began.elapsed();
-            assert!(
-                waited < FETCH / 3,
-                "a non-desperate caller that lost the fetch_gate race waited {waited:?} for the \
-                 winner's fetch ({FETCH:?} long) instead of returning its cached keys immediately"
-            );
-            slow.join().unwrap();
-        });
-
-        assert_eq!(
-            calls.load(Ordering::SeqCst),
-            2, // 1 priming fetch + 1 winner fetch; the loser must NOT have fetched a third time
-            "the loser must return the winner's cached keys, never perform its own fetch"
-        );
-    }
-
-    /// The staleness ceiling on the LOST-`fetch_gate`-RACE path: a caller whose cached keys are
-    /// past `max_stale` must never be served those keys, even when it loses the gate race. Since
-    /// OIDC-7 such a caller is treated as a cold cache (desperate), so it WAITS for the winner's
-    /// fetch; the winner's keys (fetched at `t0 + 1s`) are still past the ceiling for the loser's
-    /// `now`, so the loser falls through to its own recovery fetch, which fails here. It must fail
-    /// closed, not serve either stale set.
-    ///
-    /// `min_refetch_interval = ZERO` so the loser is never turned away by the OUTER rate-limit check
-    /// and genuinely reaches the gate (same subtlety the gate-race test documents).
-    #[test]
-    fn a_lost_gate_race_past_the_ceiling_never_serves_keys_past_the_ceiling() {
-        const FETCH: Duration = Duration::from_millis(1500);
-        let calls = Arc::new(AtomicUsize::new(0));
-        let c = JwksCache::new(
-            "https://idp.example/jwks",
-            // Prime and the winner's refetch succeed; the loser's recovery fetch fails.
-            Box::new(ScriptedFetcher {
-                ok_calls: 2,
-                delay: FETCH,
-                calls: calls.clone(),
-            }),
-            Duration::ZERO, // never turns a caller away at the OUTER rate-limit check
-            Duration::from_millis(1), // tiny ttl: stale immediately after priming
-        );
-        let t0 = Instant::now();
-        c.with_key("k1", t0, |_| Ok(())).expect("prime"); // keys Some — later callers are non-desperate
-
-        std::thread::scope(|s| {
-            let winner = {
-                let c = &c;
-                // Winner refetches WITHIN the ceiling; it only has to hold the gate through the slow fetch.
-                s.spawn(move || {
-                    let _ = c.with_key("k1", t0 + Duration::from_secs(1), |_| Ok(()));
-                })
-            };
-            wait_for_fetch_entries(&calls, 2); // the winner holds the gate, inside its fetch
-
-            // Loser races in PAST the 24h ceiling: loses the gate and waits for it.
-            let past_ceiling = t0 + Duration::from_secs(25 * 3600);
-            let err = c.with_key("k1", past_ceiling, |_| Ok(()));
-            assert!(
-                err.is_err(),
-                "a gate-race loser past max_stale must fail closed, not serve stale keys: {err:?}"
-            );
-            winner.join().unwrap();
-        });
-        assert_eq!(
-            calls.load(Ordering::SeqCst),
-            3,
-            "the loser must try a recovery fetch, never serve the winner's too-old keys"
-        );
-    }
-
-    /// OIDC-7: a caller whose cached keys are past `max_stale` is treated as a COLD cache. When
-    /// it loses the gate race to a recovery fetch that succeeds, it waits for that fetch and serves
-    /// its fresh keys, rather than being rejected with the ceiling error while the recovery is in
-    /// flight.
-    #[test]
-    fn a_caller_past_the_ceiling_waits_for_the_in_flight_recovery_fetch() {
-        const FETCH: Duration = Duration::from_millis(1500);
-        let calls = Arc::new(AtomicUsize::new(0));
-        let c = JwksCache::new(
-            "https://idp.example/jwks",
-            Box::new(TestFetcher {
-                body: Ok(jwks("k1")),
-                delay: FETCH,
-                calls: calls.clone(),
-            }),
-            Duration::from_secs(60),
-            Duration::from_millis(1),
-        );
-        let t0 = Instant::now();
-        c.with_key("k1", t0, |_| Ok(())).expect("prime");
-
-        // The IdP has been down for 25h (past the 24h ceiling) and is now back.
-        let now = t0 + Duration::from_secs(25 * 3600);
-        std::thread::scope(|s| {
-            let winner = {
-                let c = &c;
-                s.spawn(move || {
-                    c.with_key("k1", now, |_| Ok(()))
-                        .expect("the recovery fetch succeeds")
-                })
-            };
-            wait_for_fetch_entries(&calls, 2); // the winner holds the gate, inside its fetch
-
-            c.with_key("k1", now, |_| Ok(())).expect(
-                "a caller past the ceiling must wait for the in-flight recovery fetch like a cold \
-                 cache, not be rejected",
-            );
-            winner.join().unwrap();
-        });
-        assert_eq!(
-            calls.load(Ordering::SeqCst),
-            2,
-            "the waiting caller takes the winner's fresh keys, it does not fetch again"
-        );
-    }
-
-    /// The staleness ceiling on the POST-GATE DESPERATE re-check (`refresh` line ~264) — the path a
-    /// caller with NOTHING to serve takes after queueing behind an in-flight fetch that then filled
-    /// the cache. The desperate loser's `now` is past `max_stale`, so even the keys the winner just
-    /// fetched are already too old for it: it must not serve them. Since OIDC-7 it falls through to
-    /// its own recovery fetch, which fails here, so it fails closed.
-    ///
-    /// If that arm does not consult `max_stale`, the loser serves the winner's keys and succeeds.
-    #[test]
-    fn the_post_gate_desperate_recheck_also_enforces_the_staleness_ceiling() {
-        const FETCH: Duration = Duration::from_millis(1500);
-        let calls = Arc::new(AtomicUsize::new(0));
-        let c = JwksCache::new(
-            "https://idp.example/jwks",
-            // The winner's fetch succeeds; the loser's recovery fetch fails.
-            Box::new(ScriptedFetcher {
-                ok_calls: 1,
-                delay: FETCH,
-                calls: calls.clone(),
-            }),
-            Duration::ZERO,
-            Duration::from_millis(1),
-        );
-        // COLD cache — never primed — so every caller is desperate (keys.is_none()).
-        let t0 = Instant::now();
-        std::thread::scope(|s| {
-            let winner = {
-                let c = &c;
-                s.spawn(move || {
-                    c.with_key("k1", t0, |_| Ok(()))
-                        .expect("cold winner fills the cache");
-                })
-            };
-            wait_for_fetch_entries(&calls, 1); // winner holds the gate and is fetching
-
-            // Desperate loser (cache still empty when it enters) waits behind the gate; when it
-            // acquires, the winner has filled `keys`, so it hits the desperate re-check. Its `now`
-            // is past the 24h ceiling, so the freshly-fetched keys are already too old for THIS caller.
-            let past_ceiling = t0 + Duration::from_secs(25 * 3600);
-            let err = c.with_key("k1", past_ceiling, |_| Ok(()));
-            assert!(
-                err.is_err(),
-                "a desperate post-gate re-check past max_stale must fail closed: {err:?}"
-            );
-            winner.join().unwrap();
-        });
-        assert_eq!(
-            calls.load(Ordering::SeqCst),
-            2,
-            "the loser must try a recovery fetch, never serve the winner's too-old keys"
-        );
-    }
-
-    /// The POST-GATE RATE-LIMIT re-check (`refresh` line ~262) fails closed. A DESPERATE caller (cold
-    /// cache) that queued behind an in-flight fetch which then FAILED re-checks the rate limit under
-    /// the gate; inside the `min_refetch_interval` window it early-returns instead of starting a second
-    /// immediate fetch, and must not fabricate a usable key set — `with_key` surfaces the honest
-    /// "cannot verify" error.
-    ///
-    /// The `staleness ceiling` sub-outcome of `serve_within_ceiling` on the post-gate rate-limit
-    /// re-check is unreachable in practice — any caller reaching it is desperate, so its `keys` (and
-    /// thus `fetched_at`) are absent and `too_stale` is never true there; only genuine thread
-    /// contention could line a non-desperate caller onto that arm. This drives the branch
-    /// deterministically and asserts the
-    /// observable contract: it fails closed.
-    #[test]
-    fn the_post_gate_rate_limit_recheck_fails_closed() {
-        const FETCH: Duration = Duration::from_millis(1500);
-        let calls = Arc::new(AtomicUsize::new(0));
-        let c = JwksCache::new(
-            "https://idp.example/jwks",
-            Box::new(TestFetcher {
-                body: Err("provider unreachable".into()),
-                delay: FETCH,
-                calls: calls.clone(),
-            }),
-            Duration::from_secs(60), // positive: the loser's post-gate re-check is inside this window
-            Duration::from_millis(1),
-        );
-        let t0 = Instant::now();
-        std::thread::scope(|s| {
-            let winner = {
-                let c = &c;
-                // Cold desperate winner: acquires the gate, sets last_attempt, then the fetch FAILS.
-                s.spawn(move || {
-                    let _ = c.with_key("k1", t0, |_| Ok(()));
-                })
-            };
-            wait_for_fetch_entries(&calls, 1); // winner holds the gate, inside its doomed fetch
-
-            // Cold desperate loser queues behind the gate; the winner's fetch fails, `keys` is still
-            // None, and at the SAME `now` the loser is inside the 60s window ⇒ post-gate re-check (262).
-            let err = c.with_key("k1", t0, |_| Ok(())).expect_err(
-                "a desperate caller past the post-gate rate-limit re-check must fail closed",
-            );
-            assert!(
-                err.contains("cannot verify any token"),
-                "expected the cold-cache 'cannot verify' error on the post-gate rate-limit path, got: {err}"
-            );
-            winner.join().unwrap();
-        });
-    }
-}
+#[path = "tests/cache_tests.rs"]
+mod tests;

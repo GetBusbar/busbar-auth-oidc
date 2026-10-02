@@ -127,6 +127,7 @@ version = "1.0.0"
 dependencies = [
  "base64",
  "busbar-contract",
+ "http",
  "rcgen",
  "reqwest",
  "ring",
@@ -134,6 +135,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tracing",
+ "url",
  "zeroize",
 ]
 

@@ -33,25 +33,29 @@
 #![forbid(unsafe_code)]
 
 use busbar_contract::auth::{
-    AuthModule, AuthVerdict, BeginLogin, CompleteLogin, LoginHop, LoginHttpResponse, LoginModule,
-    LoginOutcome, Principal,
+    AuthVerdict, BeginLogin, LoginHop, LoginHttpResponse, LoginOutcome, Principal,
 };
 use serde::Deserialize;
 use serde_json::Value;
 use std::time::{Duration, Instant};
 
+#[macro_use]
+mod flight;
 pub mod cache;
+pub mod discovery;
 pub mod door;
+pub mod fetch;
 pub mod jwks;
 pub mod jwt;
 mod open;
-mod reqwest_fetcher;
 #[cfg(feature = "testkit")]
 pub mod testkit;
 
-pub use cache::{JwksCache, JwksFetcher};
-pub use open::open;
-pub use reqwest_fetcher::ReqwestFetcher;
+pub use cache::JwksCache;
+pub use discovery::Discovery;
+pub use fetch::Fetch;
+pub use flight::Step;
+pub use open::config;
 
 /// The default role/group claim name — the token claim read into the principal's ROLES when the
 /// operator does not set `role_claim`, and the value the Entra >200-groups overage guard keys on.
@@ -92,7 +96,8 @@ pub struct OidcConfig {
     /// The token `aud` to require, EXACT match. For Entra this is the application (client) id.
     pub audience: String,
     /// The JWKS endpoint. Optional: when absent it is derived from the issuer's OIDC discovery
-    /// document (`<issuer>/.well-known/openid-configuration` → `jwks_uri`) at construction.
+    /// document (`<issuer>/.well-known/openid-configuration` → `jwks_uri`), fetched by the first
+    /// op that needs it.
     #[serde(default)]
     pub jwks_url: Option<String>,
     /// Which token claim carries the caller's roles/groups → the principal's GROUPS. Default
@@ -109,8 +114,9 @@ pub struct OidcConfig {
     /// An ADDITIONAL trusted root CA certificate (PEM), layered on top of the built-in public root
     /// store, for a self-hosted/internal-CA OIDC provider whose JWKS/discovery endpoint doesn't chain
     /// to a public root (e.g. an on-prem Keycloak signed by a corporate CA). Optional; absent means
-    /// the fetcher trusts only the built-in public roots, as before. Certificate validation is never
-    /// disabled by this — it only widens the trusted-root set.
+    /// only the built-in public roots are trusted. Every need names it as its `trust_from`: the
+    /// host's connector does the TLS, never this module. Certificate validation is never disabled
+    /// by this — it only widens the trusted-root set.
     #[serde(default)]
     pub ca_cert_pem: Option<String>,
 
@@ -119,7 +125,7 @@ pub struct OidcConfig {
     /// The OAuth `client_id` presented on the authorize URL and the token exchange. Optional: when
     /// absent it defaults to [`OidcConfig::audience`] (the common confidential-client case where the
     /// app's client-id IS the token audience, e.g. Entra). The confidential-client SECRET is never
-    /// here — the CORE holds it and injects it into the token-exchange hop.
+    /// here — the host lends it at `open` and it fills the token-exchange hop when it is sent.
     #[serde(default)]
     pub client_id: Option<String>,
     /// Extra OAuth scopes to request on the authorize URL, on top of the always-added `openid`.
@@ -399,7 +405,9 @@ fn extract_string_list(v: Option<&Value>) -> Vec<String> {
     }
 }
 
-/// The runtime OIDC auth module: a verifier + a JWKS cache. Implements [`busbar_contract::auth::AuthModule`].
+/// The runtime OIDC auth module: a verifier, the JWKS cache and the issuer's discovery document.
+/// Sans-IO: every request it makes goes through the caller's [`Fetch`], and every answer that may
+/// need one is a [`Step`] (THE DESIGN, auth: "JWKS fetching is sans-IO single-flight").
 pub struct OidcModule {
     verifier: OidcVerifier,
     /// The verifier for the browser-login `id_token`: the same issuer and role claim, but the
@@ -408,22 +416,17 @@ pub struct OidcModule {
     /// verifiers are identical.
     login_verifier: OidcVerifier,
     jwks: JwksCache,
-    /// The resolved config, retained so the browser-login path ([`LoginModule`]) can read the
-    /// client-id, scopes, and the authorize/token endpoints. The verify-only path uses none of it.
+    discovery: Discovery,
+    /// The config, retained so the browser-login path can read the client-id, scopes, and the
+    /// authorize/token endpoints, and the JWKS url when it is configured.
     cfg: OidcConfig,
 }
 
 impl OidcModule {
-    /// Construct from parsed config + an already-resolved JWKS url + a fetcher. The plugin's `open`
-    /// resolves the JWKS url (explicit or via discovery) and supplies a real HTTPS fetcher; tests
-    /// supply a fixture fetcher.
-    pub fn new(cfg: &OidcConfig, jwks_url: String, fetcher: Box<dyn JwksFetcher>) -> Self {
-        let jwks = JwksCache::new(
-            jwks_url,
-            fetcher,
-            Duration::from_secs(cfg.jwks_min_refetch_secs),
-            Duration::from_secs(cfg.jwks_ttl_secs),
-        );
+    /// Construct from parsed (and [`check_jwks_url`]-checked) config. Nothing is fetched here: the
+    /// JWKS, and the discovery document when a URL is not configured, are fetched by the first op
+    /// that needs them.
+    pub fn new(cfg: &OidcConfig) -> Self {
         Self {
             verifier: OidcVerifier::new(&cfg.issuer, &cfg.audience, &cfg.role_claim),
             login_verifier: OidcVerifier::new(
@@ -431,53 +434,131 @@ impl OidcModule {
                 resolved_client_id(cfg),
                 &cfg.role_claim,
             ),
-            jwks,
+            jwks: JwksCache::new(
+                Duration::from_secs(cfg.jwks_min_refetch_secs),
+                Duration::from_secs(cfg.jwks_ttl_secs),
+            ),
+            discovery: Discovery::new(Duration::from_secs(cfg.jwks_min_refetch_secs)),
             cfg: cfg.clone(),
         }
     }
 
+    /// The JWKS url: the configured `jwks_url`, or the discovery document's `jwks_uri`.
+    ///
+    /// # Errors
+    /// The discovery error, or a document with no `jwks_uri`.
+    pub fn jwks_url(&self, now: Instant, io: &mut dyn Fetch) -> Step<Result<String, String>> {
+        if let Some(url) = &self.cfg.jwks_url {
+            return Step::Ready(Ok(url.clone()));
+        }
+        let doc = step_ok!(self.discovery.document(&self.cfg, now, io));
+        Step::Ready(
+            doc.get("jwks_uri")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    "OIDC discovery document has no 'jwks_uri'; set jwks_url explicitly".to_string()
+                }),
+        )
+    }
+
+    /// The login endpoint `configured`, else the discovery document's `field` (the SAME
+    /// issuer-match–guarded document [`Self::jwks_url`] reads); `None` when the document omits it
+    /// too (that half of browser login is then unavailable and fails closed).
+    fn endpoint(
+        &self,
+        configured: Option<&String>,
+        field: &str,
+        now: Instant,
+        io: &mut dyn Fetch,
+    ) -> Step<Result<Option<String>, String>> {
+        if let Some(url) = configured {
+            return Step::Ready(Ok(Some(url.clone())));
+        }
+        let doc = step_ok!(self.discovery.document(&self.cfg, now, io));
+        Step::Ready(Ok(doc
+            .get(field)
+            .and_then(Value::as_str)
+            .map(str::to_string)))
+    }
+
+    /// The IdP `authorization_endpoint`: configured, or discovered.
+    pub fn authorization_endpoint(
+        &self,
+        now: Instant,
+        io: &mut dyn Fetch,
+    ) -> Step<Result<Option<String>, String>> {
+        let configured = self.cfg.authorization_endpoint.as_ref();
+        self.endpoint(configured, "authorization_endpoint", now, io)
+    }
+
+    /// The IdP `token_endpoint`: configured, or discovered.
+    pub fn token_endpoint(
+        &self,
+        now: Instant,
+        io: &mut dyn Fetch,
+    ) -> Step<Result<Option<String>, String>> {
+        let configured = self.cfg.token_endpoint.as_ref();
+        self.endpoint(configured, "token_endpoint", now, io)
+    }
+
     /// Verify a login token-endpoint response into an identity. Parses the token endpoint's JSON,
-    /// extracts the `id_token`, and REUSES the full verify path ([`Self::verify`] — JWKS signature +
-    /// [`OidcVerifier::validate_claims`] for iss/aud/exp/nbf) to produce a [`Principal`]. The
-    /// `aud` checked is the OAuth `client_id`, not the bearer `audience` (OIDC Core 1.0 §3.1.3.7
-    /// step 3). A missing/malformed body, a missing `id_token`, or any signature/claim failure is a
-    /// fail-closed `Reject`. `now_unix`/`now_mono` are injected so this is unit-testable with a
-    /// fixture JWKS, the same as [`Self::verify`].
+    /// extracts the `id_token`, and REUSES the full verify path (JWKS signature +
+    /// [`OidcVerifier::validate_claims`] for iss/aud/exp/nbf) to produce a [`Principal`]. The `aud`
+    /// checked is the OAuth `client_id`, not the bearer `audience` (OIDC Core 1.0 §3.1.3.7 step 3).
+    /// A missing/malformed body, a missing `id_token`, or any signature/claim failure is a
+    /// fail-closed `Reject`.
     ///
     /// NOTE (committed ABI): OIDC `nonce` is minted by the CORE at begin and is NOT carried back on
-    /// [`CompleteLogin`], so nonce binding is the core's to enforce; this reuses the existing
+    /// the callback, so nonce binding is the core's to enforce; this reuses the existing
     /// signature+claims path (iss/aud/exp) that the verify module already trusts.
+    ///
+    /// # Errors
+    /// The JWKS url could not be discovered.
     pub fn identity_from_token_response(
         &self,
         resp: &LoginHttpResponse,
         now_unix: i64,
         now_mono: Instant,
-    ) -> LoginOutcome {
+        io: &mut dyn Fetch,
+    ) -> Step<Result<LoginOutcome, String>> {
         // A non-2xx token-endpoint response (e.g. invalid_grant) never carries a usable id_token.
         if !(200..300).contains(&resp.status) {
-            return LoginOutcome::Reject;
+            return Step::Ready(Ok(LoginOutcome::Reject));
         }
-        let body: Value = match serde_json::from_str(&resp.body) {
-            Ok(v) => v,
-            Err(_) => return LoginOutcome::Reject,
+        let Ok(body) = serde_json::from_str::<Value>(&resp.body) else {
+            return Step::Ready(Ok(LoginOutcome::Reject));
         };
-        let id_token = match body.get("id_token").and_then(Value::as_str) {
-            Some(t) => t,
-            None => return LoginOutcome::Reject,
+        let Some(id_token) = body.get("id_token").and_then(Value::as_str) else {
+            return Step::Ready(Ok(LoginOutcome::Reject));
         };
-        match self.verify_with(&self.login_verifier, id_token, now_unix, now_mono) {
+        let verdict =
+            step_ok!(self.verify_with(&self.login_verifier, id_token, now_unix, now_mono, io));
+        Step::Ready(Ok(match verdict {
             AuthVerdict::Identify(p) => LoginOutcome::Identify(p),
-            // A non-JWT / bad-sig / bad-claim id_token in a login callback is a hard failure — unlike
-            // the verify chain, there is no "next module" to defer a `Pass` to. Enumerated (not `_`)
-            // so a future `AuthVerdict` variant is a compile error here, forcing a deliberate mapping.
+            // A non-JWT / bad-sig / bad-claim id_token in a login callback is a hard failure —
+            // unlike the verify chain, there is no "next module" to defer a `Pass` to. Enumerated
+            // (not `_`) so a future `AuthVerdict` variant is a compile error here.
             AuthVerdict::Reject | AuthVerdict::Pass => LoginOutcome::Reject,
-        }
+        }))
     }
 
-    /// The full verification of one presented bearer token → an [`AuthVerdict`]. Split from
-    /// `authenticate` so it can be driven with an injected `now` in tests.
-    fn verify(&self, token: &str, now_unix: i64, now_mono: Instant) -> AuthVerdict {
-        self.verify_with(&self.verifier, token, now_unix, now_mono)
+    /// The full verification of one presented bearer credential → an [`AuthVerdict`]: none
+    /// presented, or one that is not a JWT, is not ours (`Pass`).
+    ///
+    /// # Errors
+    /// The JWKS url could not be discovered.
+    pub fn verify(
+        &self,
+        token: Option<&str>,
+        now_unix: i64,
+        now_mono: Instant,
+        io: &mut dyn Fetch,
+    ) -> Step<Result<AuthVerdict, String>> {
+        match token {
+            Some(token) => self.verify_with(&self.verifier, token, now_unix, now_mono, io),
+            None => Step::Ready(Ok(AuthVerdict::Pass)),
+        }
     }
 
     /// [`Self::verify`] against an explicit claim `verifier`: the bearer path passes the
@@ -488,109 +569,103 @@ impl OidcModule {
         token: &str,
         now_unix: i64,
         now_mono: Instant,
-    ) -> AuthVerdict {
+        io: &mut dyn Fetch,
+    ) -> Step<Result<AuthVerdict, String>> {
         let parts = match jwt::split(token) {
             Ok(p) => p,
             // Not a well-formed JWT ⇒ not our credential shape. `Pass` so a later chain module (or
             // the mode default) can handle it — a random opaque bearer is not an OIDC failure.
-            Err(_) => return AuthVerdict::Pass,
+            Err(_) => return Step::Ready(Ok(AuthVerdict::Pass)),
         };
         let kid = parts.header.kid.clone().unwrap_or_default();
+        let url = step_ok!(self.jwks_url(now_mono, io));
 
         // Verify the signature against the JWKS key for this kid (fetching / rotation-refetching as
         // needed). A signature or key error is a REJECT — a presented-but-invalid credential.
-        if let Err(e) = self
-            .jwks
-            .with_key(&kid, now_mono, |key| jwt::verify_signature(&parts, key))
-        {
+        let signed = step!(self.jwks.with_key(&url, &kid, now_mono, io, |key| {
+            jwt::verify_signature(&parts, key)
+        }));
+        if let Err(e) = signed {
             tracing::warn!(module = "oidc", error = %e, "OIDC token signature verification failed");
-            return AuthVerdict::Reject;
+            return Step::Ready(Ok(AuthVerdict::Reject));
         }
 
         let claims = match jwt::claims(&parts) {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!(module = "oidc", error = %e, "OIDC token claims are malformed");
-                return AuthVerdict::Reject;
+                return Step::Ready(Ok(AuthVerdict::Reject));
             }
         };
 
-        match verifier.validate_claims(&claims, now_unix) {
+        Step::Ready(Ok(match verifier.validate_claims(&claims, now_unix) {
             Ok(principal) => AuthVerdict::Identify(principal),
             Err(e) => {
                 tracing::warn!(module = "oidc", error = %e, "OIDC token claim validation failed");
                 AuthVerdict::Reject
             }
-        }
-    }
-}
-
-impl AuthModule for OidcModule {
-    fn name(&self) -> &'static str {
-        "oidc"
+        }))
     }
 
-    fn authenticate(&self, candidate: Option<&str>) -> AuthVerdict {
-        let Some(token) = candidate else {
-            // No credential presented ⇒ not ours; defer.
-            return AuthVerdict::Pass;
-        };
-        self.verify(token, now_unix(), Instant::now())
-    }
-
-    /// OIDC does real I/O (JWKS fetch) and its verdicts are safe to cache for the token's short life,
-    /// so the engine's credential cache is worth using.
-    fn cacheable(&self) -> bool {
-        true
-    }
-}
-
-impl LoginModule for OidcModule {
     /// Start browser login: the CORE has already minted PKCE `state`/`code_challenge` and the
-    /// `nonce`; return the IdP authorize URL to redirect to. Fails closed (`Reject`) when no
-    /// `authorization_endpoint` is configured or was discovered — this module is verify-only then.
-    fn begin_login(&self, req: &BeginLogin) -> LoginOutcome {
-        if self.cfg.authorization_endpoint.is_none() {
-            return LoginOutcome::Reject;
-        }
-        // Fold the operator's request-time extra scopes into the configured set; `build_authorize_url`
-        // dedups against the always-added `openid`.
+    /// `nonce`; answer the IdP authorize URL to redirect to. Fails closed (`Reject`) when no
+    /// `authorization_endpoint` is configured or discovered — this module is verify-only then.
+    ///
+    /// # Errors
+    /// The endpoint had to be discovered, and discovery failed.
+    pub fn begin_login(
+        &self,
+        req: &BeginLogin,
+        now: Instant,
+        io: &mut dyn Fetch,
+    ) -> Step<Result<LoginOutcome, String>> {
+        let Some(endpoint) = step_ok!(self.authorization_endpoint(now, io)) else {
+            return Step::Ready(Ok(LoginOutcome::Reject));
+        };
+        // Fold the operator's request-time extra scopes into the configured set;
+        // `build_authorize_url` dedups against the always-added `openid`.
         let mut cfg = self.cfg.clone();
+        cfg.authorization_endpoint = Some(endpoint);
         cfg.scopes.extend(req.scopes.iter().cloned());
-        let url = build_authorize_url(
+        Step::Ready(Ok(LoginOutcome::Authorize(build_authorize_url(
             &cfg,
             &req.redirect_uri,
             &req.state,
             &req.code_challenge,
             req.nonce.as_deref(),
-        );
-        LoginOutcome::Authorize(url)
+        ))))
     }
 
-    /// Handle the callback. With a token response fed back in, verify it → `Identify`. Otherwise
-    /// describe the token-exchange hop for the CORE to run (the core injects `client_secret`). A
-    /// callback lacking both a token response and a usable `code`+`redirect_uri`+`code_verifier`
-    /// triple, or with no `token_endpoint`, fails closed.
-    fn complete_login(&self, req: &CompleteLogin) -> LoginOutcome {
-        if let Some(resp) = &req.token_response {
-            return self.identity_from_token_response(resp, now_unix(), Instant::now());
-        }
-        let (Some(code), Some(redirect_uri), Some(code_verifier)) = (
-            req.code.as_deref(),
-            req.redirect_uri.as_deref(),
-            req.code_verifier.as_deref(),
-        ) else {
-            return LoginOutcome::Reject;
+    /// The callback's token exchange: the hop for its `code`, `redirect_uri` and `code_verifier`.
+    /// `None` (fail closed) for a callback lacking any of the three, or with no `token_endpoint`
+    /// configured or discovered.
+    ///
+    /// # Errors
+    /// The endpoint had to be discovered, and discovery failed.
+    pub fn token_exchange(
+        &self,
+        code: Option<&str>,
+        redirect_uri: Option<&str>,
+        code_verifier: Option<&str>,
+        now: Instant,
+        io: &mut dyn Fetch,
+    ) -> Step<Result<Option<LoginHop>, String>> {
+        let (Some(code), Some(redirect_uri), Some(code_verifier)) =
+            (code, redirect_uri, code_verifier)
+        else {
+            return Step::Ready(Ok(None));
         };
-        if self.cfg.token_endpoint.is_none() {
-            return LoginOutcome::Reject;
-        }
-        LoginOutcome::Exchange(build_token_exchange(
-            &self.cfg,
+        let Some(endpoint) = step_ok!(self.token_endpoint(now, io)) else {
+            return Step::Ready(Ok(None));
+        };
+        let mut cfg = self.cfg.clone();
+        cfg.token_endpoint = Some(endpoint);
+        Step::Ready(Ok(Some(build_token_exchange(
+            &cfg,
             code,
             redirect_uri,
             code_verifier,
-        ))
+        ))))
     }
 }
 
@@ -615,7 +690,7 @@ fn scope_value(cfg: &OidcConfig) -> String {
 
 /// Percent-encode `s` for use as a URL QUERY-component value (RFC 3986 unreserved set kept literal,
 /// everything else `%`-escaped). Used only for the authorize URL; the token-exchange form is encoded
-/// by the CORE, so its values stay raw.
+/// when it is sent ([`fetch::post_request`]), so its values stay raw.
 fn pct(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for &b in s.as_bytes() {
@@ -660,10 +735,10 @@ pub fn build_authorize_url(
     url
 }
 
-/// Build the token-exchange hop the CORE executes: `POST` to the token endpoint with
+/// Build the token-exchange hop the door sends: `POST` to the token endpoint with
 /// `grant_type=authorization_code`, `code`, `redirect_uri`, `code_verifier`, and `client_id`. The
-/// `client_secret` is written as an EMPTY placeholder keyed by `secret_form_field`, so the module
-/// writes the KEY and the CORE injects the VALUE — the plugin never holds the secret.
+/// `client_secret` is written as an EMPTY placeholder keyed by `secret_form_field`: the hop names the
+/// KEY, and the secret the host lent at `open` fills the VALUE when it is sent ([`fetch::form`]).
 pub fn build_token_exchange(
     cfg: &OidcConfig,
     code: &str,
@@ -679,8 +754,8 @@ pub fn build_token_exchange(
             ("redirect_uri".to_string(), redirect_uri.to_string()),
             ("code_verifier".to_string(), code_verifier.to_string()),
             ("client_id".to_string(), resolved_client_id(cfg)),
-            // Placeholder ONLY — the CORE overwrites this value with the real confidential-client
-            // secret. The plugin writes the key, never the value.
+            // Placeholder ONLY — the lent confidential-client secret fills it when the hop is sent
+            // (`fetch::form`); the hop itself never carries the value.
             ("client_secret".to_string(), String::new()),
         ],
         secret_form_field: Some("client_secret".to_string()),
@@ -698,7 +773,7 @@ pub fn build_token_exchange(
 ///   - The clock IS readable but below [`CLOCK_SANITY_FLOOR_UNIX`] — the realistic broken-clock case
 ///     (a dead RTC booting a host at the epoch, or an NTP/RTC fault landing in 1970-2000), which
 ///     `duration_since` reports as `Ok(small_value)` and would otherwise sail straight through.
-fn now_unix() -> i64 {
+pub(crate) fn now_unix() -> i64 {
     let t = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -725,101 +800,31 @@ fn is_clock_sane(t: i64) -> bool {
     t >= CLOCK_SANITY_FLOOR_UNIX
 }
 
-/// Resolve the JWKS url from config: the explicit `jwks_url`, or discovered from the issuer's OIDC
-/// discovery document. `fetcher` performs the discovery GET when needed.
+/// The configured `jwks_url`, checked: it must be an `https` URL. Every request is https-only, so
+/// any other value would load cleanly and then reject every token at first use; it is refused at
+/// `open` instead, with an error naming the field. Absent is fine: discovery names it.
 ///
-/// An explicit `jwks_url` must be an `https` URL. The fetcher is https-only, so any other value
-/// would load cleanly and then reject every token at first use; it is refused here, at boot, with
-/// an error naming the field instead.
-pub fn resolve_jwks_url(cfg: &OidcConfig, fetcher: &dyn JwksFetcher) -> Result<String, String> {
-    if let Some(url) = &cfg.jwks_url {
-        let parsed = reqwest::Url::parse(url)
-            .map_err(|e| format!("jwks_url is not a valid URL ({e}); it must be an https URL"))?;
-        if parsed.scheme() != "https" {
-            return Err(format!(
-                "jwks_url must be an https URL (got scheme '{}'); the JWKS is only ever fetched \
-                 over https",
-                parsed.scheme().escape_debug()
-            ));
-        }
-        return Ok(url.clone());
-    }
-    let doc = fetch_discovery_doc(cfg, fetcher)?;
-    doc.get("jwks_uri")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .ok_or_else(|| {
-            "OIDC discovery document has no 'jwks_uri'; set jwks_url explicitly".to_string()
-        })
-}
-
-/// Resolve the browser-login endpoints `(authorization_endpoint, token_endpoint)` from config: the
-/// explicit config fields win; whatever is absent is discovered from the issuer's
-/// openid-configuration (SAME issuer-match–guarded document `resolve_jwks_url` uses). When BOTH are
-/// already set explicitly, no fetch happens at all. An endpoint the document also omits stays `None`
-/// (that half of browser login is then unavailable and its `LoginModule` method fails closed).
-pub fn resolve_login_endpoints(
-    cfg: &OidcConfig,
-    fetcher: &dyn JwksFetcher,
-) -> Result<(Option<String>, Option<String>), String> {
-    if cfg.authorization_endpoint.is_some() && cfg.token_endpoint.is_some() {
-        return Ok((
-            cfg.authorization_endpoint.clone(),
-            cfg.token_endpoint.clone(),
+/// # Errors
+/// The URL does not parse, or is not https.
+pub fn check_jwks_url(cfg: &OidcConfig) -> Result<(), String> {
+    let Some(url) = &cfg.jwks_url else {
+        return Ok(());
+    };
+    let parsed = url::Url::parse(url)
+        .map_err(|e| format!("jwks_url is not a valid URL ({e}); it must be an https URL"))?;
+    if parsed.scheme() != "https" {
+        return Err(format!(
+            "jwks_url must be an https URL (got scheme '{}'); the JWKS is only ever fetched \
+             over https",
+            parsed.scheme().escape_debug()
         ));
     }
-    let doc = fetch_discovery_doc(cfg, fetcher)?;
-    let field = |name: &str| doc.get(name).and_then(Value::as_str).map(str::to_string);
-    let authorization_endpoint = cfg
-        .authorization_endpoint
-        .clone()
-        .or_else(|| field("authorization_endpoint"));
-    let token_endpoint = cfg
-        .token_endpoint
-        .clone()
-        .or_else(|| field("token_endpoint"));
-    Ok((authorization_endpoint, token_endpoint))
-}
-
-/// Fetch and validate the issuer's OIDC discovery document (`<issuer>/.well-known/openid-configuration`).
-///
-/// RFC 8414 §3.3 / OIDC Discovery 1.0 §4.3: the document's own `issuer` MUST equal the issuer it was
-/// requested from. Without this check, one poisoned discovery response at `open()` repoints
-/// `jwks_uri` (and the login endpoints) — and therefore every future signature verification — at an
-/// attacker-controlled key set for the process lifetime. Callers that already have their URLs
-/// explicitly configured bypass discovery entirely and are unaffected.
-fn fetch_discovery_doc(cfg: &OidcConfig, fetcher: &dyn JwksFetcher) -> Result<Value, String> {
-    let discovery_url = format!(
-        "{}/.well-known/openid-configuration",
-        cfg.issuer.trim_end_matches('/')
-    );
-    let body = fetcher.fetch(&discovery_url).map_err(|e| {
-        format!("OIDC discovery fetch failed ({discovery_url}): {e}; set jwks_url explicitly")
-    })?;
-    let doc: Value = serde_json::from_str(&body)
-        .map_err(|e| format!("OIDC discovery document is not JSON: {e}"))?;
-    match doc.get("issuer").and_then(Value::as_str) {
-        Some(doc_issuer) if doc_issuer == cfg.issuer => {}
-        // The document's `issuer` is untrusted remote input and this error is printed to the
-        // operator's stderr at boot, so it is escaped: a newline or terminal escape in it must not
-        // reach the terminal raw. A printable issuer is byte-identical.
-        Some(other) => {
-            return Err(format!(
-                "OIDC discovery document's issuer '{}' does not match the configured issuer \
-                 '{}' ({discovery_url}); refusing to trust its jwks_uri",
-                other.escape_debug(),
-                cfg.issuer
-            ))
-        }
-        None => {
-            return Err(format!(
-                "OIDC discovery document has no 'issuer' ({discovery_url}); refusing to trust its \
-                 jwks_uri"
-            ))
-        }
-    }
-    Ok(doc)
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests/script.rs"]
+mod script;
