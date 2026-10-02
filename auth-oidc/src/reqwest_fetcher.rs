@@ -8,6 +8,7 @@
 //! posture.
 
 use crate::cache::JwksFetcher;
+use busbar_contract::auth::{LoginHop, LoginHttpResponse};
 use std::io::Read;
 use std::time::Duration;
 
@@ -66,6 +67,42 @@ impl ReqwestFetcher {
             .build()
             .map_err(|e| format!("failed to build JWKS HTTP client: {e}"))?;
         Ok(Self { client })
+    }
+}
+
+impl ReqwestFetcher {
+    /// THE LOGIN TOKEN EXCHANGE, made by the plugin itself (THE DESIGN 6.7: an IdP login holds its
+    /// own client secret and makes its own token exchange): `hop` sent as a form, as 1.5.5's core
+    /// sent it, with `secret` filling the field `hop.secret_form_field` names. With no secret lent,
+    /// that field is dropped rather than sent empty (a public client sends none). The answer is the
+    /// status and the body; a transport failure is `Err`.
+    pub fn exchange(
+        &self,
+        hop: &LoginHop,
+        secret: Option<&str>,
+    ) -> Result<LoginHttpResponse, String> {
+        let mut form = hop.form.clone();
+        if let Some(field) = hop.secret_form_field.as_deref() {
+            match secret {
+                Some(secret) => match form.iter_mut().find(|(k, _)| k == field) {
+                    Some(slot) => slot.1 = secret.to_string(),
+                    None => form.push((field.to_string(), secret.to_string())),
+                },
+                None => form.retain(|(k, _)| k != field),
+            }
+        }
+        let method =
+            reqwest::Method::from_bytes(hop.method.as_bytes()).unwrap_or(reqwest::Method::POST);
+        let mut request = self.client.request(method, &hop.url).form(&form);
+        for (name, value) in &hop.headers {
+            request = request.header(name.as_str(), value.as_str());
+        }
+        let resp = request
+            .send()
+            .map_err(|e| format!("request to {} failed: {e}", hop.url))?;
+        let status = resp.status().as_u16();
+        let body = read_capped(resp, MAX_JWKS_BYTES, &hop.url)?;
+        Ok(LoginHttpResponse { status, body })
     }
 }
 

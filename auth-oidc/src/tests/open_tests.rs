@@ -4,7 +4,7 @@
 // itself does with the config before handing off. The real over-the-ABI, real-network-fixture success
 // path lives in this crate's own `tests/e2e.rs`.
 use super::{login_discovery_failed_message, open, open_with};
-use busbar_auth_oidc::{JwksFetcher, OidcConfig};
+use crate::{JwksFetcher, OidcConfig};
 use busbar_contract::auth::{AuthPlugin, BeginLogin, CompleteLogin, LoginOutcome};
 use std::sync::atomic::{AtomicUsize, Ordering};
 

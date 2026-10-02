@@ -1,18 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! End-to-end coverage of the `busbar-auth-oidc-plugin` cdylib loaded over the REAL loader `kind:auth`
-//! seam (`busbar_plugin_loader::auth::load_auth_from_bytes`) — the exact seam busbar's engine uses.
-//! This is not a stub: it stands up a genuine local HTTPS JWKS fixture (a real self-signed cert minted
-//! with `rcgen`, served over a real `rustls` TLS listener), mints a real ES256-signed JWT with `ring`,
-//! and `dlopen`s the actually-built plugin cdylib to verify it end to end — a genuine JWKS fetch, a
-//! genuine signature verification, and a genuine claim-to-`Principal` mapping across the real C ABI.
+//! End-to-end coverage of the `busbar-auth-oidc-plugin` cdylib DROPPED IN through the real loader's
+//! door validation and dispatcher (`load_dropped`), the auth kind's memory ABI. This is not a stub:
+//! it stands up a genuine local HTTPS JWKS (the logic crate's testkit issuer: a real self-signed
+//! cert, a real `rustls` listener), mints a real ES256-signed JWT, and `dlopen`s the actually-built
+//! plugin cdylib to verify it end to end — a genuine JWKS fetch, a genuine signature verification,
+//! and a genuine claim-to-identity mapping across the door.
 //!
-//! This is the only over-the-ABI coverage of the `kind: auth` dlopen seam, and it lives here rather
-//! than in the loader so it travels with the plugin it exercises.
+//! The admin-API install test drives a real `busbar` binary built from `BUSBAR_CHECKOUT`.
 
-use busbar_contract::abi::cold::kind as abi_kind;
-use busbar_plugin_loader::{auth::load_auth_from_bytes, plugin_library_filename};
+use busbar_plugin_loader::dispatch::kinds::auth::Auth;
+use busbar_plugin_loader::dispatch::{load_dropped, rendering_of_library, Plugin};
+use busbar_plugin_loader::plugin_library_filename;
 
 /// Locate the built `busbar_auth_oidc_plugin` cdylib in the target dir (mirrors the loader's own
 /// `auth_oidc_plugin_path` test helper). Under CI, a missing cdylib is a hard failure — this is the
@@ -53,10 +53,18 @@ fn plugin_path() -> Option<std::path::PathBuf> {
 mod support;
 use support::{Issuer, UNUSED_ISSUER};
 
-/// End-to-end SUCCESS: dlopen the real auth-oidc-plugin cdylib, `open()` it against a config pointing
-/// at a real local HTTPS JWKS fixture (trusted via `ca_cert_pem`), then `authenticate()` a real
-/// ES256-signed JWT over the C ABI and confirm the identity + mapped groups come back correctly
-/// through `DynAuth`/`AuthVerdict::Identify`.
+/// The built cdylib, admitted through the door against the Statement it renders (what
+/// `busbar-plugin-pack` signs into its manifest).
+fn dropped(path: &std::path::Path, d: &busbar_plugin_loader::dispatch::Dispatcher) -> Plugin<Auth> {
+    let stated = rendering_of_library(path)
+        .expect("the cdylib opens")
+        .expect("the cdylib exports the door");
+    load_dropped(path, &stated, support::bind(d)).expect("the dropped-in door loads")
+}
+
+/// End-to-end SUCCESS: dlopen the real auth-oidc-plugin cdylib, `open` it against a config pointing
+/// at a real local HTTPS JWKS fixture (trusted via `ca_cert_pem`), then `verify` a real ES256-signed
+/// JWT across the door and confirm the identity + mapped groups come back.
 #[test]
 fn load_and_exercise_auth_oidc_plugin_success() {
     let Some(path) = plugin_path() else {
@@ -82,12 +90,10 @@ fn load_and_exercise_auth_oidc_plugin_success() {
     })
     .to_string();
 
-    let bytes = std::fs::read(&path).expect("read auth-oidc plugin cdylib");
-    let module = load_auth_from_bytes(&bytes, &cfg, "auth-oidc", abi_kind::AUTH)
-        .expect("load auth-oidc plugin over the ABI (real JWKS fetch at open/first-use time)");
-
-    assert_eq!(module.name(), "oidc");
-    assert!(module.cacheable());
+    let d = support::dispatcher();
+    let module = dropped(&path, &d);
+    assert_eq!(module.name(), "busbar-auth-oidc");
+    support::open(&module, &cfg, None).expect("the module opens across the door");
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -105,31 +111,24 @@ fn load_and_exercise_auth_oidc_plugin_success() {
     });
     let token = key.sign(&claims);
 
-    match module.authenticate(Some(&token)) {
-        busbar_contract::auth::AuthVerdict::Identify(p) => {
-            // No `oid` claim in this fixture, so the IMMUTABLE `sub` is the identity of record —
-            // `preferred_username` is display-only now, never identity (see lib.rs's subject-claim
-            // precedence: oid/sub only, mutable claims are name-fallback, never id-fallback).
-            assert_eq!(p.id, "oidc:subject-guid");
-            assert_eq!(p.name.as_deref(), Some("Alice Example"));
-            assert_eq!(p.roles, vec!["11111111-aaaa", "22222222-bbbb"]);
-        }
-        other => panic!(
-            "expected the real JWKS fetch + real signature verification to identify the caller, \
-             got {other:?}"
-        ),
-    }
-
-    // A token signed by a DIFFERENT key (same kid) must fail closed over the real ABI too — not just
-    // in `busbar-auth-oidc`'s own in-process tests.
-    let forged_key = Issuer::start(UNUSED_ISSUER, "test-kid-1");
-    let forged_token = forged_key.sign(&claims);
+    // No `oid` claim in this fixture, so the IMMUTABLE `sub` is the identity of record —
+    // `preferred_username` is display-only, never identity.
+    let identified = support::verify(&module, Some(&token), None);
     assert!(
-        matches!(
-            module.authenticate(Some(&forged_token)),
-            busbar_contract::auth::AuthVerdict::Reject
+        identified.starts_with(
+            "verdict 1 subject=Some(\"oidc:subject-guid\") name=Some(\"Alice Example\") \
+             groups=[\"11111111-aaaa\", \"22222222-bbbb\"]"
         ),
-        "a token signed by the wrong key must be rejected across the real ABI"
+        "expected the real JWKS fetch + real signature verification to identify the caller, \
+         got {identified}"
+    );
+
+    // A token signed by a DIFFERENT key (same kid) must fail closed across the door too.
+    let forged_token = Issuer::start(UNUSED_ISSUER, "test-kid-1").sign(&claims);
+    assert_eq!(
+        support::verify(&module, Some(&forged_token), None),
+        "verdict 2 ",
+        "a token signed by the wrong key must be rejected across the door"
     );
 }
 
@@ -516,31 +515,28 @@ fn install_oidc_plugin_via_admin_api_and_authenticate() {
     let _ = std::fs::remove_dir_all(&work);
 }
 
-/// End-to-end FAILURE: a plugin `open()` error (malformed config) must surface back across the C ABI
-/// as a clean `Err`, not a panic or a silently-succeeded load.
+/// End-to-end FAILURE: a plugin `open` refusal (malformed config) must surface back across the door
+/// as the operator's text, not a panic or a silently-succeeded open.
 #[test]
 fn load_and_exercise_auth_oidc_plugin_bad_config_fails_over_abi() {
     let Some(path) = plugin_path() else {
         eprintln!("skip: auth-oidc plugin cdylib not built (run under --workspace)");
         return;
     };
-    let bytes = std::fs::read(&path).expect("read auth-oidc plugin cdylib");
+    let d = support::dispatcher();
 
-    let err = load_auth_from_bytes(&bytes, "", "auth-oidc", abi_kind::AUTH)
-        .err()
-        .expect("empty config must fail to load, not silently succeed");
+    let err = support::open(&dropped(&path, &d), "", None)
+        .expect_err("empty config must fail to open, not silently succeed");
     assert!(
         err.contains("config"),
-        "the plugin's own error message should survive the ABI crossing intact: {err}"
+        "the plugin's own error message should survive the door intact: {err}"
     );
 
-    let err = load_auth_from_bytes(
-        &bytes,
+    let err = support::open(
+        &dropped(&path, &d),
         r#"{"issuer": "https://idp.example/v2.0"}"#, // missing required `audience`
-        "auth-oidc",
-        abi_kind::AUTH,
+        None,
     )
-    .err()
-    .expect("config missing a required field must fail to load");
+    .expect_err("config missing a required field must fail to open");
     assert!(err.contains("invalid oidc plugin config"), "got: {err}");
 }

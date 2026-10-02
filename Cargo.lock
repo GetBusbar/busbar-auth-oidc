@@ -134,6 +134,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tracing",
+ "zeroize",
 ]
 
 [[package]]
@@ -146,7 +147,6 @@ dependencies = [
  "busbar-plugin-loader",
  "reqwest",
  "serde_json",
- "tracing",
 ]
 
 [[package]]

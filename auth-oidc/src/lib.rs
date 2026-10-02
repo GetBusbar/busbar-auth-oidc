@@ -9,8 +9,9 @@
 //! then resolves those roles to governance grants and admin scope — the module asserts identity
 //! only, never policy.
 //!
-//! This crate is the reusable LOGIC (usable statically). The dynamic `cdylib` that exports the auth C
-//! ABI is the sibling `busbar-auth-oidc-plugin` crate.
+//! This crate is the LOGIC and its door ([`door::door`], on the auth kind's memory ABI): a build that
+//! links it registers that door, and the dropped-in `cdylib`, the sibling `busbar-auth-oidc-plugin`
+//! crate, exports the same door as `busbar_plugin_door`.
 //!
 //! ## Crypto & dependencies
 //!
@@ -29,6 +30,8 @@
 //!   silently degrade: [`OidcVerifier`] REJECTS such a token with a precise error pointing the
 //!   operator at **app-roles** (`role_claim: roles`), whose count is bounded.
 
+#![forbid(unsafe_code)]
+
 use busbar_contract::auth::{
     AuthModule, AuthVerdict, BeginLogin, CompleteLogin, LoginHop, LoginHttpResponse, LoginModule,
     LoginOutcome, Principal,
@@ -38,13 +41,16 @@ use serde_json::Value;
 use std::time::{Duration, Instant};
 
 pub mod cache;
+pub mod door;
 pub mod jwks;
 pub mod jwt;
+mod open;
 mod reqwest_fetcher;
 #[cfg(feature = "testkit")]
 pub mod testkit;
 
 pub use cache::{JwksCache, JwksFetcher};
+pub use open::open;
 pub use reqwest_fetcher::ReqwestFetcher;
 
 /// The default role/group claim name — the token claim read into the principal's ROLES when the
