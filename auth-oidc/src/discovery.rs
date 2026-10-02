@@ -110,11 +110,10 @@ impl Discovery {
                 State::Flight(fl) if fl.mine(me) => {}
                 State::Flight(fl) if fl.held_against(me, now) => {
                     if me.is_none() {
-                        return Step::Ready(check_document(
-                            cfg,
-                            &url,
-                            Err(failed(&url, ConnFailure::NoTicket)),
-                        ));
+                        return Step::Ready(
+                            check_document(cfg, &url, Err(failed(&url, ConnFailure::NoTicket)))
+                                .map(Arc::new),
+                        );
                     }
                     return Step::Wait;
                 }
@@ -123,11 +122,10 @@ impl Discovery {
                 }
                 _ => {
                     let Some(owner) = me else {
-                        return Step::Ready(check_document(
-                            cfg,
-                            &url,
-                            Err(failed(&url, ConnFailure::NoTicket)),
-                        ));
+                        return Step::Ready(
+                            check_document(cfg, &url, Err(failed(&url, ConnFailure::NoTicket)))
+                                .map(Arc::new),
+                        );
                     };
                     *state = State::Flight(Flight { owner, at: now });
                 }
