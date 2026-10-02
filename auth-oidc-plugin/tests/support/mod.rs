@@ -64,6 +64,17 @@ pub fn z<T>() -> T {
     unsafe { std::mem::zeroed() }
 }
 
+/// ONE DISPATCHER AT A TIME in a test process. The loader keeps a ticketed service's answer for
+/// its replay in ONE process-wide map and forgets it when ANY dispatcher recycles an equal ticket
+/// (`conn_services::forget` matches the ticket alone, and every fresh dispatcher mints the same
+/// first tickets): a test recycling its tickets while another test's op is pending makes that op's
+/// replayed `establish` run again and send its request twice. Every test that binds holds this.
+pub fn serial() -> std::sync::MutexGuard<'static, ()> {
+    static ONE: Mutex<()> = Mutex::new(());
+    ONE.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 // ── the host's clock ─────────────────────────────────────────────────────────────────────────────
 
 /// The host services a test host serves: the kernel's one clock (what an op waiting on another's

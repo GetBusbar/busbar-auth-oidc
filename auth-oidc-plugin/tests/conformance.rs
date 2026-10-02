@@ -235,6 +235,7 @@ fn transcript(b: &Bound, cfg: &str, t: &Tokens) -> Vec<String> {
 /// connector — and the RED arms show the comparison is not vacuous.
 #[test]
 fn the_linked_and_the_dropped_in_oidc_module_are_one_module() {
+    let _one = support::serial();
     let key = Issuer::start(UNUSED_ISSUER, KID);
     let cfg = config(AUDIENCE);
     let t = tokens(&key);
@@ -407,6 +408,7 @@ fn the_linked_and_the_dropped_in_oidc_module_are_one_module() {
 /// pend, fails at once and asks the IdP nothing. Both doors alike.
 #[test]
 fn red_an_unreachable_issuer_and_a_ticketless_call_fail_verify_in_1_5_5_s_words() {
+    let _one = support::serial();
     let key = Issuer::start(UNUSED_ISSUER, KID);
     let token = key.sign(&claims(AUDIENCE));
     let lib = cdylib();
@@ -468,6 +470,7 @@ fn simultaneous_cold_verifies_make_one_discovery_and_one_jwks_request() {
 /// Two cold verifies on one instance; the second submitted once the first pended (`staggered`) or
 /// at once.
 fn cold_verifies(staggered: bool) {
+    let _one = support::serial();
     let key = Issuer::start(UNUSED_ISSUER, KID);
     let token = key.sign(&claims(AUDIENCE));
     let idp = Idp::new(&key);

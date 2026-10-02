@@ -58,6 +58,7 @@ use support::{Arm, Idp, Issuer, UNUSED_ISSUER};
 /// + mapped groups come back.
 #[test]
 fn load_and_exercise_auth_oidc_plugin_success() {
+    let _one = support::serial();
     let Some(path) = plugin_path() else {
         eprintln!("skip: auth-oidc plugin cdylib not built (run under --workspace)");
         return;
@@ -507,6 +508,7 @@ fn install_oidc_plugin_via_admin_api_and_authenticate() {
 /// as the operator's text, not a panic or a silently-succeeded open.
 #[test]
 fn load_and_exercise_auth_oidc_plugin_bad_config_fails_over_abi() {
+    let _one = support::serial();
     let Some(path) = plugin_path() else {
         eprintln!("skip: auth-oidc plugin cdylib not built (run under --workspace)");
         return;
