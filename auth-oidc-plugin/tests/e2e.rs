@@ -337,7 +337,7 @@ fn install_oidc_plugin_via_admin_api_and_authenticate() {
         .env("MOCK_KEY", "unused-mock-provider-key")
         .env("BUSBAR_STATE_FILE", "")
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::inherit())
         .spawn()
         .expect("spawn boot 1 (empty auth chain, admin listener up)");
     assert!(
@@ -432,7 +432,7 @@ fn install_oidc_plugin_via_admin_api_and_authenticate() {
         .env("MOCK_KEY", "unused-mock-provider-key")
         .env("BUSBAR_STATE_FILE", "")
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::inherit())
         .spawn()
         .expect("spawn boot 2 (auth.chain: [oidc], picking up the admin-API-installed tarball)");
     assert!(
