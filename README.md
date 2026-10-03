@@ -62,11 +62,10 @@ This repo is a same-repo, 2-crate Cargo workspace: `auth-oidc/` (the
 `busbar-auth-oidc` library — the real OIDC logic, no plugin ABI) and
 `auth-oidc-plugin/` (the `busbar-auth-oidc-plugin` cdylib adapter).
 
-`auth-oidc-plugin/src/lib.rs` (~60 lines) is a thin adapter: it turns the
-engine's JSON config into a real `OidcModule` and hands the trait object
-to the SDK, which emits the six extern-C symbols the loader resolves
-(`busbar_abi`, `busbar_plugin_kind`, `busbar_open`, `busbar_call`,
-`busbar_free`, `busbar_close`).
+`auth-oidc-plugin/src/lib.rs` is a thin adapter: one line,
+`busbar_contract::export_door!(busbar_auth_oidc::door::door)`, which emits
+the image's one symbol, `busbar_plugin_door` (the memory-ABI door). The
+module and its settings parsing live in the logic crate.
 All the actual OIDC logic — JWKS fetch/cache, JWT verification, claim
 policy — lives in the `busbar-auth-oidc` library crate (`auth-oidc/`, a
 same-repo sibling crate; see [Dependencies](#dependencies) below), so a
