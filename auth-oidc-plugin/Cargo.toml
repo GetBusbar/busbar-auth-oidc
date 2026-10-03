@@ -32,7 +32,7 @@ busbar-plugin-loader = { workspace = true }
 # the shipped crates turns a TLS stack on, so `cargo metadata`'s resolve carries none on a normal
 # edge (the fleet net ban).
 ring = { workspace = true, features = ["std"] }
-rcgen = { workspace = true }
+rcgen = { workspace = true, features = ["pem"] }
 rustls = { workspace = true }
 serde_json = { workspace = true }
 # The e2e decodes the login cookie (base64url JSON) the live admin install flow sets.
