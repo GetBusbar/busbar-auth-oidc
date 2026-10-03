@@ -110,8 +110,14 @@ impl HostServices for Clock {
     fn trust_due(&self, _: &Caller) -> Stored {
         Stored::refused(UNSERVED)
     }
+    fn trust_verify(&self, _: &Caller, _: &str, _: &[u8], _: &[u8]) -> Stored {
+        Stored::refused(UNSERVED)
+    }
     fn entitlement_check(&self, _: &Caller, _: Option<u64>, _: &str) -> Stored {
         Stored::refused(UNSERVED)
+    }
+    fn records_secret(&self, _: &str, _: &str, _: Later) -> Ran {
+        Ran::Now(Stored::refused(UNSERVED))
     }
     fn random_fill(&self, _: u64) -> Stored {
         Stored::refused(UNSERVED)
@@ -360,6 +366,9 @@ impl Conns for Idp {
 }
 
 impl DeclaredConns for Idp {
+    fn serves_scheme(&self, transport: &str) -> bool {
+        transport == "https"
+    }
     fn declare(
         &self,
         _: InstanceId,

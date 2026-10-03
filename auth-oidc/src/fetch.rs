@@ -21,7 +21,9 @@
 use std::fmt::Display;
 use std::task::Poll;
 
-use busbar_contract::abi::host::conn::connector::{Need, DIRECTION_OUTBOUND, EGRESS_OPEN_WEB};
+use busbar_contract::abi::host::conn::connector::{
+    Need, DIRECTION_OUTBOUND, EGRESS_OPEN_WEB, KEEP_NAMED,
+};
 use busbar_contract::abi::mechanism::call::{AbiStr, Blob};
 use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::sdk::conn::{ConnFailure, Host};
@@ -69,6 +71,10 @@ const fn need(target_from: AbiStr) -> Need {
         keep_response_headers: std::ptr::null(),
         keep_response_headers_len: 0,
         timeout_ms: FETCH_TIMEOUT_MS,
+        keep_mode: KEEP_NAMED,
+        _reserved: 0,
+        deny_response_headers: std::ptr::null(),
+        deny_response_headers_len: 0,
     }
 }
 

@@ -31,11 +31,11 @@ use std::task::Poll;
 use std::time::Instant;
 
 use busbar_contract::abi::auth::{
-    AuthTail, BeginLoginIn, BeginLoginOut, CompleteLoginIn, FieldsIn, FieldsOut, IdentifyOut,
-    IdentityBuf, OpenOutboundIn, OpenOutboundOut, OutboundReadyIn, OutboundReadyOut, VerifyIn,
-    BEGIN_AUTHORIZE, CANCEL_ABANDONED, CAP_INBOUND, CAP_LOGIN, FACT_CACHEABLE, IDENTITY_HAS_TTL,
-    LOGIN_BAD_CREDENTIAL, LOGIN_IDENTITY, LOGIN_KIND_REDIRECT, LOGIN_OUTAGE, SPAN_ABSENT,
-    VERDICT_IDENTITY, VERDICT_PASS, VERDICT_REJECT,
+    AuthPoints, AuthTail, BeginLoginIn, BeginLoginOut, CompleteLoginIn, FieldsIn, FieldsOut,
+    IdentifyOut, IdentityBuf, OpenOutboundIn, OpenOutboundOut, OutboundReadyIn, OutboundReadyOut,
+    VerifyIn, BEGIN_AUTHORIZE, CANCEL_ABANDONED, CAP_INBOUND, CAP_LOGIN, DECISION_CONTINUE,
+    DECISION_STOP, FACT_CACHEABLE, IDENTITY_HAS_TTL, LOGIN_BAD_CREDENTIAL, LOGIN_IDENTITY,
+    LOGIN_KIND_REDIRECT, LOGIN_OUTAGE, SPAN_ABSENT, VERDICT_IDENTITY, VERDICT_PASS, VERDICT_REJECT,
 };
 use busbar_contract::abi::mechanism::call::{AbiStr, Blob, Outcome, Span, BLOB_ABSENT};
 use busbar_contract::abi::mechanism::door::{Rewrite, Statement, REWRITE_ALIAS};
@@ -60,7 +60,7 @@ pub const NAME: &str = "busbar-auth-oidc";
 const TAIL: AuthTail = AuthTail {
     caps: CAP_INBOUND | CAP_LOGIN,
     login_kind: LOGIN_KIND_REDIRECT,
-    ..verify_tail(FACT_CACHEABLE)
+    ..verify_tail(FACT_CACHEABLE, AuthPoints::HEAD)
 };
 
 /// The settings key whose value is the confidential-client secret's reference: the kernel
@@ -394,6 +394,14 @@ impl SafeSlot for Verify {
             Step::Pending => return pend(&instance, h.host(), io, parked, &mut out, false),
             Step::Wait => return pend(&instance, h.host(), io, parked, &mut out, true),
         };
+        // The transport's decision, the SDK's default for each verdict (`Answer::from(Verdict)`):
+        // continue on an identity or a pass, stop on a reject. No strip names are written
+        // (`strip_len` stays 0).
+        let decision = match verdict {
+            AuthVerdict::Identify(_) | AuthVerdict::Pass => DECISION_CONTINUE,
+            AuthVerdict::Reject => DECISION_STOP,
+        };
+        out.set(|o| &o.decision, decision);
         match verdict {
             AuthVerdict::Identify(p) => {
                 identify(&p, input.field(|i| &i.out_buf), &mut out, VERDICT_IDENTITY)
