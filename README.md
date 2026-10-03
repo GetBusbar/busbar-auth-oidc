@@ -5,7 +5,7 @@ The OIDC auth module as a droppable busbar plugin: a cdylib exporting the auth C
 
 | kind | alias | crate | busbar | license |
 |---|---|---|---|---|
-| `auth` | `oidc` | `busbar-auth-oidc-plugin` | 1.6.0 (pinned in `.busbar-ref`) | MIT |
+| `auth` | `oidc` | `busbar-auth-oidc-plugin` | 1.6.0 (pinned in `.busbar-ref`) | Apache-2.0 |
 
 [![ci](https://github.com/GetBusbar/busbar-auth-oidc/actions/workflows/ci.yml/badge.svg?branch=dev)](https://github.com/GetBusbar/busbar-auth-oidc/actions/workflows/ci.yml)
 <!-- fleet:header:end -->
