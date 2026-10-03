@@ -19,7 +19,7 @@ serde_json = { workspace = true }
 # RUSTSEC-2023-0071 and a second crypto stack). ring is already in the graph (rustls' backend).
 ring = { workspace = true }
 # base64url for the JWT segments and JWKS key material; already in the graph.
-base64 = "0.22"
+base64 = { workspace = true }
 # NO HTTP CLIENT, NO TLS, NO SOCKET: discovery, the JWKS and the login's token exchange go out
 # through the host's connector as declared needs (THE DESIGN 5, Connections; the fleet `[net-ban]`).
 # `url` parses the URLs the module is configured with or discovers (the request target, the https

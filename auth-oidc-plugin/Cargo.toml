@@ -36,7 +36,7 @@ rcgen = { workspace = true }
 rustls = { workspace = true }
 serde_json = { workspace = true }
 # The e2e decodes the login cookie (base64url JSON) the live admin install flow sets.
-base64 = "0.22"
+base64 = { workspace = true }
 # For the real-server admin-API install + auth-chain e2e test (tests/e2e.rs's
 # install_oidc_plugin_via_admin_api_and_authenticate): packs the plugin cdylib with the real
 # `busbar-plugin-pack` BINARY (spawned as a subprocess, same as store-postgres/store-sqlite's own
