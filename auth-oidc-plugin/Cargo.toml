@@ -25,7 +25,9 @@ busbar-auth-oidc = { path = "../auth-oidc" }
 # dropped-in conformance test (tests/conformance.rs) signs, packs, scans and admits the built cdylib
 # and the linked door through the REAL loader's door validation and dispatcher; the end-to-end test
 # loads the built cdylib through the same door.
-busbar-plugin-loader = { workspace = true }
+# `conformance`: busbar's PUBLISHED conformance suite (`tests/conformance.rs`'s
+# `conformance_suite!`), run against the busbar commit this repo pins.
+busbar-plugin-loader = { workspace = true, features = ["conformance"] }
 # THE TESTS' LOCAL ISSUER (tests/support/issuer.rs): an ES256 key (ring), its JWKS (base64url,
 # serde_json), genuinely signed tokens, and a certificate-verified loopback HTTPS endpoint (rcgen,
 # rustls) for the admin-API e2e, whose real busbar connector dials it. Test-side only: no feature of

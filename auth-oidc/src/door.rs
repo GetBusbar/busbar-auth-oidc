@@ -203,6 +203,8 @@ struct Reached {
 pub struct Oidc {
     now: RwLock<Arc<Opened>>,
     reached: Mutex<HashMap<Ticket, Reached>>,
+    /// A `ready` in flight: its requests' state, by its ticket, across PENDING.
+    readying: Mutex<HashMap<Ticket, IoState>>,
 }
 
 impl std::fmt::Debug for Oidc {
@@ -239,7 +241,35 @@ impl Life for Oidc {
         Ok(Self {
             now: RwLock::new(Arc::new(Opened::new(settings, secrets)?)),
             reached: Mutex::default(),
+            readying: Mutex::default(),
         })
+    }
+
+    /// READY (after `open`, before any listener binds): discovery, a failure refusing the boot in
+    /// 1.5.5's words, then the key set's warm-up ([`OidcModule::ready`]), over the instance's needs
+    /// on `ticket`. PENDING while a request is in flight; its state is kept by ticket and the op
+    /// resumes on the connector's wake.
+    fn ready(&self, host: &Host, ticket: Ticket) -> Poll<Result<(), Refusal>> {
+        let opened = self.now();
+        let state = self
+            .readying
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&ticket)
+            .unwrap_or_default();
+        let mut io = HostIo::new(Some(host), ticket, state, opened.module.anchored());
+        match opened.module.ready(Instant::now(), &mut io) {
+            Step::Pending => {
+                self.readying
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(ticket, io.into_state());
+                Poll::Pending
+            }
+            // Another call's fetch of the same document: it serves this instance too.
+            Step::Ready(Ok(())) | Step::Wait => Poll::Ready(Ok(())),
+            Step::Ready(Err(e)) => Poll::Ready(Err(Refusal::failed(e))),
+        }
     }
 
     /// The same settings and secret keep the opened module and its key cache (the admin cache
@@ -598,7 +628,7 @@ mod table {
     busbar_contract::plugin_door! {
         ops: busbar_contract::abi::auth::Ops,
         statement: super::STATEMENT,
-        lifecycle: life(Oidc),
+        lifecycle: life(Oidc, ready),
         kind_ops: {
             verify: Safe<Verify>,
             begin_login: Safe<Begin>,

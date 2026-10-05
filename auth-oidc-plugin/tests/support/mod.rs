@@ -37,7 +37,7 @@ use busbar_contract::conn::{
 };
 use busbar_contract::ids::StreamId;
 use busbar_contract::services::{
-    Caller, HostServices, Later, Ran, Reading, RecordsList, Stored, UNSERVED,
+    Caller, HostServices, Later, NestAsk, Ran, Reading, RecordsList, Stored, UNSERVED,
 };
 use busbar_contract::transport::ConnFacts;
 use busbar_plugin_loader::dispatch::kinds::auth::Auth;
@@ -121,6 +121,21 @@ impl HostServices for Clock {
     }
     fn random_fill(&self, _: u64) -> Stored {
         Stored::refused(UNSERVED)
+    }
+    fn unit_nest(&self, _: &Caller, _: Option<u64>, _: NestAsk, _: Later) -> Ran {
+        Ran::Now(Stored::refused(UNSERVED))
+    }
+    fn work_open(&self, _: &Caller, _: Option<u64>, _: &str, _: &[u8], _: Later) -> Ran {
+        Ran::Now(Stored::refused(UNSERVED))
+    }
+    fn work_find(&self, _: &Caller, _: Option<u64>, _: &[u8], _: Later) -> Ran {
+        Ran::Now(Stored::refused(UNSERVED))
+    }
+    fn work_settle(&self, _: &Caller, _: u64, _: &[u8], _: Later) -> Ran {
+        Ran::Now(Stored::refused(UNSERVED))
+    }
+    fn work_resume(&self, _: &Caller, _: Option<u64>, _: u64, _: Later) -> Ran {
+        Ran::Now(Stored::refused(UNSERVED))
     }
 }
 

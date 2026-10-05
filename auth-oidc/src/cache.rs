@@ -162,6 +162,27 @@ impl JwksCache {
         Step::Ready(Self::after_rotation(keys.as_deref(), kid, &f))
     }
 
+    /// THE WARM-UP (`ready`, at boot): fetch the key set once when the cache holds none, so the
+    /// first verdicts are answered on the spot. PENDING while this caller's fetch is in flight
+    /// (re-enter with the same `io` state); WAIT while another caller's is. A failed fetch is the
+    /// fetch's error; the cache is left as any failed fetch leaves it.
+    pub fn warm(&self, url: &str, now: Instant, io: &mut dyn Fetch) -> Step<Result<(), String>> {
+        let mine = self.lock().flight.filter(|(fl, _)| fl.mine(io.caller()));
+        if let Some((flight, _)) = mine {
+            let fetched = match io.get(Doc::Jwks, url) {
+                Poll::Pending => return Step::Pending,
+                Poll::Ready(r) => r,
+            };
+            return Step::Ready(self.settle(io, url, flight.at, fetched).map(|_| ()));
+        }
+        let (keys, _, expired) = self.snapshot(now);
+        if keys.is_some() && !expired {
+            return Step::Ready(Ok(()));
+        }
+        let _ = step_ok!(self.refresh(io, url, now, true, Point::Refresh));
+        Step::Ready(Ok(()))
+    }
+
     /// The lookup after the bounded rotation refetch: a match, or the unknown-`kid` error.
     fn after_rotation<T>(
         keys: Option<&JwkSet>,

@@ -470,19 +470,22 @@ impl OidcModule {
         )
     }
 
-    /// BOOT-TIME DISCOVERY, the one resolution the host's `ready` lifecycle entry (after `open`,
-    /// before the listener binds; a busbar lane adds it) will run: the JWKS url from the issuer's
-    /// discovery document, a failure refusing boot in 1.5.5's words. An explicit `jwks_url` skips
-    /// it. Until that entry exists the first op that needs the document runs the same resolution
-    /// ([`Self::jwks_url`]), single-flight.
+    /// THE HOST'S `ready` (after `open`, before any listener binds; boot awaits it): BOOT-TIME
+    /// DISCOVERY, the JWKS url from the issuer's discovery document, a failure refusing boot in
+    /// 1.5.5's words (an explicit `jwks_url` skips it), then the key set's best-effort warm-up.
+    /// Single-flight with every op that needs the same document or keys.
     ///
     /// # Errors
     /// The discovery error, or a document with no `jwks_uri`.
     pub fn ready(&self, now: Instant, io: &mut dyn Fetch) -> Step<Result<(), String>> {
-        if self.cfg.jwks_url.is_some() {
-            return Step::Ready(Ok(()));
+        let url = step_ok!(self.jwks_url(now, io));
+        // THE KEY SET'S WARM-UP: fetched once at boot so the first verdicts are answered on the
+        // spot. 1.5.5 fetched it on the first verify and a boot never failed on it, so neither
+        // does this one: a failed warm-up is left to the first verify, which fetches again.
+        match self.jwks.warm(&url, now, io) {
+            Step::Pending => Step::Pending,
+            Step::Ready(_) | Step::Wait => Step::Ready(Ok(())),
         }
-        Step::Ready(step!(self.jwks_url(now, io)).map(|_| ()))
     }
 
     /// The login endpoint `configured`, else the discovery document's `field` (the SAME
