@@ -45,13 +45,18 @@ fn ready_resolves_the_jwks_url_at_boot_and_an_explicit_one_skips_it() {
     assert_eq!(ready(m.ready(now, &mut idp.at_once(Some(ME)))), Ok(()));
     assert_eq!(
         idp.calls(),
-        0,
-        "an explicit jwks_url never fetches discovery"
+        1,
+        "an explicit jwks_url never fetches discovery: the one request is the key set's warm-up"
     );
 
     let m = OidcModule::new(&cfg(None));
+    let before = idp.calls();
     assert_eq!(ready(m.ready(now, &mut idp.at_once(Some(ME)))), Ok(()));
-    assert_eq!(idp.calls(), 1);
+    assert_eq!(
+        idp.calls() - before,
+        2,
+        "discovery, then the key set's warm-up"
+    );
 
     let down = Idp::answering(Err("connection refused".into()));
     let m = OidcModule::new(&cfg(None));

@@ -144,6 +144,14 @@ pub trait Fetch {
     /// [`failed`]).
     fn get(&mut self, doc: Doc, url: &str) -> Poll<Result<String, String>>;
 
+    /// A request to `url` this op would have to make, or wait on, but cannot: it runs on no ticket
+    /// and may not pend. Answers the error the op reports (1.5.5's prefix, then why); a host-backed
+    /// `Fetch` also notes that the op asked for I/O it could not wait on, so an answer reached
+    /// without it is not the op's verdict ([`HostIo::wanted_io`]).
+    fn cannot_pend(&mut self, url: &str) -> String {
+        failed(url, ConnFailure::NoTicket)
+    }
+
     /// THE LOGIN TOKEN EXCHANGE, made by the plugin itself (THE DESIGN 6.7: an IdP login holds its
     /// own client secret and makes its own token exchange): `hop` sent as a form ([`form`]). The
     /// answer is the status and the body, whatever the status; a request that got no answer is
@@ -267,6 +275,7 @@ pub struct HostIo<'h> {
     ticket: Ticket,
     state: IoState,
     anchored: bool,
+    wanted: bool,
 }
 
 impl<'h> HostIo<'h> {
@@ -279,7 +288,14 @@ impl<'h> HostIo<'h> {
             ticket,
             state,
             anchored,
+            wanted: false,
         }
+    }
+
+    /// Whether the op asked for a request it could not wait on (it runs on no ticket): whatever it
+    /// answered without that request is not its verdict, and the host should ask again on a ticket.
+    pub fn wanted_io(&self) -> bool {
+        self.wanted
     }
 
     /// What to park across PENDING.
@@ -307,6 +323,10 @@ impl<'h> HostIo<'h> {
         let Some(host) = self.host else {
             return Poll::Ready(Err(failed(url, ConnFailure::Unarmed)));
         };
+        // A call on no ticket may not pend, so it makes no request.
+        if self.ticket.is_none() {
+            return Poll::Ready(Err(Fetch::cannot_pend(self, url)));
+        }
         let mut c = host.connector_from(self.ticket, self.state.issued);
         let mut ex = match self.state.current.take() {
             Some((at, ex)) if at == url => ex,
@@ -331,6 +351,11 @@ impl<'h> HostIo<'h> {
 impl Fetch for HostIo<'_> {
     fn caller(&self) -> Option<Ticket> {
         (!self.ticket.is_none()).then_some(self.ticket)
+    }
+
+    fn cannot_pend(&mut self, url: &str) -> String {
+        self.wanted = true;
+        failed(url, ConnFailure::NoTicket)
     }
 
     fn get(&mut self, doc: Doc, url: &str) -> Poll<Result<String, String>> {

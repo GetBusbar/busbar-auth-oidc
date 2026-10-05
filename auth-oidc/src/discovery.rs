@@ -17,10 +17,9 @@ use std::sync::{Arc, Mutex};
 use std::task::Poll;
 use std::time::{Duration, Instant};
 
-use busbar_contract::abi::sdk::conn::ConnFailure;
 use serde_json::Value;
 
-use crate::fetch::{failed, Doc, Fetch};
+use crate::fetch::{Doc, Fetch};
 use crate::flight::{Flight, Step};
 use crate::OidcConfig;
 
@@ -111,8 +110,7 @@ impl Discovery {
                 State::Flight(fl) if fl.held_against(me, now) => {
                     if me.is_none() {
                         return Step::Ready(
-                            check_document(cfg, &url, Err(failed(&url, ConnFailure::NoTicket)))
-                                .map(Arc::new),
+                            check_document(cfg, &url, Err(io.cannot_pend(&url))).map(Arc::new),
                         );
                     }
                     return Step::Wait;
@@ -123,8 +121,7 @@ impl Discovery {
                 _ => {
                     let Some(owner) = me else {
                         return Step::Ready(
-                            check_document(cfg, &url, Err(failed(&url, ConnFailure::NoTicket)))
-                                .map(Arc::new),
+                            check_document(cfg, &url, Err(io.cannot_pend(&url))).map(Arc::new),
                         );
                     };
                     *state = State::Flight(Flight { owner, at: now });
