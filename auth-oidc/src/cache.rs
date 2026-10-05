@@ -24,10 +24,9 @@
 //! unreachable IdP would leave the set permanently TTL-stale and every single request would issue its
 //! own fresh GET — an unbounded fetch storm against the provider.
 
-use crate::fetch::{failed, Doc, Fetch};
+use crate::fetch::{Doc, Fetch};
 use crate::flight::{Flight, Step};
 use crate::jwks::{Jwk, JwkSet};
-use busbar_contract::abi::sdk::conn::ConnFailure;
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
 use std::time::{Duration, Instant};
@@ -270,7 +269,7 @@ impl JwksCache {
                     return Step::Ready(self.serve_within_ceiling(&inner, url, now));
                 }
                 if me.is_none() {
-                    return Step::Ready(Err(failed(url, ConnFailure::NoTicket)));
+                    return Step::Ready(Err(io.cannot_pend(url)));
                 }
                 return Step::Wait;
             }
@@ -282,7 +281,7 @@ impl JwksCache {
             // A call on no ticket may not pend, so it may not claim a fetch either: it would hold
             // the rate-limit window without ever asking.
             let Some(owner) = me else {
-                return Step::Ready(Err(failed(url, ConnFailure::NoTicket)));
+                return Step::Ready(Err(io.cannot_pend(url)));
             };
             // Claim the window BEFORE the fetch so concurrent callers see it and back off. This is
             // also what makes the rate limit apply to FAILURES — the anchor advances either way.

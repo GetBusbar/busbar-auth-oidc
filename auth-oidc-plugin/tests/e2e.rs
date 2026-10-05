@@ -328,6 +328,7 @@ fn install_oidc_plugin_via_admin_api_and_authenticate() {
         format!(
             "listen: \"127.0.0.1:{data_port1}\"\n\
              admin_listen: \"127.0.0.1:{admin_port1}\"\n\
+             store: {{ module: memory }}\n\
              plugins:\n  enabled: true\n  dir: {}\n  trust:\n    allow_unsigned: true\n\
              identity-providers:\n  admin-tokens: {{ module: admin-tokens, token: {{ env: BUSBAR_ADMIN_TOKEN }} }}\n\
              auth:\n  chain: []\n  admin_auth: [admin-tokens]\n\
@@ -412,6 +413,8 @@ fn install_oidc_plugin_via_admin_api_and_authenticate() {
         format!(
             "listen: \"127.0.0.1:{data_port2}\"\n\
              admin_listen: \"127.0.0.1:{admin_port2}\"\n\
+             store: {{ module: memory }}\n\
+             advanced:\n  allow_destinations: [\"127.0.0.1\"]\n\
              plugins:\n  enabled: true\n  dir: {}\n  trust:\n    allow_unsigned: true\n\
              identity-providers:\n  admin-tokens: {{ module: admin-tokens, token: {{ env: BUSBAR_ADMIN_TOKEN }} }}\n\
              \x20 oidc:\n    module: oidc\n    settings:\n      issuer: \"{ISSUER}\"\n      audience: \"{AUDIENCE}\"\n\

@@ -440,11 +440,12 @@ impl SafeSlot for Verify {
             // ON THE SPOT (no ticket): a verify that needs a fetch, or waits on another call's, may
             // not pend, so it answers REFUSED and the host makes it again on a ticket
             // (`abi::auth`: a plugin whose `verify` must wait on I/O answers REFUSED on the spot).
-            // A REJECT there may be a key it could not fetch there (the module fails closed on keys
-            // it cannot reach): it is answered on a ticket too, where the fetch is made.
-            Step::Ready(Err(_) | Ok(AuthVerdict::Reject)) | Step::Pending | Step::Wait
-                if ticketless =>
-            {
+            // A verdict reached WITHOUT a fetch it asked for (the module fails closed on keys it
+            // could not reach) is not its verdict either: it is answered on a ticket too.
+            Step::Ready(_) | Step::Pending | Step::Wait if ticketless && io.wanted_io() => {
+                return Outcome::Refused
+            }
+            Step::Ready(Err(_)) | Step::Pending | Step::Wait if ticketless => {
                 return Outcome::Refused
             }
             Step::Ready(Ok(v)) => v,
