@@ -9,7 +9,8 @@
 //! re-asked when the op re-enters on its wake (the replay rule, `abi::sdk::conn`).
 //!
 //! Every need is `open-web` (public destinations over a secure connection only; the auth mint
-//! endpoints' class), over `https`. The discovery need is pinned to the `issuer` setting's target
+//! endpoints' class), over the `http` transport, its connections secured by the target's `https`
+//! scheme (the connector's TLS; open-web is secure-only). The discovery need is pinned to the `issuer` setting's target
 //! (`target_from`); the JWKS and token endpoints may be discovered, so the module names them per
 //! request.
 //!
@@ -68,13 +69,14 @@ const ABSENT: AbiStr = AbiStr {
     len: 0,
 };
 
-/// One outbound `https` need in the open-web class, trusting the root `trust_from` names beside
+/// One outbound need over the `http` transport (the scheme the http framer claims; every target is
+/// `https`, secured by the connector) in the open-web class, trusting the root `trust_from` names beside
 /// the public roots (`ABSENT`: the public roots only).
 const fn need(target_from: AbiStr, trust_from: AbiStr) -> Need {
     Need {
         direction: DIRECTION_OUTBOUND,
         egress_class: EGRESS_OPEN_WEB,
-        transport: abi_str("https"),
+        transport: abi_str("http"),
         auth: ABSENT,
         target_from,
         trust_from,

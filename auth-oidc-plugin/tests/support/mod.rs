@@ -382,7 +382,7 @@ impl Conns for Idp {
 
 impl DeclaredConns for Idp {
     fn serves_scheme(&self, transport: &str) -> bool {
-        transport == "https"
+        transport == "http"
     }
     fn declare(
         &self,

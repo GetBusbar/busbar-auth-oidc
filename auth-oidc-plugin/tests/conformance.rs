@@ -366,7 +366,7 @@ fn the_linked_and_the_dropped_in_oidc_module_are_one_module() {
     ] {
         let trusted = trust_from == anchor;
         let want = format!(
-            "need {need} direction={DIRECTION_OUTBOUND} class={EGRESS_OPEN_WEB} transport=https \
+            "need {need} direction={DIRECTION_OUTBOUND} class={EGRESS_OPEN_WEB} transport=http \
              target_from={target_from} trust_from={trust_from} timeout_ms=10000 \
              target={target} trusted={trusted} answer=Ok(())"
         );
@@ -530,14 +530,10 @@ fn red_an_unreachable_issuer_and_a_ticketless_call_fail_verify_in_1_5_5_s_words(
         let b = bind(&arm, &idp);
         open(&b.plugin, &config(AUDIENCE), None).expect("opens: nothing is fetched at open");
 
+        // ON THE SPOT (no ticket) the verify needs a fetch it may not pend on: REFUSED, so the
+        // host makes it again on a ticket (`abi::auth`).
         let ticketless = verify_ticketless(&b.plugin, Some(&token));
-        assert_eq!(
-            ticketless,
-            format!(
-                "Failed OIDC discovery fetch failed ({url}): request to {url} failed: the call \
-                 runs on no ticket and cannot pend; set jwks_url explicitly"
-            )
-        );
+        assert!(ticketless.starts_with("Refused"), "{ticketless}");
         assert!(
             idp.sent().is_empty(),
             "a ticketless call asks the IdP nothing"
@@ -672,11 +668,11 @@ fn red_an_undeclared_need_or_a_foreign_target_is_caught() {
     .is_empty());
 }
 
-/// RED: the rendered Statement declares exactly the six needs — outbound, open-web, `https`, three
+/// RED: the rendered Statement declares exactly the six needs — outbound, open-web, `http`, three
 /// trusting `ca_cert_pem` then their public-roots twins, discovery pinned to `issuer` — and both
 /// doors state the same rendering.
 #[test]
-fn red_the_statement_declares_six_outbound_open_web_https_needs() {
+fn red_the_statement_declares_six_outbound_open_web_http_needs() {
     let row = row();
     let read = rendering::read(&row.statement).expect("the rendering reads back");
     let needs: Vec<_> = read
@@ -697,7 +693,7 @@ fn red_the_statement_declares_six_outbound_open_web_https_needs() {
         (
             DIRECTION_OUTBOUND,
             EGRESS_OPEN_WEB,
-            "https",
+            "http",
             "",
             target_from,
             trust_from,
