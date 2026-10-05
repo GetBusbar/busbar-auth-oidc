@@ -21,7 +21,7 @@ permissions:
 
 jobs:
   consumer:
-    uses: GetBusbar/busbar/.github/workflows/plugin-consumer-verify.yml@e2809f8e0bac96a33b7255247e54ec517bab9035
+    uses: GetBusbar/busbar/.github/workflows/plugin-consumer-verify.yml@98766e540f27e42d770e2fbac72e11144a366f1e
     with:
       version: ${{ inputs.version || '' }}
       asset_prefix: busbar-auth-oidc
