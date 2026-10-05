@@ -227,12 +227,14 @@ pub fn post_request(url: &url::Url, hop: &LoginHop, secret: Option<&str>) -> Req
     let body = url::form_urlencoded::Serializer::new(String::new())
         .extend_pairs(form(hop, secret))
         .finish();
+    // 1.5.5's order: the form's content-type, then the client's `accept` (the oracle's
+    // `egress.auth|login-hop|oidc` cell holds the wire bytes).
     let mut fields = vec![
-        (b"accept".to_vec(), b"*/*".to_vec()),
         (
             b"content-type".to_vec(),
             b"application/x-www-form-urlencoded".to_vec(),
         ),
+        (b"accept".to_vec(), b"*/*".to_vec()),
     ];
     fields.extend(
         hop.headers

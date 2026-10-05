@@ -692,6 +692,38 @@ impl OidcModule {
     }
 }
 
+/// THE NONCE BINDING (1.5.5's core check, now the plugin's): `true` when the token endpoint's `body`
+/// carries no `id_token`, or carries one whose (unverified) payload names `nonce` as its `nonce`
+/// claim, compared in constant time. An `id_token` with no readable `nonce` claim does not bind.
+/// The signature, issuer and audience are checked afterwards, by the verifier.
+pub(crate) fn nonce_binds(body: &str, nonce: &str) -> bool {
+    use base64::Engine as _;
+    let Some(id_token) = serde_json::from_str::<Value>(body).ok().and_then(|v| {
+        v.get("id_token")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    }) else {
+        return true;
+    };
+    let claimed = id_token
+        .split('.')
+        .nth(1)
+        .and_then(|p| {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(p)
+                .ok()
+        })
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .and_then(|c| c.get("nonce").and_then(Value::as_str).map(str::to_string));
+    claimed.is_some_and(|c| {
+        c.len() == nonce.len()
+            && c.bytes()
+                .zip(nonce.bytes())
+                .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+                == 0
+    })
+}
+
 /// The OAuth `client_id` to present: the explicit `client_id`, else the `audience` (the common
 /// confidential-client case where the app's client-id IS the token audience).
 fn resolved_client_id(cfg: &OidcConfig) -> String {

@@ -35,7 +35,8 @@ use busbar_contract::abi::auth::{
     IdentifyOut, IdentityBuf, OpenOutboundIn, OpenOutboundOut, OutboundReadyIn, OutboundReadyOut,
     VerifyIn, BEGIN_AUTHORIZE, CANCEL_ABANDONED, CAP_INBOUND, CAP_LOGIN, DECISION_CONTINUE,
     DECISION_STOP, FACT_CACHEABLE, IDENTITY_HAS_TTL, LOGIN_BAD_CREDENTIAL, LOGIN_IDENTITY,
-    LOGIN_KIND_REDIRECT, LOGIN_OUTAGE, SPAN_ABSENT, VERDICT_IDENTITY, VERDICT_PASS, VERDICT_REJECT,
+    LOGIN_KIND_REDIRECT, LOGIN_OUTAGE, LOGIN_SECURITY_CHECK_FAILED, SPAN_ABSENT, VERDICT_IDENTITY,
+    VERDICT_PASS, VERDICT_REJECT,
 };
 use busbar_contract::abi::mechanism::call::{AbiStr, Blob, Outcome, Span, BLOB_ABSENT};
 use busbar_contract::abi::mechanism::door::{Rewrite, Statement, REWRITE_ALIAS};
@@ -111,6 +112,9 @@ impl Opened {
         let module = module(text(settings)?).map_err(Refusal::failed)?;
         let secret = secrets
             .first()
+            // An empty lent secret is none (a provider with no `browser_login.client_secret`):
+            // the token exchange then sends no secret field, as 1.5.5's core sent none.
+            .filter(|s| !s.is_empty())
             .map(|s| {
                 std::str::from_utf8(s)
                     .map(|s| Zeroizing::new(s.to_string()))
@@ -125,12 +129,20 @@ impl Opened {
     }
 
     /// The callback's code exchanged at the token endpoint (once: the answer is kept in `answer`
-    /// across PENDING, the code redeems once), and the `id_token` it answers verified.
+    /// across PENDING, the code redeems once), the answer bound to the login's `nonce`, and the
+    /// `id_token` it answers verified.
+    ///
+    /// 1.5.5's order, now the plugin's (THE DESIGN 6.7: the plugin makes its own exchange): a
+    /// request that got no answer is an outage; ANY answer whose body carries an `id_token` must
+    /// carry the nonce the core minted at `begin` (else the security check fails, before anything
+    /// is verified); then a non-2xx answer, or an `id_token` that does not verify, is a declined
+    /// login.
     fn login(
         &self,
         code: Option<&str>,
         redirect_uri: Option<&str>,
         verifier: Option<&str>,
+        nonce: &str,
         answer: &mut Option<LoginHttpResponse>,
         io: &mut HostIo<'_>,
     ) -> Step<Login> {
@@ -146,19 +158,16 @@ impl Opened {
             };
             match io.post(&hop, self.secret.as_deref().map(String::as_str)) {
                 Poll::Pending => return Step::Pending,
-                Poll::Ready(Ok(r)) if r.status < 500 => *answer = Some(r),
-                Poll::Ready(Ok(r)) => {
-                    return Step::Ready(Login::Outage(format!(
-                        "the token endpoint answered HTTP {}",
-                        r.status
-                    )))
-                }
+                Poll::Ready(Ok(r)) => *answer = Some(r),
                 Poll::Ready(Err(e)) => return Step::Ready(Login::Outage(e)),
             }
         }
         let Some(response) = answer.as_ref() else {
             return Step::Ready(Login::Bad);
         };
+        if !crate::nonce_binds(&response.body, nonce) {
+            return Step::Ready(Login::SecurityCheck);
+        }
         Step::Ready(
             match step!(self
                 .module
@@ -177,6 +186,8 @@ enum Login {
     Identity(Principal),
     Bad,
     Outage(String),
+    /// The IdP's identity token does not carry the login's nonce.
+    SecurityCheck,
 }
 
 /// An identity `complete_login` reached but could not fit into the host's buffer, kept for the
@@ -507,6 +518,7 @@ impl SafeSlot for Complete {
                     code,
                     str_text(input.field(|i| &i.redirect_uri)),
                     blob_text(input.field(|i| &i.code_verifier)),
+                    str_text(input.field(|i| &i.nonce)).unwrap_or(""),
                     &mut parked.answer,
                     &mut io,
                 );
@@ -519,6 +531,10 @@ impl SafeSlot for Complete {
                     Step::Ready(Login::Outage(e)) => {
                         tracing::warn!(module = "oidc", error = %e, "OIDC token exchange failed");
                         out.set(|o| &o.verdict, LOGIN_OUTAGE);
+                        return Outcome::Ready;
+                    }
+                    Step::Ready(Login::SecurityCheck) => {
+                        out.set(|o| &o.verdict, LOGIN_SECURITY_CHECK_FAILED);
                         return Outcome::Ready;
                     }
                     Step::Pending => return pend(&instance, h.host(), io, parked, &mut out, false),

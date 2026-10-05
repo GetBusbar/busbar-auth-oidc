@@ -704,7 +704,7 @@ impl Bound {
     pub fn complete(
         &self,
         code: &str,
-        state: &str,
+        (state, nonce): (&str, &str),
         redirect: &str,
         verifier: &str,
         cap: Option<(usize, u32)>,
@@ -716,6 +716,7 @@ impl Bound {
                 i.head = in_head();
                 i.code = blob(code.as_bytes(), BLOB_OCTETS);
                 i.state = abi_str(state);
+                i.nonce = abi_str(nonce);
                 i.redirect_uri = abi_str(redirect);
                 i.code_verifier = blob(verifier.as_bytes(), BLOB_OCTETS);
                 i.out_buf = out_buf;
