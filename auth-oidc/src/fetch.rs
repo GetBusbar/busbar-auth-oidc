@@ -9,10 +9,17 @@
 //! re-asked when the op re-enters on its wake (the replay rule, `abi::sdk::conn`).
 //!
 //! Every need is `open-web` (public destinations over a secure connection only; the auth mint
-//! endpoints' class), over `https`, and trusts the operator's `ca_cert_pem` on top of the public
-//! roots (`trust_from`: 1.5.5's extra root, never a replacement). The discovery need is pinned to
-//! the `issuer` setting's target (`target_from`); the JWKS and token endpoints may be discovered,
-//! so the module names them per request.
+//! endpoints' class), over `https`. The discovery need is pinned to the `issuer` setting's target
+//! (`target_from`); the JWKS and token endpoints may be discovered, so the module names them per
+//! request.
+//!
+//! `ca_cert_pem` is OPTIONAL, as it was in 1.5.5 (an extra root on top of the public ones, never a
+//! replacement). The host's connector refuses a need whose `trust_from` resolves to nothing, so
+//! the three needs are stated twice: the ANCHORED set trusts `ca_cert_pem` (`trust_from`), the
+//! PUBLIC set trusts the public roots only. A module whose settings name a `ca_cert_pem` goes out
+//! on the anchored set, any other on the public set ([`HostIo::new`]); the set it does not use is
+//! never asked for a connection (the anchored set of a module with no `ca_cert_pem` is refused at
+//! declaration, and stays unused).
 //!
 //! What the module reads back keeps 1.5.5's words: [`document`] (a non-2xx GET, the 1 MiB cap, a
 //! body that is not UTF-8) and [`failed`] (a request that never got an answer, the connector's own
@@ -41,12 +48,15 @@ pub const MAX_JWKS_BYTES: usize = 1024 * 1024;
 /// DNS + TLS handshake to a public IdP, short enough that a hung endpoint cannot hold an op.
 pub const FETCH_TIMEOUT_MS: u64 = 10_000;
 
-/// The need the discovery document is fetched on (its index in [`NEEDS`]).
+/// The need the discovery document is fetched on (its index in [`NEEDS`], anchored set).
 pub const NEED_DISCOVERY: u32 = 0;
-/// The need the JWKS is fetched on.
+/// The need the JWKS is fetched on (anchored set).
 pub const NEED_JWKS: u32 = 1;
-/// The need the login's token exchange is made on.
+/// The need the login's token exchange is made on (anchored set).
 pub const NEED_TOKEN: u32 = 2;
+/// Where the PUBLIC set starts in [`NEEDS`]: its needs are the anchored set's, in the same order,
+/// at this offset.
+pub const PUBLIC: u32 = 3;
 
 /// The setting the discovery need's target comes from (a config path the host reads).
 const ISSUER_PATH: &str = "settings.issuer";
@@ -58,15 +68,16 @@ const ABSENT: AbiStr = AbiStr {
     len: 0,
 };
 
-/// One outbound `https` need in the open-web class, trusting `ca_cert_pem` beside the public roots.
-const fn need(target_from: AbiStr) -> Need {
+/// One outbound `https` need in the open-web class, trusting the root `trust_from` names beside
+/// the public roots (`ABSENT`: the public roots only).
+const fn need(target_from: AbiStr, trust_from: AbiStr) -> Need {
     Need {
         direction: DIRECTION_OUTBOUND,
         egress_class: EGRESS_OPEN_WEB,
         transport: abi_str("https"),
         auth: ABSENT,
         target_from,
-        trust_from: abi_str(CA_CERT_PATH),
+        trust_from,
         details: Blob::ABSENT,
         keep_response_headers: std::ptr::null(),
         keep_response_headers_len: 0,
@@ -78,9 +89,28 @@ const fn need(target_from: AbiStr) -> Need {
     }
 }
 
-/// THE NEEDS, in index order: discovery (pinned to the `issuer` setting's target), the JWKS and
-/// the token endpoint (named per request: either may be discovered).
-pub const NEEDS: &[Need] = &[need(abi_str(ISSUER_PATH)), need(ABSENT), need(ABSENT)];
+/// THE NEEDS, in index order: the ANCHORED set (trusting `ca_cert_pem`), then the PUBLIC set
+/// (from [`PUBLIC`] on, the public roots only); each set is discovery (pinned to the `issuer`
+/// setting's target), the JWKS and the token endpoint (named per request: either may be
+/// discovered).
+pub const NEEDS: &[Need] = &[
+    need(abi_str(ISSUER_PATH), abi_str(CA_CERT_PATH)),
+    need(ABSENT, abi_str(CA_CERT_PATH)),
+    need(ABSENT, abi_str(CA_CERT_PATH)),
+    need(abi_str(ISSUER_PATH), ABSENT),
+    need(ABSENT, ABSENT),
+    need(ABSENT, ABSENT),
+];
+
+/// The need index `need` (an anchored-set index) goes out on: itself for a module that trusts an
+/// operator CA, its public twin for one that does not.
+pub const fn on(need: u32, anchored: bool) -> u32 {
+    if anchored {
+        need
+    } else {
+        need + PUBLIC
+    }
+}
 
 /// Which document a GET fetches, so which need it goes out on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -232,15 +262,19 @@ pub struct HostIo<'h> {
     host: Option<&'h Host>,
     ticket: Ticket,
     state: IoState,
+    anchored: bool,
 }
 
 impl<'h> HostIo<'h> {
-    /// The op's requests on `ticket` through `host`'s connector, resumed from `state`.
-    pub fn new(host: Option<&'h Host>, ticket: Ticket, state: IoState) -> Self {
+    /// The op's requests on `ticket` through `host`'s connector, resumed from `state`, on the
+    /// ANCHORED needs when the module's settings name a `ca_cert_pem` (`anchored`), else on the
+    /// PUBLIC ones.
+    pub fn new(host: Option<&'h Host>, ticket: Ticket, state: IoState, anchored: bool) -> Self {
         Self {
             host,
             ticket,
             state,
+            anchored,
         }
     }
 
@@ -277,7 +311,7 @@ impl<'h> HostIo<'h> {
                 Err(e) => return Poll::Ready(Err(failed(url, e))),
             },
         };
-        match exchange(&mut c, &mut ex, need, Some(url)) {
+        match exchange(&mut c, &mut ex, on(need, self.anchored), Some(url)) {
             Poll::Pending => {
                 self.state.current = Some((url.to_string(), ex));
                 Poll::Pending

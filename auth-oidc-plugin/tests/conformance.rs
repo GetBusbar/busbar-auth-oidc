@@ -12,7 +12,8 @@
 //! to a real dispatcher serving the host's clock and to a connection table that PLAYS THE IdP
 //! (`support::Idp`: discovery document, JWKS, token endpoint; the first read of every reply PENDING,
 //! the op's ticket woken from another thread). The module never dials (THE DESIGN 5: "No plugin
-//! opens a socket, dials, binds or does TLS"): its three declared needs carry every request.
+//! opens a socket, dials, binds or does TLS"): its declared needs carry every request (three
+//! trusting `ca_cert_pem`, three their public-roots twins for a config that names none).
 //!
 //! Both doors run the same script — open with NO jwks_url and NO login endpoints, so the first
 //! verify discovers the JWKS url and fetches the JWKS, each request crossing PENDING; real ES256
@@ -26,8 +27,9 @@
 //! same bytes stated as `secret` are refused at the manifest's kind; a Statement that is not the
 //! door's is refused at admit; an unreachable issuer fails verify with 1.5.5's discovery text; a
 //! ticketless call (which may not pend) fails at once and asks the IdP nothing; the rendered
-//! Statement declares exactly the three needs; and the net ban's own RED arm
-//! (`support/net_ban.rs`). A missing cdylib PANICS — this test IS the dropped-in door's proof, and
+//! Statement declares exactly the six needs; a config with no `ca_cert_pem` answers the same
+//! script over the public-roots needs, the ones trusting it refused at declaration; and the net
+//! ban's own RED arm (`support/net_ban.rs`). A missing cdylib PANICS — this test IS the dropped-in door's proof, and
 //! never skips.
 
 mod support;
@@ -141,7 +143,7 @@ fn admitted(registry: &PluginRegistry) -> (Vec<u8>, Vec<u8>) {
 }
 
 /// The operator config: only the issuer and the audience (the JWKS url and both login endpoints
-/// are DISCOVERED), and an extra trusted root (the needs' `trust_from`).
+/// are DISCOVERED), and an extra trusted root (the anchored needs' `trust_from`).
 fn config(audience: &str) -> String {
     serde_json::json!({
         "issuer": ISSUER,
@@ -150,6 +152,14 @@ fn config(audience: &str) -> String {
         "role_claim": "roles",
     })
     .to_string()
+}
+
+/// The same config with NO extra trusted root (`ca_cert_pem` is optional, as in 1.5.5): the
+/// public roots only.
+fn config_public(audience: &str) -> String {
+    let mut cfg: serde_json::Value = serde_json::from_str(&config(audience)).unwrap();
+    cfg.as_object_mut().unwrap().remove("ca_cert_pem");
+    cfg.to_string()
 }
 
 /// The tokens the script presents, minted once so both doors judge the same bytes.
@@ -310,17 +320,33 @@ fn the_linked_and_the_dropped_in_oidc_module_are_one_module() {
     );
     assert_eq!(a[14], "verdict 3 ", "an IdP 5xx is an outage: {text}");
 
-    // THE NEEDS, as the loader declared them: three outbound open-web https needs trusting
-    // `ca_cert_pem`; discovery pinned to the issuer setting's value.
-    for (need, target_from, target) in [
-        (0, "\"settings.issuer\"", format!("Some({ISSUER:?})")),
-        (1, "\"\"", "None".to_string()),
-        (2, "\"\"", "None".to_string()),
+    // THE NEEDS, as the loader declared them: six outbound open-web https needs, the three
+    // trusting `ca_cert_pem` then their public-roots twins; discovery pinned to the issuer
+    // setting's value. With `ca_cert_pem` set every one is carried.
+    let anchor = "\"settings.ca_cert_pem\"";
+    for (need, target_from, trust_from, target) in [
+        (
+            0,
+            "\"settings.issuer\"",
+            anchor,
+            format!("Some({ISSUER:?})"),
+        ),
+        (1, "\"\"", anchor, "None".to_string()),
+        (2, "\"\"", anchor, "None".to_string()),
+        (
+            3,
+            "\"settings.issuer\"",
+            "\"\"",
+            format!("Some({ISSUER:?})"),
+        ),
+        (4, "\"\"", "\"\"", "None".to_string()),
+        (5, "\"\"", "\"\"", "None".to_string()),
     ] {
+        let trusted = trust_from == anchor;
         let want = format!(
             "need {need} direction={DIRECTION_OUTBOUND} class={EGRESS_OPEN_WEB} transport=https \
-             target_from={target_from} trust_from=\"settings.ca_cert_pem\" timeout_ms=10000 \
-             target={target}"
+             target_from={target_from} trust_from={trust_from} timeout_ms=10000 \
+             target={target} trusted={trusted} answer=Ok(())"
         );
         assert!(a.contains(&want), "missing {want:?} in:\n{text}");
     }
@@ -334,7 +360,7 @@ fn the_linked_and_the_dropped_in_oidc_module_are_one_module() {
     let needs = rendering::read(&row.statement).expect("reads").needs.len() as u32;
     for idp in [&linked.idp, &dropped.idp] {
         assert_eq!(
-            support::strays(&idp.sent(), needs, &support::declared_targets()),
+            support::strays(&idp.sent(), needs, &support::declared_targets(0)),
             Vec::<String>::new(),
             "{text}"
         );
@@ -389,6 +415,48 @@ fn the_linked_and_the_dropped_in_oidc_module_are_one_module() {
         transcript(&other, &config("api://someone-else"), &t),
         a,
         "a different config must not read as the same module"
+    );
+
+    // THE PUBLIC ROOTS: with no `ca_cert_pem` (optional, as in 1.5.5) the needs trusting it are
+    // refused at declaration (the host refuses a `trust_from` that names nothing), and the module
+    // answers the same script the same way over their public-roots twins, asking nothing of a
+    // refused need.
+    let public = bind(
+        &Arm::Dropped {
+            lib: &lib,
+            stated: &stated,
+        },
+        &Idp::new(&key),
+    );
+    let p = transcript(&public, &config_public(AUDIENCE), &t);
+    let answers = a
+        .iter()
+        .position(|l| l.starts_with("need "))
+        .expect("needs");
+    assert_eq!(
+        p[..answers],
+        a[..answers],
+        "the public-roots module answers as the anchored one:\n{}",
+        p.join("\n")
+    );
+    for need in 0..3 {
+        assert!(
+            p.iter().any(|l| l.starts_with(&format!("need {need} "))
+                && l.ends_with("trusted=false answer=Err(Refused)")),
+            "need {need} (trusting an absent ca_cert_pem) is refused:\n{}",
+            p.join("\n")
+        );
+    }
+    assert!(!public.idp.sent().is_empty());
+    assert_eq!(
+        support::strays(
+            &public.idp.sent(),
+            needs,
+            &support::declared_targets(busbar_auth_oidc::fetch::PUBLIC)
+        ),
+        Vec::<String>::new(),
+        "every request rides a public-roots need:\n{}",
+        p.join("\n")
     );
 
     // RED ARM 2: the same bytes stated as `secret` are refused at the manifest's kind.
@@ -556,7 +624,7 @@ fn red_an_undeclared_need_or_a_foreign_target_is_caught() {
         path: "/".into(),
         body: String::new(),
     };
-    let allowed = support::declared_targets();
+    let allowed = support::declared_targets(0);
     assert_eq!(
         support::strays(
             &[
@@ -582,10 +650,11 @@ fn red_an_undeclared_need_or_a_foreign_target_is_caught() {
     .is_empty());
 }
 
-/// RED: the rendered Statement declares exactly the three needs — outbound, open-web, `https`,
-/// trusting `ca_cert_pem`, discovery pinned to `issuer` — and both doors state the same rendering.
+/// RED: the rendered Statement declares exactly the six needs — outbound, open-web, `https`, three
+/// trusting `ca_cert_pem` then their public-roots twins, discovery pinned to `issuer` — and both
+/// doors state the same rendering.
 #[test]
-fn red_the_statement_declares_three_outbound_open_web_https_needs() {
+fn red_the_statement_declares_six_outbound_open_web_https_needs() {
     let row = row();
     let read = rendering::read(&row.statement).expect("the rendering reads back");
     let needs: Vec<_> = read
@@ -602,19 +671,27 @@ fn red_the_statement_declares_three_outbound_open_web_https_needs() {
             )
         })
         .collect();
-    let need = |target_from| {
+    let need = |target_from, trust_from| {
         (
             DIRECTION_OUTBOUND,
             EGRESS_OPEN_WEB,
             "https",
             "",
             target_from,
-            "settings.ca_cert_pem",
+            trust_from,
         )
     };
+    let anchor = "settings.ca_cert_pem";
     assert_eq!(
         needs,
-        vec![need("settings.issuer"), need(""), need("")],
+        vec![
+            need("settings.issuer", anchor),
+            need("", anchor),
+            need("", anchor),
+            need("settings.issuer", ""),
+            need("", ""),
+            need("", ""),
+        ],
         "{read:?}"
     );
     let packed = busbar_plugin_loader::dispatch::rendering_of_library(

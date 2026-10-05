@@ -136,7 +136,7 @@ fn a_document_get_names_the_path_and_query() {
 /// host; an https one with no connector says so after 1.5.5's prefix.
 #[test]
 fn every_request_is_https_only_and_needs_the_host_connector() {
-    let mut io = HostIo::new(None, Ticket::NONE, IoState::default());
+    let mut io = HostIo::new(None, Ticket::NONE, IoState::default(), false);
     assert_eq!(
         io.get(Doc::Jwks, "http://idp.example/jwks"),
         Poll::Ready(Err(
@@ -158,23 +158,36 @@ fn every_request_is_https_only_and_needs_the_host_connector() {
 }
 
 /// THE NEEDS: three outbound needs in the open-web class (THE DESIGN, egress classes: the auth mint
-/// endpoints' class), each trusting an extra root on top of the public ones; discovery pinned to a
-/// setting, the JWKS and the token endpoint named per request. (Their words are read back from the
-/// door's rendered Statement in the plugin crate's conformance test.)
+/// endpoints' class), stated twice: the ANCHORED set trusting an extra root on top of the public
+/// ones, the PUBLIC set the public roots only (`ca_cert_pem` is optional, and the host refuses a
+/// need whose `trust_from` names nothing); discovery pinned to a setting, the JWKS and the token
+/// endpoint named per request. (Their words are read back from the door's rendered Statement in
+/// the plugin crate's conformance test.)
 #[test]
-fn the_needs_are_outbound_open_web_trusting_an_extra_root() {
-    assert_eq!(NEEDS.len(), 3);
+fn the_needs_are_outbound_open_web_anchored_then_public() {
+    assert_eq!(NEEDS.len(), 2 * PUBLIC as usize);
     for (i, n) in NEEDS.iter().enumerate() {
         assert_eq!(n.direction, DIRECTION_OUTBOUND, "need {i}");
         assert_eq!(n.egress_class, EGRESS_OPEN_WEB, "need {i}");
         assert_eq!(n.transport.len, "https".len(), "need {i}");
-        assert_eq!(n.trust_from.len, "settings.ca_cert_pem".len(), "need {i}");
+        let trust = if (i as u32) < PUBLIC {
+            "settings.ca_cert_pem".len()
+        } else {
+            0
+        };
+        assert_eq!(n.trust_from.len, trust, "need {i}");
         assert_eq!(n.timeout_ms, FETCH_TIMEOUT_MS, "need {i}");
     }
+    for anchored in [true, false] {
+        assert_eq!(
+            NEEDS[on(NEED_DISCOVERY, anchored) as usize].target_from.len,
+            "settings.issuer".len()
+        );
+        assert_eq!(NEEDS[on(NEED_JWKS, anchored) as usize].target_from.len, 0);
+        assert_eq!(NEEDS[on(NEED_TOKEN, anchored) as usize].target_from.len, 0);
+    }
     assert_eq!(
-        NEEDS[NEED_DISCOVERY as usize].target_from.len,
-        "settings.issuer".len()
+        (on(NEED_JWKS, true), on(NEED_JWKS, false)),
+        (NEED_JWKS, NEED_JWKS + PUBLIC)
     );
-    assert_eq!(NEEDS[NEED_JWKS as usize].target_from.len, 0);
-    assert_eq!(NEEDS[NEED_TOKEN as usize].target_from.len, 0);
 }

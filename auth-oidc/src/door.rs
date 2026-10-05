@@ -263,7 +263,13 @@ fn resume<'h>(instance: &Instance<'_, Held<Oidc>>, h: &'h Held<Oidc>) -> (HostIo
     let mut parked = instance
         .resume::<Parked>()
         .map_or_else(Parked::default, |p| *p);
-    let io = HostIo::new(h.host(), instance.ticket(), std::mem::take(&mut parked.io));
+    let anchored = h.life().now().module.anchored();
+    let io = HostIo::new(
+        h.host(),
+        instance.ticket(),
+        std::mem::take(&mut parked.io),
+        anchored,
+    );
     (io, parked)
 }
 

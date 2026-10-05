@@ -17,7 +17,7 @@
 //! No stubbed crypto, no stubbed door.
 #![allow(dead_code)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -141,15 +141,16 @@ pub struct Sent {
 }
 
 /// THE DECLARED NEEDS AND THEIR TARGETS: `(need index, the URL the operator's config names for
-/// it)` — discovery on need 0, the JWKS on need 1, the token endpoint on need 2.
-pub fn declared_targets() -> Vec<(u32, String)> {
+/// it)` — discovery on need `base`, the JWKS on `base + 1`, the token endpoint on `base + 2`
+/// (`base` 0: the needs trusting `ca_cert_pem`; 3: their public-roots twins).
+pub fn declared_targets(base: u32) -> Vec<(u32, String)> {
     vec![
         (
-            0,
+            base,
             format!("https://idp.conformance.example{DISCOVERY_PATH}"),
         ),
-        (1, JWKS_URL.to_string()),
-        (2, TOKEN_URL.to_string()),
+        (base + 1, JWKS_URL.to_string()),
+        (base + 2, TOKEN_URL.to_string()),
     ]
 }
 
@@ -185,6 +186,9 @@ pub struct Idp {
     answers: Mutex<HashMap<String, (u32, Vec<u8>)>>,
     sent: Mutex<Vec<Sent>>,
     declared: Mutex<Vec<String>>,
+    /// The needs whose declaration the table refused, as the host's connector refuses them (a
+    /// `target_from` or `trust_from` that resolved to nothing): an open on one is refused.
+    refused: Mutex<HashSet<u32>>,
     reads: Mutex<HashMap<u64, Reply>>,
     next: AtomicU64,
     pended: AtomicU32,
@@ -201,6 +205,7 @@ impl Idp {
             answers: Mutex::new(HashMap::new()),
             sent: Mutex::new(Vec::new()),
             declared: Mutex::new(Vec::new()),
+            refused: Mutex::new(HashSet::new()),
             reads: Mutex::new(HashMap::new()),
             next: AtomicU64::new(1),
             pended: AtomicU32::new(0),
@@ -275,6 +280,9 @@ fn piece(kind: PieceKind, len: usize) -> Piece {
 
 impl Conns for Idp {
     fn open(&self, _: InstanceId, need: NeedId, desc: &OpenDesc<'_>) -> Result<ConnId, ConnError> {
+        if self.refused.lock().unwrap().contains(&need.0) {
+            return Err(ConnError::Refused);
+        }
         let path = String::from_utf8_lossy(desc.head_target).into_owned();
         let id = self.next.fetch_add(1, Ordering::SeqCst);
         self.sent.lock().unwrap().push(Sent {
@@ -303,7 +311,14 @@ impl Conns for Idp {
         );
         Ok(ConnId(id))
     }
-    fn write(&self, _: InstanceId, _: ConnId, _: &[u8], _: bool) -> Result<usize, ConnError> {
+    fn write(
+        &self,
+        _: InstanceId,
+        _: ConnId,
+        _: &[u8],
+        _: bool,
+        _: bool,
+    ) -> Result<usize, ConnError> {
         Err(ConnError::Closed)
     }
     fn read(
@@ -375,10 +390,22 @@ impl DeclaredConns for Idp {
         need: NeedId,
         spec: &ReadNeed,
         target: Option<&str>,
+        trust: Option<&str>,
     ) -> Result<(), ConnError> {
+        // The host connector's rule: a need whose `target_from` or `trust_from` names a setting
+        // that resolved to nothing is refused.
+        let unresolved = (!spec.target_from.is_empty() && target.is_none())
+            || (!spec.trust_from.is_empty() && trust.is_none());
+        let answer = if unresolved {
+            self.refused.lock().unwrap().insert(need.0);
+            Err(ConnError::Refused)
+        } else {
+            self.refused.lock().unwrap().remove(&need.0);
+            Ok(())
+        };
         self.declared.lock().unwrap().push(format!(
             "need {} direction={} class={} transport={} target_from={:?} trust_from={:?} \
-             timeout_ms={} target={target:?}",
+             timeout_ms={} target={target:?} trusted={} answer={answer:?}",
             need.0,
             spec.direction,
             spec.egress_class,
@@ -386,11 +413,16 @@ impl DeclaredConns for Idp {
             spec.target_from,
             spec.trust_from,
             spec.timeout_ms,
+            trust.is_some(),
         ));
-        Ok(())
+        answer
     }
-    fn declared(&self, _: InstanceId, _: NeedId) -> Option<Result<(), ConnError>> {
-        Some(Ok(()))
+    fn declared(&self, _: InstanceId, need: NeedId) -> Option<Result<(), ConnError>> {
+        Some(if self.refused.lock().unwrap().contains(&need.0) {
+            Err(ConnError::Refused)
+        } else {
+            Ok(())
+        })
     }
     fn framed(&self, _: InstanceId, _: NeedId) -> bool {
         true
