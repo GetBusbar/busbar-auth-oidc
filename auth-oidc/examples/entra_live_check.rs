@@ -1,9 +1,9 @@
 //! Real-world proof against an actual Entra ID (Azure AD) tenant — not a fixture, not a mock. Reads
 //! a live tenant/client id + a disposable test user's credentials from env, performs a genuine
 //! password-grant token request against Entra's real token endpoint, then drives that real
-//! Entra-issued token through this crate's own `OidcModule`/`ReqwestFetcher` exactly as a plugin
-//! deployment would: real discovery, real JWKS fetch, real RS256 signature check, real claim
-//! validation. Also verifies a tampered copy of the same token is genuinely rejected, so this isn't
+//! Entra-issued token through this crate's own sans-IO `OidcModule`, its requests made by a blocking
+//! HTTPS client standing in for the host's connector: real discovery, real JWKS fetch, real RS256
+//! signature check, real claim validation. Also verifies a tampered copy of the same token is genuinely rejected, so this isn't
 //! a rubber stamp.
 //!
 //! Requires (all via env, all optional — this example exits early with a clear message if any are
@@ -15,9 +15,64 @@
 //!
 //! Run: `cargo run -p busbar-auth-oidc --example entra_live_check`
 
-use busbar_auth_oidc::{resolve_jwks_url, OidcConfig, OidcModule, ReqwestFetcher};
-use busbar_contract::auth::AuthModule;
-use std::time::Duration;
+use busbar_auth_oidc::fetch::{document, failed, Doc, Fetch};
+use busbar_auth_oidc::{OidcConfig, OidcModule, Step};
+use busbar_contract::abi::mechanism::ticket::Ticket;
+use busbar_contract::auth::{AuthVerdict, LoginHop, LoginHttpResponse};
+use std::task::Poll;
+use std::time::Instant;
+
+/// The module's requests, made at once by a blocking client (the plugin's host makes them through
+/// its connector; this example has none).
+struct Blocking(reqwest::blocking::Client);
+
+impl Fetch for Blocking {
+    fn caller(&self) -> Option<Ticket> {
+        Some(Ticket {
+            slot: 1,
+            generation: 1,
+        })
+    }
+
+    fn get(&mut self, _: Doc, url: &str) -> Poll<Result<String, String>> {
+        Poll::Ready(
+            self.0
+                .get(url)
+                .send()
+                .map_err(|e| failed(url, e))
+                .and_then(|r| {
+                    let status = r.status().as_u16();
+                    let body = r.bytes().map_err(|e| failed(url, e))?.to_vec();
+                    document(url, status, body)
+                }),
+        )
+    }
+
+    fn post(&mut self, hop: &LoginHop, _: Option<&str>) -> Poll<Result<LoginHttpResponse, String>> {
+        Poll::Ready(Err(failed(
+            &hop.url,
+            "this example makes no token exchange",
+        )))
+    }
+}
+
+/// The verdict on `token`: this example's requests answer at once, so the module answers READY.
+fn verify(module: &OidcModule, token: &str) -> AuthVerdict {
+    let client = reqwest::blocking::Client::builder()
+        .https_only(true)
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .expect("an HTTPS client");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("a clock after the epoch")
+        .as_secs() as i64;
+    match module.verify(Some(token), now, Instant::now(), &mut Blocking(client)) {
+        Step::Ready(Ok(v)) => v,
+        Step::Ready(Err(e)) => panic!("real Entra discovery failed: {e}"),
+        Step::Pending | Step::Wait => unreachable!("a blocking fetch answers at once"),
+    }
+}
 
 fn env_or_skip(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.is_empty())
@@ -84,16 +139,11 @@ fn main() {
     }))
     .unwrap();
 
-    let fetcher = ReqwestFetcher::new(Duration::from_secs(10), None).unwrap();
-    let jwks_url =
-        resolve_jwks_url(&cfg, &fetcher).expect("real Entra discovery document resolves jwks_uri");
-    println!("resolved jwks_url via real Entra discovery: {jwks_url}");
-
-    let module = OidcModule::new(&cfg, jwks_url.clone(), Box::new(fetcher));
-    let outcome = module.authenticate(Some(&id_token));
+    let module = OidcModule::new(&cfg);
+    let outcome = verify(&module, &id_token);
     println!("real Entra token outcome: {outcome:?}");
     assert!(
-        matches!(outcome, busbar_contract::auth::AuthVerdict::Identify(_)),
+        matches!(outcome, AuthVerdict::Identify(_)),
         "a real, freshly-issued Entra token must verify as Identify, got: {outcome:?}"
     );
 
@@ -114,12 +164,10 @@ fn main() {
         String::from_utf8(tampered_sig).unwrap()
     );
 
-    let fetcher2 = ReqwestFetcher::new(Duration::from_secs(10), None).unwrap();
-    let module2 = OidcModule::new(&cfg, jwks_url, Box::new(fetcher2));
-    let tampered_outcome = module2.authenticate(Some(&tampered));
+    let tampered_outcome = verify(&OidcModule::new(&cfg), &tampered);
     println!("tampered token outcome: {tampered_outcome:?}");
     assert!(
-        matches!(tampered_outcome, busbar_contract::auth::AuthVerdict::Reject),
+        matches!(tampered_outcome, AuthVerdict::Reject),
         "a tampered signature over a real Entra-issued token must be rejected, got: {tampered_outcome:?}"
     );
 

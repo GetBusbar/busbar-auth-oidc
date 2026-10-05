@@ -5,32 +5,40 @@ version = "1.0.0"
 publish = false            # first-party signed cdylib, shipped as a packed/signed tarball, not to crates.io
 edition = "2021"
 rust-version = "1.97"
-description = "The OIDC auth module as a droppable busbar plugin: a cdylib exporting the auth C ABI. Drop it in the plugins folder, add `oidc` to auth.chain, and configure it under `identity-providers:`."
+description = "The OIDC auth module as a droppable busbar plugin: a cdylib exporting the auth kind's door. Drop it in the plugins folder, add `oidc` to auth.chain, and configure it under `identity-providers:`."
 license = "Apache-2.0"
 
 [lib]
-crate-type = ["cdylib", "rlib"]   # cdylib for the C ABI delivery; rlib so the unit tests / e2e test can exercise it as a normal crate too
+# cdylib: the DROPPED-IN door, exporting `busbar_plugin_door`.
+# rlib: what `cargo test` links, and what the conformance test depends on to have the cdylib built.
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-# busbar-auth-oidc is now a SAME-REPO sibling crate (this plugin brings 100% of what it needs — the
-# real logic lives here, not in busbar). The one busbar crate is busbar-contract (#40), whose
-# `abi::sdk` carries the export macro — pinned by git rev to `.busbar-ref` field 1.
+# THE LOGIC, same repo: its `door::door` is the door this image exports. The one busbar crate is
+# busbar-contract (#40), whose `abi::sdk` carries the export macro — pinned by git rev to
+# `.busbar-ref` field 1.
 busbar-contract = { workspace = true }
 busbar-auth-oidc = { path = "../auth-oidc" }
-serde_json = { workspace = true }
-tracing = { workspace = true }
 
 [dev-dependencies]
 # Dev-only, same pinned busbar rev as busbar-contract (one busbar source resolves). The linked +
-# dropped-in conformance test (tests/conformance.rs) signs, packs, scans and opens the built cdylib
-# over the REAL loader; the end-to-end test loads the built cdylib over the real loader ABI seam.
-busbar-plugin-loader = { workspace = true }
-# Both tests verify REAL ES256 tokens against a REAL JWKS served over a certificate-verified loopback
-# endpoint: the logic crate's own local issuer (`busbar_auth_oidc::testkit`), so
-# busbar-auth-oidc's ReqwestFetcher does a genuine fetch + verify rather than a stub.
-busbar-auth-oidc = { path = "../auth-oidc", features = ["testkit"] }
+# dropped-in conformance test (tests/conformance.rs) signs, packs, scans and admits the built cdylib
+# and the linked door through the REAL loader's door validation and dispatcher; the end-to-end test
+# loads the built cdylib through the same door.
+# `conformance`: busbar's PUBLISHED conformance suite (`tests/conformance.rs`'s
+# `conformance_suite!`), run against the busbar commit this repo pins.
+busbar-plugin-loader = { workspace = true, features = ["conformance"] }
+# THE TESTS' LOCAL ISSUER (tests/support/issuer.rs): an ES256 key (ring), its JWKS (base64url,
+# serde_json), genuinely signed tokens, and a certificate-verified loopback HTTPS endpoint (rcgen,
+# rustls) for the admin-API e2e, whose real busbar connector dials it. Test-side only: no feature of
+# the shipped crates turns a TLS stack on, so `cargo metadata`'s resolve carries none on a normal
+# edge (the fleet net ban).
+ring = { workspace = true, features = ["std"] }
+rcgen = { workspace = true, features = ["pem"] }
+rustls = { workspace = true }
+serde_json = { workspace = true }
 # The e2e decodes the login cookie (base64url JSON) the live admin install flow sets.
-base64 = "0.22"
+base64 = { workspace = true }
 # For the real-server admin-API install + auth-chain e2e test (tests/e2e.rs's
 # install_oidc_plugin_via_admin_api_and_authenticate): packs the plugin cdylib with the real
 # `busbar-plugin-pack` BINARY (spawned as a subprocess, same as store-postgres/store-sqlite's own
