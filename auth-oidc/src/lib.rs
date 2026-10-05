@@ -441,6 +441,16 @@ impl OidcModule {
         }
     }
 
+    /// Whether the settings name an operator CA (`ca_cert_pem`, non-empty): the module's requests
+    /// then go out on the needs that trust it (`fetch::NEEDS`' anchored set), else on the public
+    /// set. Read as the host reads a `trust_from` path: an empty value names nothing.
+    pub fn anchored(&self) -> bool {
+        self.cfg
+            .ca_cert_pem
+            .as_deref()
+            .is_some_and(|p| !p.is_empty())
+    }
+
     /// The JWKS url: the configured `jwks_url`, or the discovery document's `jwks_uri`.
     ///
     /// # Errors

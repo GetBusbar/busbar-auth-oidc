@@ -108,12 +108,21 @@ fn load_and_exercise_auth_oidc_plugin_success() {
     let sent = idp.sent();
     assert_eq!(sent.len(), 1, "one JWKS GET, no discovery: {sent:?}");
     assert_eq!(
-        support::strays(&sent, 3, &support::declared_targets()),
+        support::strays(
+            &sent,
+            2 * busbar_auth_oidc::fetch::PUBLIC,
+            &support::declared_targets(busbar_auth_oidc::fetch::PUBLIC)
+        ),
         Vec::<String>::new()
     );
+    // No `ca_cert_pem` in this config: the JWKS rides the public-roots JWKS need.
     assert_eq!(
         (sent[0].need, sent[0].target.as_str(), sent[0].path.as_str()),
-        (1, support::JWKS_URL, "/keys")
+        (
+            busbar_auth_oidc::fetch::NEED_JWKS + busbar_auth_oidc::fetch::PUBLIC,
+            support::JWKS_URL,
+            "/keys"
+        )
     );
 
     // A token signed by a DIFFERENT key (same kid) must fail closed across the door too.
