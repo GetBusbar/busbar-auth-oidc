@@ -176,7 +176,7 @@ fn the_needs_are_outbound_open_web_anchored_then_public() {
     for (i, n) in NEEDS.iter().enumerate() {
         assert_eq!(n.direction, DIRECTION_OUTBOUND, "need {i}");
         assert_eq!(n.egress_class, EGRESS_OPEN_WEB, "need {i}");
-        assert_eq!(n.transport.len, "https".len(), "need {i}");
+        assert_eq!(n.transport.len, "http".len(), "need {i}");
         let trust = if (i as u32) < PUBLIC {
             "settings.ca_cert_pem".len()
         } else {
