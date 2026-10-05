@@ -1,21 +1,59 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! **A LOCAL OIDC ISSUER FOR TESTS** (feature `testkit`, off by default, never in a shipped build).
+//! **A LOCAL OIDC ISSUER FOR TESTS** (test-side only: never in a shipped crate).
 //!
 //! A host that loads this module — busbar's own auth-chain and stdio-serve tests, this repo's
-//! conformance tests — needs a real issuer to point it at: an ES256 key whose JWKS the module's own
-//! blocking fetcher can reach over a certificate-verified connection, and genuinely signed tokens to
-//! present. [`Issuer::start`] provides exactly that on the loopback interface: a self-signed
-//! certificate (trusted through the module's `ca_cert_pem` setting, so nothing is disabled), one
-//! background thread answering every request with the JWKS, and [`Issuer::mint`] signing tokens with
-//! the matching key. Nothing is stubbed: the module under test does the whole fetch and the whole
-//! verification.
+//! conformance tests — needs a real issuer to point it at: an ES256 key whose JWKS the host's
+//! connector can reach over a certificate-verified connection (the module never dials: its needs
+//! do), and genuinely signed tokens to present. [`Issuer::start`] provides exactly that on the
+//! loopback interface: a self-signed certificate (trusted through the module's `ca_cert_pem`
+//! setting, the needs' `trust_from`, so nothing is disabled), one background thread answering every
+//! request with the JWKS (a `POST /token` with the token endpoint's reply, [`Issuer::answer_token`],
+//! recording the form it was sent), and [`Issuer::mint`] signing tokens with the matching key. A
+//! test that plays the IdP as a connection table itself serves [`Issuer::jwks`] and signs with
+//! [`Issuer::sign`]. This server is a TEST'S: it lives in the plugin crate's tests, so its TLS stack is
+//! never in a shipped closure.
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use ring::signature::{EcdsaKeyPair, KeyPair as _, ECDSA_P256_SHA256_FIXED_SIGNING};
-use std::io::{Read as _, Write as _};
-use std::sync::Arc;
+use std::io::Write as _;
+use std::sync::{Arc, Mutex, PoisonError};
+
+/// The token endpoint's reply (status, body) and the request bodies it was sent.
+#[derive(Default)]
+struct TokenEndpoint {
+    reply: Option<(u16, String)>,
+    forms: Vec<String>,
+}
+
+/// One whole HTTP request off `stream`: the head, then as many body bytes as it states.
+fn read_request(stream: &mut impl std::io::Read) -> String {
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 4096];
+    while let Ok(n) = stream.read(&mut chunk) {
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        let text = String::from_utf8_lossy(&buf);
+        if let Some(end) = text.find("\r\n\r\n") {
+            let length = text[..end]
+                .lines()
+                .find_map(|l| {
+                    let (k, v) = l.split_once(':')?;
+                    k.eq_ignore_ascii_case("content-length")
+                        .then(|| v.trim().parse::<usize>().ok())
+                        .flatten()
+                })
+                .unwrap_or(0);
+            if buf.len() >= end + 4 + length {
+                break;
+            }
+        }
+    }
+    String::from_utf8_lossy(&buf).into_owned()
+}
 
 /// A running local issuer: its identity, its signing key, and where its JWKS is served.
 pub struct Issuer {
@@ -24,7 +62,9 @@ pub struct Issuer {
     key: EcdsaKeyPair,
     rng: ring::rand::SystemRandom,
     jwks_url: String,
+    jwks: String,
     cert_pem: String,
+    token: Arc<Mutex<TokenEndpoint>>,
 }
 
 impl Issuer {
@@ -66,6 +106,9 @@ impl Issuer {
             "https://{}/jwks",
             listener.local_addr().expect("local addr")
         );
+        let token = Arc::new(Mutex::new(TokenEndpoint::default()));
+        let endpoint = token.clone();
+        let served = jwks.clone();
         std::thread::spawn(move || {
             for socket in listener.incoming() {
                 let (Ok(socket), Ok(session)) =
@@ -74,12 +117,20 @@ impl Issuer {
                     continue;
                 };
                 let mut stream = rustls::StreamOwned::new(session, socket);
-                let _ = stream.read(&mut [0u8; 4096]);
+                let request = read_request(&mut stream);
+                let (status, body) = if request.starts_with("POST /token ") {
+                    let mut t = endpoint.lock().unwrap_or_else(PoisonError::into_inner);
+                    let form = request.split_once("\r\n\r\n").map_or("", |(_, b)| b);
+                    t.forms.push(form.to_string());
+                    t.reply.clone().unwrap_or((200, "{}".to_string()))
+                } else {
+                    (200, served.clone())
+                };
                 let _ = write!(
                     stream,
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
-                     Connection: close\r\n\r\n{jwks}",
-                    jwks.len()
+                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\
+                     Connection: close\r\n\r\n{body}",
+                    body.len()
                 );
                 let _ = stream.flush();
             }
@@ -90,8 +141,32 @@ impl Issuer {
             key,
             rng,
             jwks_url,
+            jwks,
             cert_pem,
+            token,
         }
+    }
+
+    /// Where the token endpoint is served (`https://127.0.0.1:<port>/token`).
+    pub fn token_url(&self) -> String {
+        self.jwks_url.replace("/jwks", "/token")
+    }
+
+    /// What the token endpoint answers from now on: `status` and the JSON `body`.
+    pub fn answer_token(&self, status: u16, body: &str) {
+        self.token
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .reply = Some((status, body.to_string()));
+    }
+
+    /// The form bodies the token endpoint was sent, in order.
+    pub fn token_forms(&self) -> Vec<String> {
+        self.token
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .forms
+            .clone()
     }
 
     /// The `iss` this issuer's tokens carry.
@@ -104,13 +179,18 @@ impl Issuer {
         &self.jwks_url
     }
 
+    /// The JWKS document this issuer serves: its one ES256 key.
+    pub fn jwks(&self) -> &str {
+        &self.jwks
+    }
+
     /// The PEM certificate the JWKS endpoint presents — the module's `ca_cert_pem`.
     pub fn cert_pem(&self) -> &str {
         &self.cert_pem
     }
 
     /// The module settings that verify this issuer's tokens for `audience`: roles read from the
-    /// `roles` claim, and explicit login endpoints so the module's `open` performs no discovery.
+    /// `roles` claim, and explicit login endpoints so the module never needs discovery.
     pub fn settings(&self, audience: &str) -> serde_json::Map<String, serde_json::Value> {
         let serde_json::Value::Object(map) = serde_json::json!({
             "issuer": self.issuer,

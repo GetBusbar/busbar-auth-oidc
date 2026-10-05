@@ -1,65 +1,96 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! **ONE AUTH MODULE, BOTH DOORS, ONE ROW** — the OIDC module's linked + dropped-in conformance
-//! (DECISIONS #2 rule (1): a plugin is compiled in OR dropped in — same contract, same loading
-//! path), run against the busbar rev this repo pins (`.busbar-ref`).
+//! **ONE AUTH MODULE, BOTH DOORS, ONE CONNECTOR** — the OIDC module's linked + dropped-in
+//! conformance on the auth kind's memory ABI (THE DESIGN 11.4: compiled in or dropped in, one door,
+//! one table), run against the busbar rev this repo pins (`.busbar-ref`).
 //!
-//! The module is held two ways at once: LINKED (this crate's `BUSBAR_COLD_ENTRY`, the boundary
-//! `export_login_plugin!` emits and a busbar build that compiles the module in hands the loader,
-//! through `PluginRegistry::link`) and DROPPED IN (this crate's built cdylib, signed first-party
-//! under the SAME statement into a temp `plugins/` directory and found by the loader's scan). Each
-//! arm is opened by the one `open_login` against a REAL local HTTPS JWKS (a self-signed cert trusted
-//! through `ca_cert_pem`) and driven through the same script — real ES256 tokens verified (a valid
-//! one, a forged one, a wrong audience, no credential), the authorize URL, the token-exchange hop,
-//! and the token response verified into an identity — and the two transcripts, with the registry
-//! row each door resolves the name to, must be byte-identical.
+//! The door is held two ways at once: LINKED (`busbar_auth_oidc::door::door`, the row a busbar
+//! build that compiles the module in registers, `LinkedRow::of`) and DROPPED IN (this crate's built
+//! cdylib, signed first-party into a temp `plugins/` directory under a manifest stating the door's
+//! Statement, found by the loader's scan and admitted against that signed Statement). Each is bound
+//! to a real dispatcher serving the host's clock and to a connection table that PLAYS THE IdP
+//! (`support::Idp`: discovery document, JWKS, token endpoint; the first read of every reply PENDING,
+//! the op's ticket woken from another thread). The module never dials (THE DESIGN 5: "No plugin
+//! opens a socket, dials, binds or does TLS"): its declared needs carry every request (three
+//! trusting `ca_cert_pem`, three their public-roots twins for a config that names none).
 //!
-//! The RED arms are in the same file: the same cdylib opened under a DIFFERENT config is a different
-//! transcript (so the equality is not vacuous), and the same bytes signed as `secret` are refused at
-//! the kind handshake, naming both kinds. A missing cdylib PANICS — this test IS the dropped-in
-//! door's proof, and never skips.
+//! Both doors run the same script — open with NO jwks_url and NO login endpoints, so the first
+//! verify discovers the JWKS url and fetches the JWKS, each request crossing PENDING; real ES256
+//! tokens verified (valid, forged, wrong audience, not a JWT, none; a short identity buffer
+//! re-called once); the authorize URL from the discovered endpoint; the login's own token exchange
+//! (an identity, a short buffer served without a second exchange, a forged `id_token`, an
+//! `invalid_grant`, an IdP outage) — and the two transcripts, the requests the IdP saw included,
+//! must be identical.
+//!
+//! THE RED ARMS, same file: the same cdylib under a different config is a different transcript; the
+//! same bytes stated as `secret` are refused at the manifest's kind; a Statement that is not the
+//! door's is refused at admit; an unreachable issuer fails verify with 1.5.5's discovery text; a
+//! ticketless call (which may not pend) fails at once and asks the IdP nothing; the rendered
+//! Statement declares exactly the six needs; a config with no `ca_cert_pem` answers the same
+//! script over the public-roots needs, the ones trusting it refused at declaration; and the net
+//! ban's own RED arm (`support/net_ban.rs`). A missing cdylib PANICS — this test IS the dropped-in door's proof, and
+//! never skips.
 
 mod support;
 
-use busbar_contract::auth::{AuthPlugin, BeginLogin, CompleteLogin, LoginHttpResponse};
+// BUSBAR'S PUBLISHED CONFORMANCE SUITE (plugin-ci's conformance step): the linked door and this
+// crate's cdylib through the one loader, driven by the auth kind's script (verify, the login
+// family, the far ends the module's needs reach: `conformance.json`), exact crossings, both folds
+// equal, its RED arms kept.
+busbar_plugin_loader::conformance_suite! {
+    door: busbar_auth_oidc::door::door,
+    cdylib: "busbar_auth_oidc_plugin",
+    inputs: include_str!("conformance.json"),
+}
+
+#[path = "support/net_ban.rs"]
+mod net_ban;
+
+#[path = "support/import_ban.rs"]
+mod import_ban;
+
+use std::time::Duration;
+
+use busbar_contract::abi::auth::{slot, IdentifyOut, IDENTITY_BUF_BYTES, IDENTITY_GROUPS};
+use busbar_contract::abi::host::conn::connector::{DIRECTION_OUTBOUND, EGRESS_OPEN_WEB};
+use busbar_contract::abi::mechanism::call::{Outcome, Span};
+use busbar_contract::abi::mechanism::rendering;
+use busbar_plugin_loader::dispatch::kinds::auth::Auth;
+use busbar_plugin_loader::dispatch::kinds::secret::Secret;
+use busbar_plugin_loader::dispatch::{now_ns, out_head, Frame, LoadError};
 use busbar_plugin_loader::sign::{sign, Manifest, SigningKey, TrustPolicy};
-use busbar_plugin_loader::{LinkedPlugin, PluginRegistry};
-use support::{Issuer, UNUSED_ISSUER};
+use busbar_plugin_loader::PluginRegistry;
+use support::{
+    bind, bind_as, identity_buf, open, row, verify_in, verify_ticketless, z, Arm, Bound, Idp,
+    Issuer, DISCOVERY_PATH, ISSUER, UNUSED_ISSUER,
+};
 
 /// The module's registry name and alias (what an operator's `identity-providers:` names).
 const NAME: &str = "busbar-auth-oidc";
 const ALIAS: &str = "oidc";
 
-const ISSUER: &str = "https://oidc-conformance.invalid/v2.0";
 const AUDIENCE: &str = "api://busbar-conformance";
+const REDIRECT: &str = "https://node.example/auth/token";
+/// The confidential-client secret the host lends at `open`.
+const CLIENT_SECRET: &str = "conformance-client-secret";
+const KID: &str = "conformance-kid";
 
 /// The release key the dropped-in arm is signed with, and the policy's first-party key.
 fn release() -> SigningKey {
     SigningKey::from_bytes(&[11u8; 32])
 }
 
-/// This crate's built cdylib (uplifted or under `deps`, newest wins). A missing artifact is a
-/// failure, never a skip.
+/// This crate's built cdylib's bytes. A missing artifact is a failure, never a skip.
 fn cdylib() -> Vec<u8> {
-    let exe = std::env::current_exe().expect("the test binary has a path");
-    let profile = exe
-        .parent()
-        .and_then(|d| d.parent())
-        .expect("target/<profile>");
-    let file = busbar_plugin_loader::plugin_library_filename("busbar_auth_oidc_plugin");
-    let found = [profile.join(&file), profile.join("deps").join(&file)]
-        .into_iter()
-        .filter_map(|p| Some((std::fs::metadata(&p).ok()?.modified().ok()?, p)))
-        .max()
-        .map(|(_, p)| p)
-        .unwrap_or_else(|| panic!("the busbar-auth-oidc-plugin cdylib ({file}) is not built"));
-    std::fs::read(found).expect("read the cdylib")
+    let path = support::cdylib_path()
+        .unwrap_or_else(|| panic!("the busbar-auth-oidc-plugin cdylib is not built"));
+    std::fs::read(path).expect("read the cdylib")
 }
 
-/// The statement both doors make for the module, as `kind`, at the newest payload schema the
-/// loader speaks for that kind.
-fn statement(kind: &str) -> Manifest {
+/// The manifest the packer signs for the module as `kind`, stating the Statement rendering
+/// `statement` (lowercase hex, as `busbar-plugin-pack` writes it).
+fn manifest(kind: &str, statement: &[u8]) -> Manifest {
     Manifest {
         name: NAME.into(),
         alias: ALIAS.into(),
@@ -80,23 +111,13 @@ fn statement(kind: &str) -> Manifest {
         schema_derived: false,
         host: None,
         declares: Default::default(),
-        statement: None,
+        statement: Some(statement.iter().map(|b| format!("{b:02x}")).collect()),
     }
 }
 
-/// THE LINKED DOOR: this crate's boundary, registered through `PluginRegistry::link`.
-fn linked() -> PluginRegistry {
-    PluginRegistry::empty()
-        .link(vec![LinkedPlugin::boundary(
-            statement("auth"),
-            &busbar_auth_oidc_plugin::BUSBAR_COLD_ENTRY,
-        )])
-        .expect("the linked door admits the module")
-}
-
-/// THE DROPPED-IN DOOR: `lib` signed first-party under `manifest` into a fresh `plugins/`
-/// directory, scanned under a policy holding the release key.
-fn dropped(tag: &str, manifest: Manifest, lib: &[u8]) -> PluginRegistry {
+/// `lib` signed first-party under `manifest` into a fresh `plugins/` directory, scanned under a
+/// policy holding the release key.
+fn scanned(tag: &str, manifest: Manifest, lib: &[u8]) -> PluginRegistry {
     let dir = std::env::temp_dir().join(format!("auth-oidc-conf-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
@@ -119,19 +140,36 @@ fn dropped(tag: &str, manifest: Manifest, lib: &[u8]) -> PluginRegistry {
     registry
 }
 
-/// The operator config: the local JWKS, trusted through its own certificate, and explicit login
-/// endpoints (so `open` performs no discovery).
-fn config(jwks_url: &str, cert_pem: &str, audience: &str) -> String {
+/// The verified library bytes and the signed Statement rendering the scan resolved the alias to.
+fn admitted(registry: &PluginRegistry) -> (Vec<u8>, Vec<u8>) {
+    let p = registry.resolve(ALIAS).expect("the alias resolves");
+    assert_eq!(p.manifest.name, NAME);
+    let stated = p
+        .manifest
+        .stated_rendering()
+        .expect("the manifest's statement is hex")
+        .expect("the signed manifest states the door's Statement");
+    (p.lib_bytes.clone(), stated)
+}
+
+/// The operator config: only the issuer and the audience (the JWKS url and both login endpoints
+/// are DISCOVERED), and an extra trusted root (the anchored needs' `trust_from`).
+fn config(audience: &str) -> String {
     serde_json::json!({
         "issuer": ISSUER,
         "audience": audience,
-        "jwks_url": jwks_url,
-        "ca_cert_pem": cert_pem,
+        "ca_cert_pem": "-----BEGIN CERTIFICATE-----\nconformance\n-----END CERTIFICATE-----\n",
         "role_claim": "roles",
-        "authorization_endpoint": "https://idp.conformance.invalid/authorize",
-        "token_endpoint": "https://idp.conformance.invalid/token",
     })
     .to_string()
+}
+
+/// The same config with NO extra trusted root (`ca_cert_pem` is optional, as in 1.5.5): the
+/// public roots only.
+fn config_public(audience: &str) -> String {
+    let mut cfg: serde_json::Value = serde_json::from_str(&config(audience)).unwrap();
+    cfg.as_object_mut().unwrap().remove("ca_cert_pem");
+    cfg.to_string()
 }
 
 /// The tokens the script presents, minted once so both doors judge the same bytes.
@@ -139,154 +177,554 @@ struct Tokens {
     valid: String,
     forged: String,
     wrong_audience: String,
+    /// Validly signed, for the right audience, but carrying another login's nonce.
+    other_nonce: String,
 }
 
-fn tokens(key: &Issuer) -> Tokens {
+/// The nonce the core minted at `begin` (in the login cookie), handed to `complete_login`; every
+/// identity token the IdP answers for this login carries it.
+const NONCE: &str = "conformance-nonce";
+
+fn claims(aud: &str) -> serde_json::Value {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64;
-    let claims = |aud: &str| {
-        serde_json::json!({
-            "iss": ISSUER,
-            "aud": aud,
-            "exp": now + 3600,
-            "nbf": now - 10,
-            "sub": "conformance-subject",
-            "name": "Conformance Caller",
-            "roles": ["Gateway.User", "Gateway.Admin"],
-        })
-    };
+    serde_json::json!({
+        "iss": ISSUER,
+        "aud": aud,
+        "exp": now + 3600,
+        "nbf": now - 10,
+        "sub": "conformance-subject",
+        "name": "Conformance Caller",
+        "roles": ["Gateway.User", "Gateway.Admin"],
+        "nonce": NONCE,
+    })
+}
+
+fn tokens(key: &Issuer) -> Tokens {
     Tokens {
         valid: key.sign(&claims(AUDIENCE)),
-        forged: Issuer::start(UNUSED_ISSUER, "conformance-kid").sign(&claims(AUDIENCE)),
+        forged: Issuer::start(UNUSED_ISSUER, KID).sign(&claims(AUDIENCE)),
         wrong_audience: key.sign(&claims("api://someone-else")),
+        other_nonce: {
+            let mut c = claims(AUDIENCE);
+            c["nonce"] = serde_json::json!("another-login");
+            key.sign(&c)
+        },
     }
 }
 
-/// What one door does with the module opened under `cfg`, as one comparable transcript: the row the
-/// name resolves to (and the row its alias resolves to), then the script's every answer.
-fn transcript(registry: &PluginRegistry, cfg: &str, t: &Tokens) -> Vec<String> {
-    let p = registry.resolve(NAME).expect("the name resolves");
-    let stated = Manifest {
-        sha256: String::new(),
-        signature: String::new(),
-        ..p.manifest.clone()
-    };
-    let by_alias = registry.resolve(ALIAS).map(|a| a.manifest.name.clone());
-    let (module, abi): (Box<dyn AuthPlugin>, u32) = registry
-        .open_login(ALIAS, cfg)
-        .expect("the module opens through its alias");
-    let token_response = |id_token: &str, status: u16| CompleteLogin {
-        token_response: Some(LoginHttpResponse {
-            status,
-            body: serde_json::json!({ "id_token": id_token }).to_string(),
-        }),
-        ..Default::default()
-    };
-    vec![
-        serde_json::to_string(&stated).unwrap(),
-        format!("alias -> {by_alias:?}; abi {abi}"),
-        format!("name={} cacheable={}", module.name(), module.cacheable()),
-        format!("login_kind={:?}", module.login_kind()),
-        format!("{:?}", module.authenticate(Some(&t.valid))),
-        format!("{:?}", module.authenticate(Some(&t.forged))),
-        format!("{:?}", module.authenticate(Some(&t.wrong_audience))),
-        format!("{:?}", module.authenticate(Some("not-a-jwt"))),
-        format!("{:?}", module.authenticate(None)),
+/// What one door does with the module opened under `cfg`, against its own IdP, as one comparable
+/// transcript: every answer, then every need the loader declared, every request the IdP saw and
+/// how many reads pended.
+fn transcript(b: &Bound, cfg: &str, t: &Tokens) -> Vec<String> {
+    let id_token = |token: &str| serde_json::json!({ "id_token": token }).to_string();
+    let callback = |code: &str, cap| b.complete(code, ("st", NONCE), REDIRECT, "the-verifier", cap);
+    let mut lines = vec![
+        format!("name {}", b.plugin.name()),
+        format!("open {:?}", open(&b.plugin, cfg, Some(CLIENT_SECRET))),
+    ];
+    for credential in [
+        Some(t.valid.as_str()),
+        Some(&t.forged),
+        Some(&t.wrong_audience),
+        Some("not-a-jwt"),
+        None,
+    ] {
+        lines.push(b.verify(credential, None));
+    }
+    lines.push(b.verify(Some(&t.valid), Some((8, 0))));
+    lines.push(b.begin(
+        REDIRECT,
+        "conformance-state",
+        "conformance-challenge",
+        "conformance-nonce",
+    ));
+    b.idp.answer("/token", 200, &id_token(&t.valid));
+    lines.push(callback("code-1", None));
+    let before = b.idp.sent_to("/token").len();
+    lines.push(callback("code-2", Some((8, 0))));
+    lines.push(format!(
+        "exchanges {}",
+        b.idp.sent_to("/token").len() - before
+    ));
+    b.idp.answer("/token", 200, &id_token(&t.forged));
+    lines.push(callback("code-3", None));
+    b.idp.answer("/token", 400, r#"{"error":"invalid_grant"}"#);
+    lines.push(callback("code-4", None));
+    b.idp.answer("/token", 503, "{}");
+    lines.push(callback("code-5", None));
+    b.idp.answer("/token", 200, &id_token(&t.other_nonce));
+    lines.push(callback("code-6", None));
+    lines.extend(b.idp.declared());
+    lines.extend(b.idp.sent().iter().map(|s| {
         format!(
-            "{:?}",
-            module.begin_login(&BeginLogin {
-                redirect_uri: "https://node.example/auth/token".into(),
-                state: "conformance-state".into(),
-                code_challenge: "conformance-challenge".into(),
-                nonce: Some("conformance-nonce".into()),
-                scopes: vec!["profile".into()],
-            })
-        ),
-        format!(
-            "{:?}",
-            module.complete_login(&CompleteLogin {
-                code: Some("the-code".into()),
-                redirect_uri: Some("https://node.example/auth/token".into()),
-                code_verifier: Some("the-verifier".into()),
-                ..Default::default()
-            })
-        ),
-        format!(
-            "{:?}",
-            module.complete_login(&token_response(&t.valid, 200))
-        ),
-        format!(
-            "{:?}",
-            module.complete_login(&token_response(&t.forged, 200))
-        ),
-        format!(
-            "{:?}",
-            module.complete_login(&token_response(&t.valid, 400))
-        ),
-    ]
+            "sent need={} target={} {} {} body={}",
+            s.need, s.target, s.method, s.path, s.body
+        )
+    }));
+    lines.push(format!("pended {}", b.idp.pended()));
+    lines
 }
 
-/// The OIDC module registers ONE row and behaves as ONE module through either door — and the RED
-/// arms show the comparison is not vacuous.
+/// The OIDC module behaves as ONE module through either door, every request through the host's
+/// connector — and the RED arms show the comparison is not vacuous.
 #[test]
 fn the_linked_and_the_dropped_in_oidc_module_are_one_module() {
-    let key = Issuer::start(UNUSED_ISSUER, "conformance-kid");
-    let (jwks_url, cert_pem) = (key.jwks_url().to_string(), key.cert_pem().to_string());
-    let cfg = config(&jwks_url, &cert_pem, AUDIENCE);
+    let _one = support::serial();
+    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let cfg = config(AUDIENCE);
     let t = tokens(&key);
-    let lib = cdylib();
+    let row = row();
 
-    let linked = transcript(&linked(), &cfg, &t);
-    let dropped_registry = dropped("dropped", statement("auth"), &lib);
-    let dropped_in = transcript(&dropped_registry, &cfg, &t);
-    assert_eq!(linked, dropped_in, "the two doors are not one module");
+    let registry = scanned("dropped", manifest("auth", &row.statement), &cdylib());
+    let (lib, stated) = admitted(&registry);
+    assert_eq!(
+        stated, row.statement,
+        "the signed manifest states the door's own Statement"
+    );
 
-    // Not a vacuous pass: the script did what the module is for — the valid token and the valid
-    // token response identified the caller with its roles, and the forged token was rejected.
-    let text = linked.join("\n");
+    let linked = bind(&Arm::Linked, &Idp::new(&key));
+    let dropped = bind(
+        &Arm::Dropped {
+            lib: &lib,
+            stated: &stated,
+        },
+        &Idp::new(&key),
+    );
+    let a = transcript(&linked, &cfg, &t);
+    let b = transcript(&dropped, &cfg, &t);
+    assert_eq!(a, b, "the two doors are not one module");
+
+    // Not a vacuous pass: the script did what the module is for.
+    let text = a.join("\n");
+    assert_eq!(a[0], format!("name {NAME}"), "{text}");
+    assert_eq!(a[1], "open Ok(())", "{text}");
     assert!(
-        linked[11].starts_with("Identify(") && linked[11].contains("oidc:conformance-subject"),
-        "{text}"
+        a[2].starts_with("verdict 1 subject=Some(\"oidc:conformance-subject\")")
+            && a[2].contains("\"Gateway.Admin\""),
+        "the valid token identifies the caller with its roles, after discovery and the JWKS \
+         fetch both crossed PENDING: {text}"
+    );
+    assert_eq!(a[3], "verdict 2 ", "the forged token is rejected: {text}");
+    assert_eq!(a[4], "verdict 2 ", "the wrong audience is rejected: {text}");
+    assert_eq!(a[5], "verdict 3 ", "not a JWT passes: {text}");
+    assert_eq!(a[6], "verdict 3 ", "no credential passes: {text}");
+    assert!(
+        a[7].starts_with("short(needed ") && a[7].ends_with(&a[2]),
+        "a short buffer is re-called once and answers the same identity: {text}"
     );
     assert!(
-        linked[4].starts_with("Identify(") && linked[4].contains("oidc:conformance-subject"),
-        "{text}"
-    );
-    assert!(linked[4].contains("\"Gateway.Admin\""), "{text}");
-    assert_eq!(linked[5], "Reject", "{text}");
-    assert!(
-        linked[9].starts_with("Authorize(\"https://idp.conformance.invalid/authorize?"),
-        "{text}"
+        a[8].starts_with("shape 1 https://idp.conformance.example/authorize?")
+            && a[8].contains("state=conformance-state")
+            && a[8].contains("nonce=conformance-nonce")
+            && a[8].ends_with("(release Ready)"),
+        "the authorize URL is the DISCOVERED endpoint's: {text}"
     );
     assert!(
-        linked[10].starts_with("Exchange(") && linked[10].contains("idp.conformance.invalid/token"),
+        a[9].starts_with("verdict 1 subject=Some(\"oidc:conformance-subject\")"),
+        "the login's token exchange answers an identity: {text}"
+    );
+    assert!(
+        a[10].starts_with("short(needed ") && a[10].ends_with(&a[9]),
         "{text}"
+    );
+    assert_eq!(
+        a[11], "exchanges 1",
+        "the short re-call redeems no code twice: {text}"
+    );
+    assert_eq!(
+        a[12], "verdict 2 ",
+        "a forged id_token is a bad credential: {text}"
+    );
+    assert_eq!(
+        a[13], "verdict 2 ",
+        "invalid_grant is a bad credential: {text}"
+    );
+    assert_eq!(
+        a[14], "verdict 2 ",
+        "an IdP 5xx is a declined login, as 1.5.5 answered it (its module read a non-2xx token \
+         response as a rejection): {text}"
+    );
+    assert_eq!(
+        a[15], "verdict 4 ",
+        "an identity token minted for another login's nonce fails the security check: {text}"
+    );
+
+    // THE NEEDS, as the loader declared them: six outbound open-web https needs, the three
+    // trusting `ca_cert_pem` then their public-roots twins; discovery pinned to the issuer
+    // setting's value. With `ca_cert_pem` set every one is carried.
+    let anchor = "\"settings.ca_cert_pem\"";
+    for (need, target_from, trust_from, target) in [
+        (
+            0,
+            "\"settings.issuer\"",
+            anchor,
+            format!("Some({ISSUER:?})"),
+        ),
+        (1, "\"\"", anchor, "None".to_string()),
+        (2, "\"\"", anchor, "None".to_string()),
+        (
+            3,
+            "\"settings.issuer\"",
+            "\"\"",
+            format!("Some({ISSUER:?})"),
+        ),
+        (4, "\"\"", "\"\"", "None".to_string()),
+        (5, "\"\"", "\"\"", "None".to_string()),
+    ] {
+        let trusted = trust_from == anchor;
+        let want = format!(
+            "need {need} direction={DIRECTION_OUTBOUND} class={EGRESS_OPEN_WEB} transport=http \
+             target_from={target_from} trust_from={trust_from} timeout_ms=10000 \
+             target={target} trusted={trusted} answer=Ok(())"
+        );
+        assert!(a.contains(&want), "missing {want:?} in:\n{text}");
+    }
+
+    // THE REQUESTS: ONE discovery GET and ONE JWKS GET for the whole script (single-flight and
+    // the cache), each to the URL the module named, on its own need; the token POSTs on the token
+    // need, carrying the lent secret.
+    let sent = linked.idp.sent();
+    // NO CONNECTION OUTSIDE THE DECLARED NEEDS: every establish names a declared need index and
+    // that need's configured target.
+    let needs = rendering::read(&row.statement).expect("reads").needs.len() as u32;
+    for idp in [&linked.idp, &dropped.idp] {
+        assert_eq!(
+            support::strays(&idp.sent(), needs, &support::declared_targets(0)),
+            Vec::<String>::new(),
+            "{text}"
+        );
+    }
+    let discovery: Vec<_> = sent.iter().filter(|s| s.path == DISCOVERY_PATH).collect();
+    let jwks: Vec<_> = sent.iter().filter(|s| s.path == "/keys").collect();
+    assert_eq!(discovery.len(), 1, "{text}");
+    assert_eq!(
+        (discovery[0].need, discovery[0].method.as_str()),
+        (0, "GET")
+    );
+    assert_eq!(
+        discovery[0].target,
+        format!("https://idp.conformance.example{DISCOVERY_PATH}")
+    );
+    assert_eq!(jwks.len(), 1, "{text}");
+    assert_eq!((jwks[0].need, jwks[0].method.as_str()), (1, "GET"));
+    let posts = linked.idp.sent_to("/token");
+    assert_eq!(
+        posts.len(),
+        6,
+        "one per code; code 2's short re-call made none (`exchanges 1`): {text}"
+    );
+    assert!(posts.iter().all(|p| p.need == 2 && p.method == "POST"));
+    for field in [
+        "grant_type=authorization_code",
+        "code=code-1",
+        "code_verifier=the-verifier",
+        &format!("client_secret={CLIENT_SECRET}"),
+    ] {
+        assert!(
+            posts[0].body.contains(field),
+            "the exchange sends {field}: {:?}",
+            posts[0].body
+        );
+    }
+    assert!(
+        linked.idp.pended() as usize >= sent.len(),
+        "every request crossed PENDING and was resumed on its wake: {text}"
     );
 
     // RED ARM 1: the same cdylib under a different operator config (another audience) is a
     // different transcript — the token the linked door identified is now refused.
-    let other = transcript(
-        &dropped_registry,
-        &config(&jwks_url, &cert_pem, "api://someone-else"),
-        &t,
+    let other = bind(
+        &Arm::Dropped {
+            lib: &lib,
+            stated: &stated,
+        },
+        &Idp::new(&key),
     );
     assert_ne!(
-        other, linked,
+        transcript(&other, &config("api://someone-else"), &t),
+        a,
         "a different config must not read as the same module"
     );
 
-    // RED ARM 2: the same bytes signed as `secret` are refused at the kind handshake.
-    let wrong = dropped("as-secret", statement("secret"), &lib);
-    let e = match wrong.open_secret(ALIAS, &cfg) {
-        Ok(_) => panic!("an auth library signed as secret must not open"),
-        Err(e) => e,
-    };
-    assert!(
-        e.contains(&format!(
-            "plugin '{NAME}' exports kind 'auth' but is being loaded as 'secret'"
-        )),
-        "{e}"
+    // THE PUBLIC ROOTS: with no `ca_cert_pem` (optional, as in 1.5.5) the needs trusting it are
+    // refused at declaration (the host refuses a `trust_from` that names nothing), and the module
+    // answers the same script the same way over their public-roots twins, asking nothing of a
+    // refused need.
+    let public = bind(
+        &Arm::Dropped {
+            lib: &lib,
+            stated: &stated,
+        },
+        &Idp::new(&key),
     );
+    let p = transcript(&public, &config_public(AUDIENCE), &t);
+    let answers = a
+        .iter()
+        .position(|l| l.starts_with("need "))
+        .expect("needs");
+    assert_eq!(
+        p[..answers],
+        a[..answers],
+        "the public-roots module answers as the anchored one:\n{}",
+        p.join("\n")
+    );
+    for need in 0..3 {
+        assert!(
+            p.iter().any(|l| l.starts_with(&format!("need {need} "))
+                && l.ends_with("trusted=false answer=Err(Refused)")),
+            "need {need} (trusting an absent ca_cert_pem) is refused:\n{}",
+            p.join("\n")
+        );
+    }
+    assert!(!public.idp.sent().is_empty());
+    assert_eq!(
+        support::strays(
+            &public.idp.sent(),
+            needs,
+            &support::declared_targets(busbar_auth_oidc::fetch::PUBLIC)
+        ),
+        Vec::<String>::new(),
+        "every request rides a public-roots need:\n{}",
+        p.join("\n")
+    );
+
+    // RED ARM 2: the same bytes stated as `secret` are refused at the manifest's kind.
+    let arm = Arm::Dropped {
+        lib: &lib,
+        stated: &stated,
+    };
+    match bind_as::<Secret>(&arm, &Idp::new(&key)).1 {
+        Err(LoadError::ManifestKind { .. }) => {}
+        Err(e) => panic!("an auth door stated as secret must be refused at its kind: {e}"),
+        Ok(_) => panic!("an auth door stated as secret must not load"),
+    }
+
+    // RED ARM 3: a manifest whose Statement is not the door's is refused at admit.
+    let mut tampered = stated.clone();
+    *tampered.last_mut().expect("a rendering") ^= 1;
+    let arm = Arm::Dropped {
+        lib: &lib,
+        stated: &tampered,
+    };
+    match bind_as::<Auth>(&arm, &Idp::new(&key)).1 {
+        Err(LoadError::StatementMismatch) => {}
+        Err(e) => panic!("a Statement that is not the door's must be refused as one: {e}"),
+        Ok(_) => panic!("a Statement that is not the door's must not load"),
+    }
+}
+
+/// RED: an unreachable issuer fails verify with 1.5.5's discovery text (1.5.5 refused boot with
+/// it; the module now fetches nothing at open — THE SEAM), and a call on no ticket, which may not
+/// pend, fails at once and asks the IdP nothing. Both doors alike.
+#[test]
+fn red_an_unreachable_issuer_and_a_ticketless_call_fail_verify_in_1_5_5_s_words() {
+    let _one = support::serial();
+    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let token = key.sign(&claims(AUDIENCE));
+    let lib = cdylib();
+    let stated = row().statement;
+    let url = format!("https://idp.conformance.example{DISCOVERY_PATH}");
+    let mut seen = Vec::new();
+    for arm in [
+        Arm::Linked,
+        Arm::Dropped {
+            lib: &lib,
+            stated: &stated,
+        },
+    ] {
+        let idp = Idp::new(&key);
+        idp.answer(DISCOVERY_PATH, 503, "{}");
+        let b = bind(&arm, &idp);
+        open(&b.plugin, &config(AUDIENCE), None).expect("opens: nothing is fetched at open");
+
+        // ON THE SPOT (no ticket) the verify needs a fetch it may not pend on: REFUSED, so the
+        // host makes it again on a ticket (`abi::auth`).
+        let ticketless = verify_ticketless(&b.plugin, Some(&token));
+        assert!(ticketless.starts_with("Refused"), "{ticketless}");
+        assert!(
+            idp.sent().is_empty(),
+            "a ticketless call asks the IdP nothing"
+        );
+
+        let refused = b.verify(Some(&token), None);
+        assert_eq!(
+            refused,
+            format!(
+                "Failed OIDC discovery fetch failed ({url}): {url} returned HTTP 503 Service \
+                 Unavailable; set jwks_url explicitly"
+            )
+        );
+        seen.push((ticketless, refused));
+    }
+    assert_eq!(seen[0], seen[1], "both doors alike");
+}
+
+/// SINGLE-FLIGHT through the real dispatcher (THE DESIGN, auth: "a cold key id pends verify, one
+/// `exchange()` fetches, every waiter wakes"): two cold verifies in flight at once make ONE
+/// discovery request and ONE JWKS request between them, and both identify.
+#[test]
+fn concurrent_cold_verifies_make_one_discovery_and_one_jwks_request() {
+    cold_verifies(true);
+}
+
+/// The same two cold verifies submitted back to back, neither waiting for the other to pend.
+#[test]
+fn simultaneous_cold_verifies_make_one_discovery_and_one_jwks_request() {
+    cold_verifies(false);
+}
+
+/// Two cold verifies on one instance; the second submitted once the first pended (`staggered`) or
+/// at once.
+fn cold_verifies(staggered: bool) {
+    let _one = support::serial();
+    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let token = key.sign(&claims(AUDIENCE));
+    let idp = Idp::new(&key);
+    idp.pend_for(Duration::from_millis(300));
+    let b = bind(&Arm::Linked, &idp);
+    open(&b.plugin, &config(AUDIENCE), None).expect("opens");
+
+    let mut bufs: Vec<(Vec<u8>, Vec<Span>)> = (0..2)
+        .map(|_| {
+            (
+                vec![0_u8; IDENTITY_BUF_BYTES],
+                vec![z::<Span>(); IDENTITY_GROUPS as usize],
+            )
+        })
+        .collect();
+    // The first verify is submitted, and the second only once the first has pended on its
+    // discovery request: the second arrives while the first's fetch is in flight.
+    let mut replies = Vec::new();
+    for (i, (bytes, groups)) in bufs.iter_mut().enumerate() {
+        if i == 1 && staggered {
+            let until = std::time::Instant::now() + Duration::from_secs(10);
+            while idp.pended() == 0 {
+                assert!(
+                    std::time::Instant::now() < until,
+                    "the first verify never pended"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+        let ticket = b.dispatcher.mint(0).expect("a ticket");
+        let mut out: IdentifyOut = z();
+        out.head = out_head();
+        let reply = b.dispatcher.submit(
+            &b.plugin,
+            ticket,
+            slot::VERIFY,
+            Frame::new(verify_in(Some(&token), identity_buf(bytes, groups)), out),
+            busbar_contract::abi::mechanism::call::DeadlineClass::Call,
+            now_ns() + 20_000_000_000,
+        );
+        replies.push((ticket, reply));
+    }
+    let tickets: Vec<_> = replies.iter().map(|(t, _)| *t).collect();
+    for (ticket, reply) in replies {
+        let done = reply
+            .wait(Duration::from_secs(30))
+            .expect("the op completes");
+        assert_eq!(done.outcome, Outcome::Ready, "{:?}", done.error);
+        assert_eq!(done.frame.expect("the frame").out.verdict, 1, "identified");
+        b.dispatcher.recycle(ticket);
+    }
+    let seen = format!(
+        "tickets {tickets:?}; requests {:?}; first reads (conn, ticket) {:?}",
+        idp.sent(),
+        idp.woken()
+    );
+    assert_eq!(idp.sent_to(DISCOVERY_PATH).len(), 1, "{seen}");
+    assert_eq!(idp.sent_to("/keys").len(), 1, "{seen}");
+}
+
+/// RED: a request on an undeclared need index, or to a target its need does not name, is caught by
+/// the check the conformance transcript holds every establish to.
+#[test]
+fn red_an_undeclared_need_or_a_foreign_target_is_caught() {
+    let sent = |need: u32, target: &str| support::Sent {
+        conn: 1,
+        need,
+        target: target.to_string(),
+        method: "GET".into(),
+        path: "/".into(),
+        body: String::new(),
+    };
+    let allowed = support::declared_targets(0);
+    assert_eq!(
+        support::strays(
+            &[
+                sent(1, support::JWKS_URL),
+                sent(7, support::JWKS_URL),
+                sent(1, "https://attacker.example/keys"),
+                sent(2, support::JWKS_URL),
+            ],
+            3,
+            &allowed,
+        ),
+        vec![
+            format!("undeclared need 7 -> {}", support::JWKS_URL),
+            "need 1 to a foreign target https://attacker.example/keys".to_string(),
+            format!("need 2 to a foreign target {}", support::JWKS_URL),
+        ]
+    );
+    assert!(support::strays(
+        &[sent(0, &allowed[0].1), sent(2, support::TOKEN_URL)],
+        3,
+        &allowed
+    )
+    .is_empty());
+}
+
+/// RED: the rendered Statement declares exactly the six needs — outbound, open-web, `http`, three
+/// trusting `ca_cert_pem` then their public-roots twins, discovery pinned to `issuer` — and both
+/// doors state the same rendering.
+#[test]
+fn red_the_statement_declares_six_outbound_open_web_http_needs() {
+    let row = row();
+    let read = rendering::read(&row.statement).expect("the rendering reads back");
+    let needs: Vec<_> = read
+        .needs
+        .iter()
+        .map(|n| {
+            (
+                n.direction,
+                n.egress_class,
+                n.transport.as_str(),
+                n.auth.as_str(),
+                n.target_from.as_str(),
+                n.trust_from.as_str(),
+            )
+        })
+        .collect();
+    let need = |target_from, trust_from| {
+        (
+            DIRECTION_OUTBOUND,
+            EGRESS_OPEN_WEB,
+            "http",
+            "",
+            target_from,
+            trust_from,
+        )
+    };
+    let anchor = "settings.ca_cert_pem";
+    assert_eq!(
+        needs,
+        vec![
+            need("settings.issuer", anchor),
+            need("", anchor),
+            need("", anchor),
+            need("settings.issuer", ""),
+            need("", ""),
+            need("", ""),
+        ],
+        "{read:?}"
+    );
+    let packed = busbar_plugin_loader::dispatch::rendering_of_library(
+        &support::cdylib_path().expect("the cdylib is built"),
+    )
+    .expect("the cdylib loads");
+    assert_eq!(packed.as_deref(), Some(&row.statement[..]));
 }
