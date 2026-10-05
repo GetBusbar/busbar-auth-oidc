@@ -109,11 +109,18 @@ fn the_token_exchange_is_a_url_encoded_form_post_to_the_endpoint_path() {
         String::from_utf8(r.body).unwrap(),
         "grant_type=authorization_code&code=a+b%26c&client_secret=s3cret"
     );
-    assert!(r.fields.contains(&(
-        b"content-type".to_vec(),
-        b"application/x-www-form-urlencoded".to_vec()
-    )));
-    assert!(r.fields.contains(&(b"x-extra".to_vec(), b"1".to_vec())));
+    // 1.5.5's wire order: the form's content-type, the client's accept, then the hop's own.
+    assert_eq!(
+        r.fields,
+        vec![
+            (
+                b"content-type".to_vec(),
+                b"application/x-www-form-urlencoded".to_vec()
+            ),
+            (b"accept".to_vec(), b"*/*".to_vec()),
+            (b"x-extra".to_vec(), b"1".to_vec()),
+        ]
+    );
     assert_eq!(r.timeout_ms, FETCH_TIMEOUT_MS);
 
     let mut odd = hop();

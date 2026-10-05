@@ -167,7 +167,13 @@ struct Tokens {
     valid: String,
     forged: String,
     wrong_audience: String,
+    /// Validly signed, for the right audience, but carrying another login's nonce.
+    other_nonce: String,
 }
+
+/// The nonce the core minted at `begin` (in the login cookie), handed to `complete_login`; every
+/// identity token the IdP answers for this login carries it.
+const NONCE: &str = "conformance-nonce";
 
 fn claims(aud: &str) -> serde_json::Value {
     let now = std::time::SystemTime::now()
@@ -182,6 +188,7 @@ fn claims(aud: &str) -> serde_json::Value {
         "sub": "conformance-subject",
         "name": "Conformance Caller",
         "roles": ["Gateway.User", "Gateway.Admin"],
+        "nonce": NONCE,
     })
 }
 
@@ -190,6 +197,11 @@ fn tokens(key: &Issuer) -> Tokens {
         valid: key.sign(&claims(AUDIENCE)),
         forged: Issuer::start(UNUSED_ISSUER, KID).sign(&claims(AUDIENCE)),
         wrong_audience: key.sign(&claims("api://someone-else")),
+        other_nonce: {
+            let mut c = claims(AUDIENCE);
+            c["nonce"] = serde_json::json!("another-login");
+            key.sign(&c)
+        },
     }
 }
 
@@ -198,7 +210,7 @@ fn tokens(key: &Issuer) -> Tokens {
 /// how many reads pended.
 fn transcript(b: &Bound, cfg: &str, t: &Tokens) -> Vec<String> {
     let id_token = |token: &str| serde_json::json!({ "id_token": token }).to_string();
-    let callback = |code: &str, cap| b.complete(code, "st", REDIRECT, "the-verifier", cap);
+    let callback = |code: &str, cap| b.complete(code, ("st", NONCE), REDIRECT, "the-verifier", cap);
     let mut lines = vec![
         format!("name {}", b.plugin.name()),
         format!("open {:?}", open(&b.plugin, cfg, Some(CLIENT_SECRET))),
@@ -233,6 +245,8 @@ fn transcript(b: &Bound, cfg: &str, t: &Tokens) -> Vec<String> {
     lines.push(callback("code-4", None));
     b.idp.answer("/token", 503, "{}");
     lines.push(callback("code-5", None));
+    b.idp.answer("/token", 200, &id_token(&t.other_nonce));
+    lines.push(callback("code-6", None));
     lines.extend(b.idp.declared());
     lines.extend(b.idp.sent().iter().map(|s| {
         format!(
@@ -318,7 +332,15 @@ fn the_linked_and_the_dropped_in_oidc_module_are_one_module() {
         a[13], "verdict 2 ",
         "invalid_grant is a bad credential: {text}"
     );
-    assert_eq!(a[14], "verdict 3 ", "an IdP 5xx is an outage: {text}");
+    assert_eq!(
+        a[14], "verdict 2 ",
+        "an IdP 5xx is a declined login, as 1.5.5 answered it (its module read a non-2xx token \
+         response as a rejection): {text}"
+    );
+    assert_eq!(
+        a[15], "verdict 4 ",
+        "an identity token minted for another login's nonce fails the security check: {text}"
+    );
 
     // THE NEEDS, as the loader declared them: six outbound open-web https needs, the three
     // trusting `ca_cert_pem` then their public-roots twins; discovery pinned to the issuer
@@ -381,7 +403,7 @@ fn the_linked_and_the_dropped_in_oidc_module_are_one_module() {
     let posts = linked.idp.sent_to("/token");
     assert_eq!(
         posts.len(),
-        5,
+        6,
         "one per code; code 2's short re-call made none (`exchanges 1`): {text}"
     );
     assert!(posts.iter().all(|p| p.need == 2 && p.method == "POST"));

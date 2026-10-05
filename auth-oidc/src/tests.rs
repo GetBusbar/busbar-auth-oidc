@@ -1884,3 +1884,34 @@ fn one_malformed_jwk_is_skipped_not_fatal_to_the_whole_set() {
         .expect_err("a set with no usable key is still an error");
     assert!(err.contains("no keys"), "got: {err}");
 }
+
+/// THE NONCE BINDING (1.5.5's core check, now the plugin's): a token answer with no `id_token` binds
+/// (there is nothing to bind); one whose `id_token` names the login's nonce binds; another login's
+/// nonce, a missing claim or an unreadable token does not.
+#[test]
+fn an_id_token_binds_only_to_the_logins_nonce() {
+    let token = |claims: serde_json::Value| {
+        let part = |v: &serde_json::Value| URL_SAFE_NO_PAD.encode(serde_json::to_vec(v).unwrap());
+        format!(
+            "{}.{}.sig",
+            part(&serde_json::json!({ "alg": "ES256" })),
+            part(&claims)
+        )
+    };
+    let body = |t: String| serde_json::json!({ "id_token": t }).to_string();
+    assert!(nonce_binds(r#"{"error":"invalid_grant"}"#, "n-1"));
+    assert!(nonce_binds("not json", "n-1"));
+    assert!(nonce_binds(
+        &body(token(serde_json::json!({ "nonce": "n-1" }))),
+        "n-1"
+    ));
+    assert!(!nonce_binds(
+        &body(token(serde_json::json!({ "nonce": "n-2" }))),
+        "n-1"
+    ));
+    assert!(!nonce_binds(
+        &body(token(serde_json::json!({ "sub": "x" }))),
+        "n-1"
+    ));
+    assert!(!nonce_binds(&body("garbage".to_string()), "n-1"));
+}
