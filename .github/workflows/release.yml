@@ -25,7 +25,7 @@ jobs:
     secrets: inherit
   release:
     needs: ci
-    uses: GetBusbar/busbar/.github/workflows/plugin-release.yml@4abda5b63ee49c63b98b390de4ef4bfb72e7fd0e
+    uses: GetBusbar/busbar/.github/workflows/plugin-release.yml@244a861e35aaa55bcbc30970d8a8722f9cb0b861
     with:
       plugin_crate: busbar-auth-oidc-plugin
       manifest_name: busbar-auth-oidc
@@ -41,7 +41,7 @@ jobs:
   consumer-verify:
     needs: release
     if: ${{ !cancelled() }}
-    uses: GetBusbar/busbar/.github/workflows/plugin-consumer-verify.yml@4abda5b63ee49c63b98b390de4ef4bfb72e7fd0e
+    uses: GetBusbar/busbar/.github/workflows/plugin-consumer-verify.yml@244a861e35aaa55bcbc30970d8a8722f9cb0b861
     with:
       version: ${{ github.ref_name }}
       asset_prefix: busbar-auth-oidc
