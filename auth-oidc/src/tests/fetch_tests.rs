@@ -4,7 +4,9 @@
 //! What the module makes of a request's answer, in 1.5.5's words, and the requests it builds.
 
 use super::*;
-use busbar_contract::abi::host::conn::connector::{DIRECTION_OUTBOUND, EGRESS_OPEN_WEB};
+use busbar_contract::abi::host::conn::connector::{
+    DIRECTION_OUTBOUND, EGRESS_LOOPBACK_ALLOWED, EGRESS_OPEN_WEB,
+};
 
 const URL: &str = "https://idp.example/jwks";
 
@@ -164,18 +166,24 @@ fn every_request_is_https_only_and_needs_the_host_connector() {
     );
 }
 
-/// THE NEEDS: three outbound needs in the open-web class (THE DESIGN, egress classes: the auth mint
-/// endpoints' class), stated twice: the ANCHORED set trusting an extra root on top of the public
+/// THE NEEDS: three outbound needs — discovery and the JWKS in the open-web class, the token
+/// exchange (an auth mint endpoint) in the loopback-allowed class (THE DESIGN, egress classes;
+/// ARCHITECT ruling A4) — stated twice: the ANCHORED set trusting an extra root on top of the public
 /// ones, the PUBLIC set the public roots only (`ca_cert_pem` is optional, and the host refuses a
 /// need whose `trust_from` names nothing); discovery pinned to a setting, the JWKS and the token
 /// endpoint named per request. (Their words are read back from the door's rendered Statement in
 /// the plugin crate's conformance test.)
 #[test]
-fn the_needs_are_outbound_open_web_anchored_then_public() {
+fn the_needs_are_outbound_in_their_class_anchored_then_public() {
     assert_eq!(NEEDS.len(), 2 * PUBLIC as usize);
     for (i, n) in NEEDS.iter().enumerate() {
         assert_eq!(n.direction, DIRECTION_OUTBOUND, "need {i}");
-        assert_eq!(n.egress_class, EGRESS_OPEN_WEB, "need {i}");
+        let class = if i as u32 % PUBLIC == NEED_TOKEN {
+            EGRESS_LOOPBACK_ALLOWED
+        } else {
+            EGRESS_OPEN_WEB
+        };
+        assert_eq!(n.egress_class, class, "need {i}");
         assert_eq!(n.transport.len, "http".len(), "need {i}");
         let trust = if (i as u32) < PUBLIC {
             "settings.ca_cert_pem".len()
@@ -196,5 +204,34 @@ fn the_needs_are_outbound_open_web_anchored_then_public() {
     assert_eq!(
         (on(NEED_JWKS, true), on(NEED_JWKS, false)),
         (NEED_JWKS, NEED_JWKS + PUBLIC)
+    );
+}
+
+/// THE TOKEN EXCHANGE IS AN AUTH MINT ENDPOINT (loopback-allowed, ARCHITECT ruling A4): a plaintext
+/// token endpoint is not refused by the module — the host's connector holds it to loopback, as
+/// 1.5.5's core-run hop did — while discovery and the JWKS stay https-only. RED: the token POST
+/// refused as "URL scheme is not allowed" before the host is asked.
+#[test]
+fn a_plaintext_token_endpoint_is_left_to_the_connector_and_documents_stay_https_only() {
+    let mut io = HostIo::new(None, Ticket::NONE, IoState::default(), false);
+    let mut h = hop();
+    h.url = "http://127.0.0.1:8443/token".to_string();
+    assert_eq!(
+        io.post(&h, None).map(|r| r.map(|_| ())),
+        Poll::Ready(Err(
+            "request to http://127.0.0.1:8443/token failed: the instance was handed no connector"
+                .to_string()
+        ))
+    );
+    assert_eq!(
+        io.get(
+            Doc::Discovery,
+            "http://127.0.0.1:8443/.well-known/openid-configuration"
+        ),
+        Poll::Ready(Err(
+            "request to http://127.0.0.1:8443/.well-known/openid-configuration failed: URL scheme \
+             is not allowed"
+                .to_string()
+        ))
     );
 }
