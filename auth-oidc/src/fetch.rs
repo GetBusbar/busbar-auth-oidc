@@ -8,9 +8,10 @@
 //! JWKS, and the login's code-for-token POST. Each answers PENDING while it is in flight and is
 //! re-asked when the op re-enters on its wake (the replay rule, `abi::sdk::conn`).
 //!
-//! Every need is `open-web` (public destinations over a secure connection only; the auth mint
-//! endpoints' class), over the `http` transport, its connections secured by the target's `https`
-//! scheme (the connector's TLS; open-web is secure-only). The discovery need is pinned to the `issuer` setting's target
+//! Discovery and the JWKS are `open-web` (public destinations over a secure connection only); the
+//! token exchange is an auth mint endpoint, `loopback-allowed` (https, or plaintext to loopback, as
+//! 1.5.5 validated it, the destination guard applying). Every need rides the `http` transport, its
+//! connections secured by the target's `https` scheme (the connector's TLS). The discovery need is pinned to the `issuer` setting's target
 //! (`target_from`); the JWKS and token endpoints may be discovered, so the module names them per
 //! request.
 //!
@@ -30,7 +31,7 @@ use std::fmt::Display;
 use std::task::Poll;
 
 use busbar_contract::abi::host::conn::connector::{
-    Need, DIRECTION_OUTBOUND, EGRESS_OPEN_WEB, KEEP_NAMED,
+    Need, DIRECTION_OUTBOUND, EGRESS_LOOPBACK_ALLOWED, EGRESS_OPEN_WEB, KEEP_NAMED,
 };
 use busbar_contract::abi::mechanism::call::{AbiStr, Blob};
 use busbar_contract::abi::mechanism::ticket::Ticket;
@@ -69,13 +70,12 @@ const ABSENT: AbiStr = AbiStr {
     len: 0,
 };
 
-/// One outbound need over the `http` transport (the scheme the http framer claims; every target is
-/// `https`, secured by the connector) in the open-web class, trusting the root `trust_from` names beside
-/// the public roots (`ABSENT`: the public roots only).
-const fn need(target_from: AbiStr, trust_from: AbiStr) -> Need {
+/// One outbound need over the `http` transport (the scheme the http framer claims) in `egress_class`,
+/// trusting the root `trust_from` names beside the public roots (`ABSENT`: the public roots only).
+const fn need(egress_class: u32, target_from: AbiStr, trust_from: AbiStr) -> Need {
     Need {
         direction: DIRECTION_OUTBOUND,
-        egress_class: EGRESS_OPEN_WEB,
+        egress_class,
         transport: abi_str("http"),
         auth: ABSENT,
         target_from,
@@ -96,12 +96,12 @@ const fn need(target_from: AbiStr, trust_from: AbiStr) -> Need {
 /// setting's target), the JWKS and the token endpoint (named per request: either may be
 /// discovered).
 pub const NEEDS: &[Need] = &[
-    need(abi_str(ISSUER_PATH), abi_str(CA_CERT_PATH)),
-    need(ABSENT, abi_str(CA_CERT_PATH)),
-    need(ABSENT, abi_str(CA_CERT_PATH)),
-    need(abi_str(ISSUER_PATH), ABSENT),
-    need(ABSENT, ABSENT),
-    need(ABSENT, ABSENT),
+    need(EGRESS_OPEN_WEB, abi_str(ISSUER_PATH), abi_str(CA_CERT_PATH)),
+    need(EGRESS_OPEN_WEB, ABSENT, abi_str(CA_CERT_PATH)),
+    need(EGRESS_LOOPBACK_ALLOWED, ABSENT, abi_str(CA_CERT_PATH)),
+    need(EGRESS_OPEN_WEB, abi_str(ISSUER_PATH), ABSENT),
+    need(EGRESS_OPEN_WEB, ABSENT, ABSENT),
+    need(EGRESS_LOOPBACK_ALLOWED, ABSENT, ABSENT),
 ];
 
 /// The need index `need` (an anchored-set index) goes out on: itself for a module that trusts an
@@ -315,9 +315,13 @@ impl<'h> HostIo<'h> {
             Ok(u) => u,
             Err(e) => return Poll::Ready(Err(failed(url, e))),
         };
-        // HTTPS-ONLY (1.5.5's `https_only`): a JWKS/discovery endpoint fetched over plaintext could
-        // be MITM'd to serve attacker keys.
-        if parsed.scheme() != "https" {
+        // HTTPS-ONLY for discovery and the JWKS (1.5.5's `https_only`): fetched over plaintext they
+        // could be MITM'd to serve attacker keys. The TOKEN exchange is an auth mint endpoint, in the
+        // loopback-allowed class: https, or plaintext to loopback exactly as 1.5.5's core-run hop
+        // allowed it — the connector holds a plaintext target to loopback, the destination guard
+        // applying (THE DESIGN, egress classes; ARCHITECT ruling A4).
+        let plaintext_ok = need == NEED_TOKEN && parsed.scheme().eq_ignore_ascii_case("http");
+        if parsed.scheme() != "https" && !plaintext_ok {
             return Poll::Ready(Err(failed(url, "URL scheme is not allowed")));
         }
         let Some(host) = self.host else {
