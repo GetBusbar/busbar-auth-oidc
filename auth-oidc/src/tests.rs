@@ -18,19 +18,19 @@ use ring::signature::{
 };
 use std::sync::Arc;
 
-const ISSUER: &str = "https://login.microsoftonline.com/tenant-guid/v2.0";
-const AUDIENCE: &str = "api://busbar-client-id";
+pub(crate) const ISSUER: &str = "https://login.microsoftonline.com/tenant-guid/v2.0";
+pub(crate) const AUDIENCE: &str = "api://busbar-client-id";
 const KID: &str = "test-key-1";
 
 /// A ring ES256 signer + the JWKS fixture that verifies it.
-struct TestKey {
+pub(crate) struct TestKey {
     kp: EcdsaKeyPair,
     rng: SystemRandom,
     kid: String,
 }
 
 impl TestKey {
-    fn generate(kid: &str) -> Self {
+    pub(crate) fn generate(kid: &str) -> Self {
         let rng = SystemRandom::new();
         let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng).unwrap();
         let kp = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8.as_ref(), &rng)
@@ -43,7 +43,7 @@ impl TestKey {
     }
 
     /// The public key as a single-key JWKS document.
-    fn jwks(&self) -> String {
+    pub(crate) fn jwks(&self) -> String {
         // Uncompressed SEC1 point: 0x04 || X(32) || Y(32).
         let pt = self.kp.public_key().as_ref();
         assert_eq!(pt[0], 0x04, "uncompressed point");
@@ -58,7 +58,7 @@ impl TestKey {
     }
 
     /// Sign a claims object into a compact ES256 JWT with this key's kid.
-    fn mint(&self, claims: &Value) -> String {
+    pub(crate) fn mint(&self, claims: &Value) -> String {
         let header = serde_json::json!({ "alg": "ES256", "typ": "JWT", "kid": self.kid });
         let h = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).unwrap());
         let p = URL_SAFE_NO_PAD.encode(serde_json::to_vec(claims).unwrap());
@@ -166,7 +166,7 @@ fn resolve_login_endpoints(
     Ok((authorize, token))
 }
 
-fn base_claims(now: i64) -> Value {
+pub(crate) fn base_claims(now: i64) -> Value {
     serde_json::json!({
         "iss": ISSUER,
         "aud": AUDIENCE,
@@ -585,6 +585,50 @@ fn kid_rotation_triggers_bounded_refetch() {
         AuthVerdict::Reject
     ));
     assert_eq!(fetcher.calls(), 2, "rate limit held off a second refetch");
+}
+
+/// 1.5.5's CREDENTIAL CACHE, now the module's own (v1.5.5 `crates/busbar/src/auth_cache.rs`; OIDC
+/// was `cacheable`, v1.0.6 `auth-oidc/src/lib.rs:491`): a bearer this module identified is answered
+/// from the cache for its TTL (here the 300 s ceiling) without a fetch or a signature check, even
+/// once its key is gone from a set past its TTL; past the TTL the module judges it afresh.
+#[test]
+fn a_verified_identity_is_answered_from_the_verdict_cache_for_its_ttl() {
+    let key = TestKey::generate(KID);
+    let fetcher = Arc::new(FixtureFetcher::new(key.jwks()));
+    let m = Module::new(&cfg("groups"), fetcher.clone());
+    let t0 = Instant::now();
+    let now = 1_700_000_000;
+    let token = key.mint(&base_claims(now));
+    assert!(matches!(
+        m.verify(&token, now, t0),
+        AuthVerdict::Identify(_)
+    ));
+    assert_eq!(fetcher.calls(), 1);
+
+    // The provider drops the key, and the cached set is past its TTL: judged afresh, the token
+    // would be refetched against and rejected.
+    fetcher.set_body(TestKey::generate("another-kid").jwks());
+    match m.verify(&token, now + 299, t0 + Duration::from_secs(3601)) {
+        AuthVerdict::Identify(p) => assert_eq!(p.id, "oidc:object-guid"),
+        other => panic!("expected the cached identity, got {other:?}"),
+    }
+    assert_eq!(fetcher.calls(), 1, "answered from the cache: no fetch");
+
+    assert!(matches!(
+        m.verify(&token, now + 300, t0 + Duration::from_secs(3602)),
+        AuthVerdict::Reject
+    ));
+    assert_eq!(
+        fetcher.calls(),
+        2,
+        "past its TTL the module judges it again"
+    );
+
+    // A REJECT is never cached: the same token is judged again (and rejected again).
+    assert!(matches!(
+        m.verify(&token, now + 301, t0 + Duration::from_secs(3603)),
+        AuthVerdict::Reject
+    ));
 }
 
 #[test]

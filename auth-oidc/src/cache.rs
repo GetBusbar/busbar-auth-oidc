@@ -10,9 +10,15 @@
 //! The cache never blocks and never dials: its fetch is the caller's [`Fetch`], which answers
 //! PENDING while the caller's own exchange is in flight. A cold key id pends `verify`; ONE caller
 //! claims the fetch (the [`Flight`]) and its op re-enters on its exchange's wake; every other caller
-//! with nothing to serve answers [`Step::Wait`] and asks again shortly, taking the winner's keys once
-//! they land. A caller that already holds a usable key set never waits on another's fetch: it serves
-//! from what it has while the winner refreshes. The cache's lock is held for the microseconds it
+//! with nothing to serve answers [`Step::Wait`], is noted as a waiter, and is WOKEN when the fetch
+//! settles ([`Fetch::wake`]), taking the winner's keys. A caller that already holds a usable key set
+//! never waits on another's fetch: it serves from what it has while the winner refreshes.
+//!
+//! ## Refresh ahead of the TTL
+//!
+//! `tick` refreshes the set before it goes stale ([`JwksCache::refresh_ahead`]), on the instance's
+//! driver ticket, so no request is the one that waits on the TTL refresh; the request path keeps
+//! its own refresh for a set the tick has not reached. The cache's lock is held for the microseconds it
 //! takes to clone an `Arc` or write one back — never across a fetch, never across a signature
 //! verification (`f` runs on a snapshot with nothing held).
 //!
@@ -27,6 +33,7 @@
 use crate::fetch::{Doc, Fetch};
 use crate::flight::{Flight, Step};
 use crate::jwks::{Jwk, JwkSet};
+use busbar_contract::abi::mechanism::ticket::Ticket;
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
 use std::time::{Duration, Instant};
@@ -68,6 +75,8 @@ struct Inner {
     last_attempt: Option<Instant>,
     /// THE SINGLE FLIGHT: the fetch in progress, and where its caller claimed it.
     flight: Option<(Flight, Point)>,
+    /// The ops waiting on the flight ([`Step::Wait`]): woken when it settles.
+    waiters: Vec<Ticket>,
 }
 
 impl JwksCache {
@@ -83,6 +92,7 @@ impl JwksCache {
                 fetched_at: None,
                 last_attempt: None,
                 flight: None,
+                waiters: Vec::new(),
             }),
         }
     }
@@ -182,6 +192,44 @@ impl JwksCache {
         Step::Ready(Ok(()))
     }
 
+    /// THE TICK'S REFRESH AHEAD OF THE TTL: when the set is due (none yet, or within `lead` of its
+    /// TTL), fetch it on this caller's ticket, rate-limited like every trigger, never waiting on
+    /// another caller's fetch. PENDING while this caller's fetch is in flight (re-enter with the
+    /// same `io` state); READY otherwise, with the fetch's error when it failed with nothing to
+    /// keep.
+    pub fn refresh_ahead(
+        &self,
+        url: &str,
+        lead: Duration,
+        now: Instant,
+        io: &mut dyn Fetch,
+    ) -> Step<Result<(), String>> {
+        let mine = self.lock().flight.filter(|(fl, _)| fl.mine(io.caller()));
+        if let Some((flight, _)) = mine {
+            let fetched = match io.get(Doc::Jwks, url) {
+                Poll::Pending => return Step::Pending,
+                Poll::Ready(r) => r,
+            };
+            return Step::Ready(self.settle(io, url, flight.at, fetched).map(|_| ()));
+        }
+        if !self.due(now, lead) {
+            return Step::Ready(Ok(()));
+        }
+        match self.refresh(io, url, now, false, Point::Refresh) {
+            Step::Pending => Step::Pending,
+            Step::Ready(r) => Step::Ready(r.map(|_| ())),
+            Step::Wait => Step::Ready(Ok(())),
+        }
+    }
+
+    /// Whether the set is due for its refresh at `now`: none fetched, or `lead` or less short of
+    /// its TTL.
+    fn due(&self, now: Instant, lead: Duration) -> bool {
+        self.lock()
+            .fetched_at
+            .is_none_or(|t| now.saturating_duration_since(t) >= self.ttl.saturating_sub(lead))
+    }
+
     /// The lookup after the bounded rotation refetch: a match, or the unknown-`kid` error.
     fn after_rotation<T>(
         keys: Option<&JwkSet>,
@@ -268,8 +316,11 @@ impl JwksCache {
                 if !desperate {
                     return Step::Ready(self.serve_within_ceiling(&inner, url, now));
                 }
-                if me.is_none() {
+                let Some(me) = me else {
                     return Step::Ready(Err(io.cannot_pend(url)));
+                };
+                if !inner.waiters.contains(&me) {
+                    inner.waiters.push(me);
                 }
                 return Step::Wait;
             }
@@ -299,7 +350,7 @@ impl JwksCache {
     /// (a transient provider blip must not blow away a working key set) — UNLESS those are already
     /// past the absolute staleness ceiling, in which case a days-long outage must not keep
     /// validating signatures against keys the provider may have rotated out specifically because
-    /// they were compromised. Ends the caller's flight.
+    /// they were compromised. Ends the caller's flight and wakes every op waiting on it.
     fn settle(
         &self,
         io: &dyn Fetch,
@@ -312,7 +363,9 @@ impl JwksCache {
         if inner.flight.is_some_and(|(fl, _)| fl.mine(io.caller())) {
             inner.flight = None;
         }
-        match fetched {
+        let waiters = std::mem::take(&mut inner.waiters);
+        let mut kept_through: Option<String> = None;
+        let settled = match fetched {
             // A late answer to a flight another caller has since taken over never replaces keys
             // fetched after it was claimed.
             Ok(set) if inner.fetched_at.is_none_or(|t| t <= at) => {
@@ -323,26 +376,34 @@ impl JwksCache {
             Ok(_) => Ok(inner.keys.clone()),
             Err(e) => {
                 let too_stale = self.past_ceiling(&inner, at);
-                let previous = inner.keys.clone();
-                drop(inner);
-                match previous {
+                match inner.keys.clone() {
                     Some(keys) if !too_stale => {
-                        // The fallback hides the failure from every caller, so it is logged here:
-                        // otherwise an IdP serving 5xx, a TLS failure or an empty key set leaves no
-                        // trace until a rotated-key token is rejected as "unknown kid". The attempt
-                        // window rate-limits this. The error names the URL and the cause only.
-                        tracing::warn!(
-                            module = "oidc",
-                            url = %url,
-                            error = %e,
-                            "JWKS refresh failed; serving the previous key set"
-                        );
+                        kept_through = Some(e);
                         Ok(Some(keys))
                     }
                     _ => Err(e),
                 }
             }
+        };
+        drop(inner);
+        if let Some(e) = kept_through {
+            // The fallback hides the failure from every caller, so it is logged here: otherwise an
+            // IdP serving 5xx, a TLS failure or an empty key set leaves no trace until a
+            // rotated-key token is rejected as "unknown kid". The attempt window rate-limits this.
+            // The error names the URL and the cause only.
+            tracing::warn!(
+                module = "oidc",
+                url = %url,
+                error = %e,
+                "JWKS refresh failed; serving the previous key set"
+            );
         }
+        // The waiters re-enter on this wake, after the cache is settled: the keys are in, or the
+        // fetch failed and they answer as a failed fetch leaves the cache.
+        if !waiters.is_empty() {
+            io.wake(&waiters);
+        }
+        settled
     }
 
     /// Whether a fetch ATTEMPT is allowed now. Anchored on the last attempt (not the last success),

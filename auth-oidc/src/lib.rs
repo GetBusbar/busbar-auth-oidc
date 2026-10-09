@@ -48,6 +48,7 @@ pub mod fetch;
 pub mod jwks;
 pub mod jwt;
 mod open;
+pub mod verdicts;
 
 pub use cache::JwksCache;
 pub use discovery::Discovery;
@@ -64,10 +65,11 @@ const DEFAULT_TTL_SECS: u64 = 3600;
 /// Small clock-skew tolerance applied to `exp`/`nbf` (seconds) — standard practice so a few seconds of
 /// clock drift between busbar and the IdP does not spuriously reject a just-issued / near-expiry token.
 const CLOCK_SKEW_SECS: i64 = 60;
-/// Ceiling on the credential-cache TTL this module suggests via `Principal::ttl_secs`. Mirrors the
-/// engine's own `DEFAULT_IDENTIFY_TTL_SECS` (`auth_cache.rs`) — deliberately NOT the engine's higher
+/// Ceiling on the credential-cache TTL this module suggests via `Principal::ttl_secs`, the TTL its
+/// own verdict cache ([`verdicts`]) holds an identity for. Mirrors 1.5.5's engine
+/// `DEFAULT_IDENTIFY_TTL_SECS` (`auth_cache.rs`) — deliberately NOT its higher
 /// `MAX_IDENTIFY_TTL_SECS` (3600s), which exists to bound a module that gives no opinion at all. This
-/// value must only ever SHORTEN that engine default, never lengthen it: a token derives its TTL from
+/// value must only ever SHORTEN that default, never lengthen it: a token derives its TTL from
 /// its own remaining `exp`, but a standard access token's `exp` is often itself ~3600s out, and
 /// suggesting that as the cache TTL would take the stale-revocation window from "5 minutes today" to
 /// "up to an hour" — trading a small over-cache bug for a much larger one. `min`-ing against this
@@ -415,6 +417,9 @@ pub struct OidcModule {
     login_verifier: OidcVerifier,
     jwks: JwksCache,
     discovery: Discovery,
+    /// The identities this module verified for bearer credentials, held for their TTL (1.5.5's
+    /// engine credential cache, now the plugin's: [`verdicts`]).
+    verdicts: verdicts::VerdictCache,
     /// The config, retained so the browser-login path can read the client-id, scopes, and the
     /// authorize/token endpoints, and the JWKS url when it is configured.
     cfg: OidcConfig,
@@ -437,8 +442,34 @@ impl OidcModule {
                 Duration::from_secs(cfg.jwks_ttl_secs),
             ),
             discovery: Discovery::new(Duration::from_secs(cfg.jwks_min_refetch_secs)),
+            verdicts: verdicts::VerdictCache::default(),
             cfg: cfg.clone(),
         }
+    }
+
+    /// Drop every cached verdict (`refresh`, the admin cache flush): how many there were.
+    pub fn flush_verdicts(&self) -> usize {
+        self.verdicts.flush()
+    }
+
+    /// How often `tick` asks to run: the JWKS refetch bound (`jwks_min_refetch_secs`, 1.5.5's 60 s),
+    /// at least one second.
+    pub fn tick_period(&self) -> Duration {
+        Duration::from_secs(self.cfg.jwks_min_refetch_secs.max(1))
+    }
+
+    /// THE TICK (THE DESIGN, auth: "`tick` refreshes ahead of the TTL, with 1.5.5's timings"): the
+    /// key set fetched again once it is within one tick period of its TTL (`jwks_ttl_secs`, 1.5.5's
+    /// 3600 s), on the caller's ticket, rate-limited by `jwks_min_refetch_secs` like every fetch, so
+    /// the request that finds the set stale is not the one that waits on its refresh. PENDING while
+    /// this caller's fetch is in flight (re-enter with the same `io` state); WAIT while another
+    /// caller's discovery is.
+    ///
+    /// # Errors
+    /// The JWKS url could not be discovered, or the fetch failed with no key set to keep.
+    pub fn refresh_ahead(&self, now: Instant, io: &mut dyn Fetch) -> Step<Result<(), String>> {
+        let url = step_ok!(self.jwks_url(now, io));
+        self.jwks.refresh_ahead(&url, self.tick_period(), now, io)
     }
 
     /// Whether the settings name an operator CA (`ca_cert_pem`, non-empty): the module's requests
@@ -570,7 +601,9 @@ impl OidcModule {
     }
 
     /// The full verification of one presented bearer credential → an [`AuthVerdict`]: none
-    /// presented, or one that is not a JWT, is not ours (`Pass`).
+    /// presented, or one that is not a JWT, is not ours (`Pass`). An identity is cached for its TTL
+    /// and answered from the cache until it expires or a `refresh` drops it; a REJECT or a PASS is
+    /// never cached.
     ///
     /// # Errors
     /// The JWKS url could not be discovered.
@@ -581,10 +614,20 @@ impl OidcModule {
         now_mono: Instant,
         io: &mut dyn Fetch,
     ) -> Step<Result<AuthVerdict, String>> {
-        match token {
-            Some(token) => self.verify_with(&self.verifier, token, now_unix, now_mono, io),
-            None => Step::Ready(Ok(AuthVerdict::Pass)),
+        let Some(token) = token else {
+            return Step::Ready(Ok(AuthVerdict::Pass));
+        };
+        // 1.5.5's credential cache: a bearer this module identified within its TTL is answered
+        // from the cache, with no decode, parse or signature check and no request.
+        if let Some(principal) = self.verdicts.get(token, now_unix) {
+            return Step::Ready(Ok(AuthVerdict::Identify(principal)));
         }
+        let generation = self.verdicts.generation();
+        let verdict = step!(self.verify_with(&self.verifier, token, now_unix, now_mono, io));
+        if let Ok(AuthVerdict::Identify(principal)) = &verdict {
+            self.verdicts.put(token, principal, now_unix, generation);
+        }
+        Step::Ready(verdict)
     }
 
     /// [`Self::verify`] against an explicit claim `verifier`: the bearer path passes the
