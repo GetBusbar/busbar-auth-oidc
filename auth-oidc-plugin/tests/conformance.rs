@@ -54,7 +54,7 @@ use std::time::Duration;
 
 use busbar_contract::abi::auth::{slot, IdentifyOut, IDENTITY_BUF_BYTES, IDENTITY_GROUPS};
 use busbar_contract::abi::host::conn::connector::{
-    DIRECTION_OUTBOUND, EGRESS_LOOPBACK_ALLOWED, EGRESS_OPEN_WEB,
+    DIRECTION_OUTBOUND, EGRESS_OPERATOR_INFRASTRUCTURE,
 };
 use busbar_contract::abi::mechanism::call::{Outcome, Span};
 use busbar_contract::abi::mechanism::rendering;
@@ -354,8 +354,8 @@ fn the_linked_and_the_dropped_in_oidc_module_are_one_module() {
         "an identity token minted for another login's nonce fails the security check: {text}"
     );
 
-    // THE NEEDS, as the loader declared them: six outbound https needs (discovery and the JWKS
-    // open-web, the token exchange loopback-allowed: an auth mint endpoint), the three
+    // THE NEEDS, as the loader declared them: six outbound https needs (every one
+    // operator-infrastructure, ARCHITECT ruling 2026-10-09), the three
     // trusting `ca_cert_pem` then their public-roots twins; discovery pinned to the issuer
     // setting's value. With `ca_cert_pem` set every one is carried.
     let anchor = "\"settings.ca_cert_pem\"";
@@ -378,11 +378,7 @@ fn the_linked_and_the_dropped_in_oidc_module_are_one_module() {
         (5, "\"\"", "\"\"", "None".to_string()),
     ] {
         let trusted = trust_from == anchor;
-        let class = if need % 3 == 2 {
-            EGRESS_LOOPBACK_ALLOWED
-        } else {
-            EGRESS_OPEN_WEB
-        };
+        let class = EGRESS_OPERATOR_INFRASTRUCTURE;
         let want = format!(
             "need {need} direction={DIRECTION_OUTBOUND} class={class} transport=http \
              target_from={target_from} trust_from={trust_from} timeout_ms=10000 \
@@ -686,8 +682,8 @@ fn red_an_undeclared_need_or_a_foreign_target_is_caught() {
     .is_empty());
 }
 
-/// RED: the rendered Statement declares exactly the six needs — outbound, `http`, discovery and the
-/// JWKS open-web and the token exchange loopback-allowed (an auth mint endpoint, ruling A4), three
+/// RED: the rendered Statement declares exactly the six needs — outbound, `http`, every one
+/// operator-infrastructure (ARCHITECT ruling 2026-10-09: 1.5.5 took a private-host http IdP), three
 /// trusting `ca_cert_pem` then their public-roots twins, discovery pinned to `issuer` — and both
 /// doors state the same rendering.
 #[test]
@@ -708,10 +704,10 @@ fn red_the_statement_declares_six_outbound_http_needs_in_their_classes() {
             )
         })
         .collect();
-    let need = |class, target_from, trust_from| {
+    let need = |target_from, trust_from| {
         (
             DIRECTION_OUTBOUND,
-            class,
+            EGRESS_OPERATOR_INFRASTRUCTURE,
             "http",
             "",
             target_from,
@@ -722,12 +718,12 @@ fn red_the_statement_declares_six_outbound_http_needs_in_their_classes() {
     assert_eq!(
         needs,
         vec![
-            need(EGRESS_OPEN_WEB, "settings.issuer", anchor),
-            need(EGRESS_OPEN_WEB, "", anchor),
-            need(EGRESS_LOOPBACK_ALLOWED, "", anchor),
-            need(EGRESS_OPEN_WEB, "settings.issuer", ""),
-            need(EGRESS_OPEN_WEB, "", ""),
-            need(EGRESS_LOOPBACK_ALLOWED, "", ""),
+            need("settings.issuer", anchor),
+            need("", anchor),
+            need("", anchor),
+            need("settings.issuer", ""),
+            need("", ""),
+            need("", ""),
         ],
         "{read:?}"
     );
