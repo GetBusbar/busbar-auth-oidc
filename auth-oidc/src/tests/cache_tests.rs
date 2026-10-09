@@ -104,6 +104,103 @@ fn a_cold_kid_pends_one_fetch_and_every_waiter_takes_its_keys() {
     assert_eq!(idp.calls(), 1, "the waiters fetched nothing");
 }
 
+/// THE WAKE (THE DESIGN, auth: "one `exchange()` fetches, every waiter wakes"): the fetch that
+/// lands wakes every op that waited on it, once each, and only after the keys are in; the claimer
+/// itself is not woken by its own settle. A failed fetch wakes them too.
+#[test]
+fn the_fetch_that_lands_wakes_every_waiter_once() {
+    let c = JwksCache::new(Duration::from_secs(60), Duration::from_secs(3600));
+    let idp = Idp::new(jwks("k1"));
+    let t0 = Instant::now();
+    let (mut a, mut b, mut d) = (
+        idp.pending(ticket(1)),
+        idp.pending(ticket(2)),
+        idp.pending(ticket(3)),
+    );
+    let f = |_: &Jwk| Ok::<_, String>("verified");
+    assert_eq!(c.with_key(URL, "k1", t0, &mut a, f), Step::Pending);
+    assert_eq!(c.with_key(URL, "k1", t0, &mut b, f), Step::Wait);
+    assert_eq!(c.with_key(URL, "k1", t0, &mut d, f), Step::Wait);
+    // A waiter re-entering before the fetch lands waits again: it is noted once.
+    assert_eq!(c.with_key(URL, "k1", t0, &mut b, f), Step::Wait);
+    assert!(
+        idp.woken().is_empty(),
+        "nothing is woken before the fetch lands"
+    );
+
+    assert_eq!(
+        c.with_key(URL, "k1", t0, &mut a, f),
+        Step::Ready(Ok("verified"))
+    );
+    assert_eq!(idp.woken(), vec![ticket(2), ticket(3)]);
+    // Woken, each takes the keys at once.
+    assert_eq!(
+        c.with_key(URL, "k1", t0, &mut b, f),
+        Step::Ready(Ok("verified"))
+    );
+    assert_eq!(
+        c.with_key(URL, "k1", t0, &mut d, f),
+        Step::Ready(Ok("verified"))
+    );
+    assert_eq!(idp.woken().len(), 2, "no second wake");
+
+    // A failed fetch wakes its waiter as well: it re-enters and fails closed.
+    let c = JwksCache::new(Duration::from_secs(60), Duration::from_secs(3600));
+    let down = Idp::answering(Err("connection refused".into()));
+    let (mut a, mut b) = (down.pending(ticket(1)), down.pending(ticket(2)));
+    assert_eq!(c.with_key(URL, "k1", t0, &mut a, f), Step::Pending);
+    assert_eq!(c.with_key(URL, "k1", t0, &mut b, f), Step::Wait);
+    assert!(matches!(
+        c.with_key(URL, "k1", t0, &mut a, f),
+        Step::Ready(Err(_))
+    ));
+    assert_eq!(down.woken(), vec![ticket(2)]);
+}
+
+/// THE TICK'S REFRESH AHEAD OF THE TTL: not before the set is within `lead` of its TTL, then one
+/// fetch on the tick's own ticket (pending, carried on by its re-entry), so the request that comes
+/// just past the old TTL finds a fresh set and fetches nothing.
+#[test]
+fn a_due_key_set_is_refreshed_ahead_of_its_ttl_and_not_before() {
+    let c = JwksCache::new(Duration::from_secs(60), Duration::from_secs(3600));
+    let idp = Idp::new(jwks("k1"));
+    let t0 = Instant::now();
+    let lead = Duration::from_secs(60);
+    serve(&c, &idp, t0).expect("prime");
+    assert_eq!(idp.calls(), 1);
+
+    let early = t0 + Duration::from_secs(3539);
+    assert_eq!(
+        c.refresh_ahead(URL, lead, early, &mut idp.at_once(Some(ME))),
+        Step::Ready(Ok(()))
+    );
+    assert_eq!(idp.calls(), 1, "not due yet");
+
+    let due = t0 + Duration::from_secs(3540);
+    let mut driver = idp.pending(ticket(9));
+    assert_eq!(c.refresh_ahead(URL, lead, due, &mut driver), Step::Pending);
+    assert_eq!(
+        c.refresh_ahead(URL, lead, due, &mut driver),
+        Step::Ready(Ok(()))
+    );
+    assert_eq!(idp.calls(), 2, "one fetch, ahead of the TTL");
+
+    serve(&c, &idp, t0 + Duration::from_secs(3601)).expect("fresh");
+    assert_eq!(
+        idp.calls(),
+        2,
+        "the request past the old TTL fetches nothing"
+    );
+
+    // A cold cache (the warm-up failed) is due at once.
+    let cold = JwksCache::new(Duration::from_secs(60), Duration::from_secs(3600));
+    assert_eq!(
+        cold.refresh_ahead(URL, lead, t0, &mut idp.at_once(Some(ME))),
+        Step::Ready(Ok(()))
+    );
+    assert_eq!(idp.calls(), 3);
+}
+
 /// THE LIVENESS RULE: a slow JWKS endpoint must not stall a caller that already has a usable key.
 /// While one caller's TTL refresh is in flight, another holding the (stale) cached set serves it at
 /// once — whether the rate limit turns it away or it finds the flight taken.

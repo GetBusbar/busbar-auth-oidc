@@ -18,8 +18,14 @@
 //! Every request goes out through the HOST's connector, over the needs the Statement declares
 //! ([`crate::fetch::NEEDS`]): the plugin never dials. An op whose request is in flight answers
 //! PENDING with its exchange parked on its ticket and is re-entered on the wake; an op waiting on
-//! ANOTHER op's discovery or JWKS fetch (single-flight) answers PENDING with a short timer
-//! (`wake_at` on the host's clock) and asks again.
+//! ANOTHER op's discovery or JWKS fetch (single-flight) answers PENDING and is woken when that fetch
+//! lands, a timer at the fetch's own bound (`wake_at` on the host's clock) its backstop.
+//!
+//! The lifecycle is the SDK's generic one over [`Oidc`], but for two slots: `tick` refreshes the
+//! key set ahead of its TTL on the instance's driver ticket ([`Tick`]), and `drive` carries that
+//! fetch on when its wake comes ([`Drive`]). `refresh` drops the module's verdict cache and reports
+//! how many entries it held under [`METRIC_CACHE_FLUSHED`] (the admin cache flush's
+//! `{"flushed": N}`).
 //!
 //! A linked build registers [`door`]; the dropped-in `cdylib` (`busbar-auth-oidc-plugin`) exports
 //! the same door as its one symbol.
@@ -35,21 +41,25 @@ use busbar_contract::abi::auth::{
     IdentifyOut, IdentityBuf, OpenOutboundIn, OpenOutboundOut, OutboundReadyIn, OutboundReadyOut,
     VerifyIn, BEGIN_AUTHORIZE, CANCEL_ABANDONED, CAP_INBOUND, CAP_LOGIN, DECISION_CONTINUE,
     DECISION_STOP, FACT_CACHEABLE, IDENTITY_HAS_TTL, LOGIN_BAD_CREDENTIAL, LOGIN_IDENTITY,
-    LOGIN_KIND_REDIRECT, LOGIN_OUTAGE, LOGIN_SECURITY_CHECK_FAILED, SPAN_ABSENT, VERDICT_IDENTITY,
-    VERDICT_PASS, VERDICT_REJECT,
+    LOGIN_KIND_REDIRECT, LOGIN_OUTAGE, LOGIN_SECURITY_CHECK_FAILED, METRIC_CACHE_FLUSHED,
+    SPAN_ABSENT, VERDICT_IDENTITY, VERDICT_PASS, VERDICT_REJECT,
 };
-use busbar_contract::abi::mechanism::call::{AbiStr, Blob, Outcome, Span, BLOB_ABSENT};
-use busbar_contract::abi::mechanism::door::{Rewrite, Statement, REWRITE_ALIAS};
+use busbar_contract::abi::mechanism::call::{AbiStr, Blob, OutHead, Outcome, Span, BLOB_ABSENT};
+use busbar_contract::abi::mechanism::door::{
+    MetricFamily, Rewrite, Statement, FAMILY_COUNTER, REWRITE_ALIAS,
+};
+use busbar_contract::abi::mechanism::lifecycle::{DriveIn, TickIn, TickOut};
 use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::sdk::auth_door::{verify_tail, with_tail};
 use busbar_contract::abi::sdk::conn::{ConnFailure, Host};
 use busbar_contract::abi::sdk::door::{abi_str, statement, AbiIn, AbiOut};
-use busbar_contract::abi::sdk::life::{Held, Life, Refreshed, Refusal};
+use busbar_contract::abi::sdk::life::{Counted, Held, Life, Refreshed, Refusal};
 use busbar_contract::abi::sdk::{Instance, Lent, Out, Safe, SafeSlot};
 use busbar_contract::auth::{AuthVerdict, BeginLogin, LoginHttpResponse, LoginOutcome, Principal};
 use zeroize::Zeroizing;
 
 use crate::fetch::{Fetch, HostIo, IoState, NEEDS};
+use crate::flight::FLIGHT_MAX;
 use crate::open::{config, module};
 use crate::{now_unix, OidcModule, Step};
 
@@ -79,9 +89,33 @@ const REWRITES: &[Rewrite] = &[Rewrite {
     },
 }];
 
+const ABSENT_STR: AbiStr = AbiStr {
+    ptr: std::ptr::null(),
+    len: 0,
+};
+
+/// The metric families `refresh`'s envelope indexes into: the verdict cache's flush count
+/// (`abi::auth`: "an auth plugin that caches verdicts declares a counter family of this name (no
+/// labels) ... the host sums it ... into the admin cache flush's `{"flushed": N}`").
+const FAMILIES: &[MetricFamily] = &[MetricFamily {
+    name: abi_str(METRIC_CACHE_FLUSHED),
+    help: abi_str("inbound verdict cache entries dropped by refresh"),
+    unit: ABSENT_STR,
+    label_keys: std::ptr::null(),
+    label_keys_len: 0,
+    kind: FAMILY_COUNTER,
+    _reserved: [0; 7],
+}];
+
+/// The index of the flush-count family in [`FAMILIES`].
+pub const CACHE_FAMILY: u32 = 0;
+
 /// This plugin's Statement: its name and alias, its version, the most calls one instance holds in
-/// flight, its one secret reference, its three outbound needs and its auth tail.
+/// flight, its one secret reference, its six outbound needs, its one metric family and its auth
+/// tail.
 pub const STATEMENT: Statement = Statement {
+    families: FAMILIES.as_ptr(),
+    families_len: FAMILIES.len(),
     secret_refs: SECRET_REFS.as_ptr(),
     secret_refs_len: SECRET_REFS.len(),
     rewrites: REWRITES.as_ptr(),
@@ -94,9 +128,16 @@ pub const STATEMENT: Statement = Statement {
 /// The most short answers kept for their re-call at once.
 const REACHED_MAX: usize = 1024;
 
-/// How long an op waiting on another op's fetch waits before it asks again, nanoseconds on the
-/// host's monotonic clock.
-const WAIT_NS: u64 = 25_000_000;
+/// The BACKSTOP of an op waiting on another op's fetch, nanoseconds on the host's monotonic clock:
+/// it is woken when that fetch lands ([`Fetch::wake`]), and asks again after this long only if the
+/// fetch never settles — the fetch's own bound, after which its flight may be taken over.
+const WAIT_NS: u64 = FLIGHT_MAX.as_nanos() as u64;
+
+/// The client secret `secrets` lends: its first entry, an empty one being none (the host lends an
+/// empty entry for a provider with no `browser_login.client_secret`).
+fn lent_secret<'a>(secrets: &[&'a [u8]]) -> Option<&'a [u8]> {
+    secrets.first().copied().filter(|s| !s.is_empty())
+}
 
 /// One opened module: what `open` built from one settings blob and its lent secrets.
 struct Opened {
@@ -110,11 +151,9 @@ struct Opened {
 impl Opened {
     fn new(settings: &[u8], secrets: &[&[u8]]) -> Result<Self, Refusal> {
         let module = module(text(settings)?).map_err(Refusal::failed)?;
-        let secret = secrets
-            .first()
-            // An empty lent secret is none (a provider with no `browser_login.client_secret`):
-            // the token exchange then sends no secret field, as 1.5.5's core sent none.
-            .filter(|s| !s.is_empty())
+        // An empty lent secret is none (a provider with no `browser_login.client_secret`): the
+        // token exchange then sends no secret field, as 1.5.5's core sent none.
+        let secret = lent_secret(secrets)
             .map(|s| {
                 std::str::from_utf8(s)
                     .map(|s| Zeroizing::new(s.to_string()))
@@ -205,6 +244,10 @@ pub struct Oidc {
     reached: Mutex<HashMap<Ticket, Reached>>,
     /// A `ready` in flight: its requests' state, by its ticket, across PENDING.
     readying: Mutex<HashMap<Ticket, IoState>>,
+    /// The tick's key-set refresh in flight on the driver ticket: the module it refreshes and its
+    /// requests' state, carried on by `drive` (a `drive` is a fresh op, so the SDK parks nothing
+    /// across it).
+    driving: Mutex<Option<(Arc<Opened>, IoState)>>,
 }
 
 impl std::fmt::Debug for Oidc {
@@ -219,6 +262,31 @@ impl Oidc {
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    /// The tick's refresh ahead of the TTL on `opened`, over `host`'s connector on the driver
+    /// ticket `ticket`, from `state`: PENDING (parked for `drive`) while its fetch is in flight,
+    /// READY when it is done or nothing is due.
+    fn refresh_ahead(
+        &self,
+        host: Option<&Host>,
+        ticket: Ticket,
+        opened: Arc<Opened>,
+        state: IoState,
+    ) -> Outcome {
+        let mut io = HostIo::new(host, ticket, state, opened.module.anchored());
+        match opened.module.refresh_ahead(Instant::now(), &mut io) {
+            Step::Pending => {
+                let state = io.into_state();
+                *self.driving.lock().unwrap_or_else(PoisonError::into_inner) =
+                    Some((opened, state));
+                Outcome::Pending
+            }
+            // Done; or nothing to do this tick (another call's discovery is in flight); or the
+            // fetch failed with no key set to keep, as the request path's own refresh would have,
+            // and the next tick asks again.
+            Step::Ready(_) | Step::Wait => Outcome::Ready,
+        }
     }
 }
 
@@ -242,6 +310,7 @@ impl Life for Oidc {
             now: RwLock::new(Arc::new(Opened::new(settings, secrets)?)),
             reached: Mutex::default(),
             readying: Mutex::default(),
+            driving: Mutex::default(),
         })
     }
 
@@ -273,8 +342,10 @@ impl Life for Oidc {
     }
 
     /// The same settings and secret keep the opened module and its key cache (the admin cache
-    /// flush is one of these); new ones re-open it, a refusal keeping the running one. The plugin
-    /// holds no verdict cache, so it reports no flushed count.
+    /// flush is one of these; a secret lent empty is the same as none, as `open` reads it); new
+    /// ones re-open it, a refusal keeping the running one untouched. Either way the verdict cache
+    /// the running module held is dropped (`abi::auth`: an auth plugin drops its inbound cache on
+    /// every `refresh`) and its count reported under [`CACHE_FAMILY`].
     fn refresh(
         &self,
         settings: &[u8],
@@ -282,12 +353,22 @@ impl Life for Oidc {
         _generation: u64,
     ) -> Result<Refreshed, Refusal> {
         let now = self.now();
-        let same_secret = now.secret.as_deref().map(String::as_bytes) == secrets.first().copied();
-        if now.settings != settings || !same_secret {
-            let opened = Arc::new(Opened::new(settings, secrets)?);
+        let same_secret = now.secret.as_deref().map(String::as_bytes) == lent_secret(secrets);
+        let reopened = if now.settings == settings && same_secret {
+            None
+        } else {
+            Some(Arc::new(Opened::new(settings, secrets)?))
+        };
+        let flushed = now.module.flush_verdicts();
+        if let Some(opened) = reopened {
             *self.now.write().unwrap_or_else(PoisonError::into_inner) = opened;
         }
-        Ok(Refreshed::default())
+        Ok(Refreshed {
+            counted: Some(Counted {
+                family: CACHE_FAMILY,
+                value: flushed as f64,
+            }),
+        })
     }
 }
 
@@ -315,7 +396,8 @@ fn resume<'h>(instance: &Instance<'_, Held<Oidc>>, h: &'h Held<Oidc>) -> (HostIo
 }
 
 /// Answer PENDING with `parked` (the requests' state from `io`) on the op's ticket: on its own
-/// exchange's wake, or — `wait` — on a short timer while another op's fetch is in flight.
+/// exchange's wake, or — `wait` — on the wake of the fetch another op is making, with a backstop
+/// timer at that fetch's bound.
 fn pend<O: AbiOut>(
     instance: &Instance<'_, Held<Oidc>>,
     host: Option<&Host>,
@@ -608,6 +690,68 @@ impl SafeSlot for Complete {
     }
 }
 
+/// `tick` (THE DESIGN, auth: "`tick` refreshes ahead of the TTL, with 1.5.5's timings"): on the
+/// instance's driver ticket, the key set fetched again once it is within one tick period of its
+/// TTL ([`OidcModule::refresh_ahead`]); PENDING while that fetch is in flight, carried on by
+/// [`Drive`]. Asks for the next tick one period on (`jwks_min_refetch_secs`, 1.5.5's 60 s). A tick
+/// on no ticket may not pend, so it fetches nothing.
+#[derive(Debug)]
+pub struct Tick;
+impl SafeSlot for Tick {
+    type In = TickIn;
+    type Out = TickOut;
+    type State = Held<Oidc>;
+    fn call(
+        instance: Instance<'_, Held<Oidc>>,
+        input: Lent<'_, TickIn>,
+        mut out: Out<'_, TickOut>,
+    ) -> Outcome {
+        let Some(h) = instance.get() else {
+            out.set(|o| &o.next_tick_ns, 0);
+            return Outcome::Ready;
+        };
+        let oidc = h.life();
+        let opened = oidc.now();
+        let period = u64::try_from(opened.module.tick_period().as_nanos()).unwrap_or(u64::MAX);
+        out.set(|o| &o.next_tick_ns, input.now_ns.saturating_add(period));
+        let ticket = instance.ticket();
+        if ticket.is_none() {
+            return Outcome::Ready;
+        }
+        // A tick starts its driver ticket's cycle: whatever the last one left in flight is over.
+        *oidc.driving.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        oidc.refresh_ahead(h.host(), ticket, opened, IoState::default())
+    }
+}
+
+/// `drive`: the driver ticket was woken — the tick's key-set fetch goes on from where it parked.
+#[derive(Debug)]
+pub struct Drive;
+impl SafeSlot for Drive {
+    type In = DriveIn;
+    type Out = OutHead;
+    type State = Held<Oidc>;
+    fn call(
+        instance: Instance<'_, Held<Oidc>>,
+        _: Lent<'_, DriveIn>,
+        _: Out<'_, OutHead>,
+    ) -> Outcome {
+        let Some(h) = instance.get() else {
+            return Outcome::Fault;
+        };
+        let oidc = h.life();
+        let parked = oidc
+            .driving
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        match parked {
+            Some((opened, state)) => oidc.refresh_ahead(h.host(), instance.ticket(), opened, state),
+            None => Outcome::Ready,
+        }
+    }
+}
+
 /// An op the tail does not state (the outbound family): REFUSED, never called.
 #[derive(Debug)]
 pub struct NotServed<I, O>(PhantomData<(I, O)>);
@@ -622,14 +766,28 @@ impl<I: AbiIn, O: AbiOut> SafeSlot for NotServed<I, O> {
 
 mod table {
     use super::{
-        Begin, Complete, FieldsIn, FieldsOut, NotServed, Oidc, OpenOutboundIn, OpenOutboundOut,
-        OutboundReadyIn, OutboundReadyOut, Safe, Verify,
+        Begin, Complete, Drive, FieldsIn, FieldsOut, NotServed, Oidc, OpenOutboundIn,
+        OpenOutboundOut, OutboundReadyIn, OutboundReadyOut, Safe, Tick, Verify,
+    };
+    use busbar_contract::abi::sdk::life::{
+        Cancel, Close, Open, Ready, Refresh, Release, Retire, Validate,
     };
 
     busbar_contract::plugin_door! {
         ops: busbar_contract::abi::auth::Ops,
         statement: super::STATEMENT,
-        lifecycle: life(Oidc, ready),
+        lifecycle: {
+            validate: Safe<Validate<Oidc>>,
+            open: Safe<Open<Oidc>>,
+            refresh: Safe<Refresh<Oidc>>,
+            retire: Safe<Retire<Oidc>>,
+            tick: Safe<Tick>,
+            drive: Safe<Drive>,
+            cancel: Safe<Cancel<Oidc>>,
+            release: Safe<Release<Oidc>>,
+            close: Safe<Close<Oidc>>,
+        },
+        ready: Safe<Ready<Oidc>>,
         kind_ops: {
             verify: Safe<Verify>,
             begin_login: Safe<Begin>,
@@ -643,3 +801,7 @@ mod table {
 
 /// This plugin's door: the one a compiled-in build links and the dropped-in image exports.
 pub use table::door;
+
+#[cfg(test)]
+#[path = "tests/door_tests.rs"]
+mod tests;
