@@ -8,12 +8,15 @@
 //! JWKS, and the login's code-for-token POST. Each answers PENDING while it is in flight and is
 //! re-asked when the op re-enters on its wake (the replay rule, `abi::sdk::conn`).
 //!
-//! Discovery and the JWKS are `open-web` (public destinations over a secure connection only); the
-//! token exchange is an auth mint endpoint, `loopback-allowed` (https, or plaintext to loopback, as
-//! 1.5.5 validated it, the destination guard applying). Every need rides the `http` transport, its
-//! connections secured by the target's `https` scheme (the connector's TLS). The discovery need is pinned to the `issuer` setting's target
-//! (`target_from`); the JWKS and token endpoints may be discovered, so the module names them per
-//! request.
+//! Every need is `operator-infrastructure` (ARCHITECT ruling 2026-10-09; the class the oauth
+//! plugin's mint needs take): private and loopback destinations allowed, plaintext allowed by the
+//! class, cloud metadata refused, the destination guard applying. The module narrows the scheme to
+//! exactly what 1.5.5 accepted ([`plaintext_allowed`]): discovery and the JWKS https only (1.5.5's
+//! `https_only` fetcher); the token exchange https, or plaintext to a private or loopback host only
+//! (1.5.5 `auth/token.rs` `vet_hop_url`: a public host must use https). Every need rides the `http`
+//! transport, its connections secured by the target's `https` scheme (the connector's TLS). The
+//! discovery need is pinned to the `issuer` setting's target (`target_from`); the JWKS and token
+//! endpoints may be discovered, so the module names them per request.
 //!
 //! `ca_cert_pem` is OPTIONAL, as it was in 1.5.5 (an extra root on top of the public ones, never a
 //! replacement). The host's connector refuses a need whose `trust_from` resolves to nothing, so
@@ -31,13 +34,16 @@ use std::fmt::Display;
 use std::task::Poll;
 
 use busbar_contract::abi::host::conn::connector::{
-    Need, DIRECTION_OUTBOUND, EGRESS_LOOPBACK_ALLOWED, EGRESS_OPEN_WEB, KEEP_NAMED,
+    Need, DIRECTION_OUTBOUND, EGRESS_OPERATOR_INFRASTRUCTURE, KEEP_NAMED,
 };
 use busbar_contract::abi::mechanism::call::{AbiStr, Blob};
 use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::sdk::conn::{ConnFailure, Host};
 use busbar_contract::abi::sdk::door::abi_str;
 use busbar_contract::abi::sdk::exchange::{exchange, Exchange, ExchangeResponse, Request};
+use busbar_contract::abi::sdk::net::{
+    extract_normalized_host, host_is_private_or_loopback, scheme_is,
+};
 use busbar_contract::auth::{LoginHop, LoginHttpResponse};
 
 /// Upper bound on a JWKS / discovery document, and on a token endpoint's answer. A real JWKS is a
@@ -70,12 +76,19 @@ const ABSENT: AbiStr = AbiStr {
     len: 0,
 };
 
-/// One outbound need over the `http` transport (the scheme the http framer claims) in `egress_class`,
-/// trusting the root `trust_from` names beside the public roots (`ABSENT`: the public roots only).
-const fn need(egress_class: u32, target_from: AbiStr, trust_from: AbiStr) -> Need {
+/// The egress class of every need: `operator-infrastructure` (ARCHITECT ruling 2026-10-09). 1.5.5
+/// accepted a plaintext token endpoint on a PRIVATE host, not only on loopback (`auth/token.rs`
+/// `vet_hop_url`), which `open-web` (secure only) and `loopback-allowed` (plaintext to loopback
+/// only) would both refuse at the connector.
+pub const EGRESS_CLASS: u32 = EGRESS_OPERATOR_INFRASTRUCTURE;
+
+/// One outbound need over the `http` transport (the scheme the http framer claims) in
+/// [`EGRESS_CLASS`], trusting the root `trust_from` names beside the public roots (`ABSENT`: the
+/// public roots only).
+const fn need(target_from: AbiStr, trust_from: AbiStr) -> Need {
     Need {
         direction: DIRECTION_OUTBOUND,
-        egress_class,
+        egress_class: EGRESS_CLASS,
         transport: abi_str("http"),
         auth: ABSENT,
         target_from,
@@ -96,12 +109,12 @@ const fn need(egress_class: u32, target_from: AbiStr, trust_from: AbiStr) -> Nee
 /// setting's target), the JWKS and the token endpoint (named per request: either may be
 /// discovered).
 pub const NEEDS: &[Need] = &[
-    need(EGRESS_OPEN_WEB, abi_str(ISSUER_PATH), abi_str(CA_CERT_PATH)),
-    need(EGRESS_OPEN_WEB, ABSENT, abi_str(CA_CERT_PATH)),
-    need(EGRESS_LOOPBACK_ALLOWED, ABSENT, abi_str(CA_CERT_PATH)),
-    need(EGRESS_OPEN_WEB, abi_str(ISSUER_PATH), ABSENT),
-    need(EGRESS_OPEN_WEB, ABSENT, ABSENT),
-    need(EGRESS_LOOPBACK_ALLOWED, ABSENT, ABSENT),
+    need(abi_str(ISSUER_PATH), abi_str(CA_CERT_PATH)),
+    need(ABSENT, abi_str(CA_CERT_PATH)),
+    need(ABSENT, abi_str(CA_CERT_PATH)),
+    need(abi_str(ISSUER_PATH), ABSENT),
+    need(ABSENT, ABSENT),
+    need(ABSENT, ABSENT),
 ];
 
 /// The need index `need` (an anchored-set index) goes out on: itself for a module that trusts an
@@ -161,6 +174,16 @@ pub trait Fetch {
         hop: &LoginHop,
         secret: Option<&str>,
     ) -> Poll<Result<LoginHttpResponse, String>>;
+}
+
+/// Whether a request on `need` may go to `url` in plaintext, as 1.5.5 judged it: never for
+/// discovery or the JWKS (1.5.5's fetcher was `https_only`); for the token exchange only when the
+/// URL's host is private or loopback (1.5.5 `auth/token.rs` `vet_hop_url`: "https for public hosts;
+/// http only for loopback/private (a local/on-prem IdP)"), read by the same host reader 1.5.5 used.
+pub fn plaintext_allowed(need: u32, url: &str) -> bool {
+    need == NEED_TOKEN
+        && scheme_is(url, "http")
+        && extract_normalized_host(url).is_some_and(|h| host_is_private_or_loopback(&h))
 }
 
 /// A request to `url` that got no answer: 1.5.5's prefix, then why.
@@ -315,13 +338,11 @@ impl<'h> HostIo<'h> {
             Ok(u) => u,
             Err(e) => return Poll::Ready(Err(failed(url, e))),
         };
-        // HTTPS-ONLY for discovery and the JWKS (1.5.5's `https_only`): fetched over plaintext they
-        // could be MITM'd to serve attacker keys. The TOKEN exchange is an auth mint endpoint, in the
-        // loopback-allowed class: https, or plaintext to loopback exactly as 1.5.5's core-run hop
-        // allowed it — the connector holds a plaintext target to loopback, the destination guard
-        // applying (THE DESIGN, egress classes; ARCHITECT ruling A4).
-        let plaintext_ok = need == NEED_TOKEN && parsed.scheme().eq_ignore_ascii_case("http");
-        if parsed.scheme() != "https" && !plaintext_ok {
+        // THE SCHEME, as 1.5.5 judged it ([`plaintext_allowed`]): https, or (the token exchange
+        // only) plaintext to a private or loopback host. The operator-infrastructure class lets
+        // plaintext through to any address, so a public host's https is held HERE, before the host
+        // is asked and before the secret is in any request.
+        if parsed.scheme() != "https" && !plaintext_allowed(need, url) {
             return Poll::Ready(Err(failed(url, "URL scheme is not allowed")));
         }
         let Some(host) = self.host else {
