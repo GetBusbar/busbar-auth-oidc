@@ -564,14 +564,17 @@ impl OidcModule {
     /// [`OidcVerifier::validate_claims`] for iss/aud/exp/nbf) to produce a [`Principal`]. The `aud`
     /// checked is the OAuth `client_id`, not the bearer `audience` (OIDC Core 1.0 §3.1.3.7 step 3).
     /// A missing/malformed body, a missing `id_token`, or any signature/claim failure is a
-    /// fail-closed `Reject`.
+    /// fail-closed `Reject`. So is an `id_token` whose key set cannot be had — fetched, or its URL
+    /// discovered — as in 1.5.5 (v1.0.6 `identity_from_token_response`: a key set it could not
+    /// fetch was a `Reject`, which the host renders as the declined sign-in), with 1.5.5's warn
+    /// naming why.
     ///
     /// NOTE (committed ABI): OIDC `nonce` is minted by the CORE at begin and is NOT carried back on
     /// the callback, so nonce binding is the core's to enforce; this reuses the existing
     /// signature+claims path (iss/aud/exp) that the verify module already trusts.
     ///
     /// # Errors
-    /// The JWKS url could not be discovered.
+    /// None today: every failure is a `Reject`. The `Result` is the sans-IO step's shape.
     pub fn identity_from_token_response(
         &self,
         resp: &LoginHttpResponse,
@@ -589,8 +592,21 @@ impl OidcModule {
         let Some(id_token) = body.get("id_token").and_then(Value::as_str) else {
             return Step::Ready(Ok(LoginOutcome::Reject));
         };
-        let verdict =
-            step_ok!(self.verify_with(&self.login_verifier, id_token, now_unix, now_mono, io));
+        let verdict = match step!(self.verify_with(
+            &self.login_verifier,
+            id_token,
+            now_unix,
+            now_mono,
+            io
+        )) {
+            Ok(v) => v,
+            // The key set's URL could not be discovered: the key set cannot be had, which 1.5.5
+            // answered as it answered a key set it could not fetch — a declined login, logged.
+            Err(e) => {
+                tracing::warn!(module = "oidc", error = %e, "OIDC token signature verification failed");
+                AuthVerdict::Reject
+            }
+        };
         Step::Ready(Ok(match verdict {
             AuthVerdict::Identify(p) => LoginOutcome::Identify(p),
             // A non-JWT / bad-sig / bad-claim id_token in a login callback is a hard failure —

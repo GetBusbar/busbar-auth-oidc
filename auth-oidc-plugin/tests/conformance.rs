@@ -53,7 +53,8 @@ mod import_ban;
 use std::time::Duration;
 
 use busbar_contract::abi::auth::{
-    slot, IdentifyOut, IDENTITY_BUF_BYTES, IDENTITY_GROUPS, METRIC_CACHE_FLUSHED,
+    slot, IdentifyOut, IDENTITY_BUF_BYTES, IDENTITY_GROUPS, LOGIN_BAD_CREDENTIAL, LOGIN_OUTAGE,
+    METRIC_CACHE_FLUSHED,
 };
 use busbar_contract::abi::host::conn::connector::{
     DIRECTION_OUTBOUND, EGRESS_OPERATOR_INFRASTRUCTURE,
@@ -644,6 +645,35 @@ fn cold_verifies(staggered: bool) {
     );
     assert_eq!(idp.sent_to(DISCOVERY_PATH).len(), 1, "{seen}");
     assert_eq!(idp.sent_to("/keys").len(), 1, "{seen}");
+}
+
+/// THE LOGIN WHOSE KEY SET CANNOT BE HAD, through the real dispatcher (ARCHITECT ruling: 1.5.5's
+/// answer). The token endpoint answers an identity token, but the key set's URL is to be
+/// discovered and the issuer's discovery answers 503: the door answers `LOGIN_BAD_CREDENTIAL`
+/// (the host's 401 "Sign-in was declined", as 1.5.5 rendered a key set its plugin could not
+/// fetch), never `LOGIN_OUTAGE` (502, which 1.5.5 kept for a token hop that failed).
+#[test]
+fn a_login_whose_key_set_cannot_be_had_is_declined_not_an_outage() {
+    let _one = support::serial();
+    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let idp = Idp::new(&key);
+    idp.answer(DISCOVERY_PATH, 503, "{}");
+    let id_token = serde_json::json!({ "id_token": key.sign(&claims(AUDIENCE)) }).to_string();
+    idp.answer("/token", 200, &id_token);
+    let b = bind(&Arm::Linked, &idp);
+    let mut cfg: serde_json::Value = serde_json::from_str(&config(AUDIENCE)).unwrap();
+    cfg["token_endpoint"] = serde_json::json!(support::TOKEN_URL);
+    open(&b.plugin, &cfg.to_string(), Some(CLIENT_SECRET)).expect("opens");
+
+    let answer = b.complete("code-1", ("st", NONCE), REDIRECT, "the-verifier", None);
+    assert_eq!(answer.trim_end(), format!("verdict {LOGIN_BAD_CREDENTIAL}"));
+    assert_ne!(answer.trim_end(), format!("verdict {LOGIN_OUTAGE}"));
+    assert_eq!(idp.sent_to("/token").len(), 1, "the code was redeemed");
+    assert_eq!(
+        idp.sent_to(DISCOVERY_PATH).len(),
+        1,
+        "the key set's URL was asked for"
+    );
 }
 
 /// THE WAKE through the real dispatcher (THE DESIGN, auth: "every waiter wakes"): a verify that
