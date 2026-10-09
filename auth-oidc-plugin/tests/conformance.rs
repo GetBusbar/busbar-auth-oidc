@@ -52,7 +52,9 @@ mod import_ban;
 
 use std::time::Duration;
 
-use busbar_contract::abi::auth::{slot, IdentifyOut, IDENTITY_BUF_BYTES, IDENTITY_GROUPS};
+use busbar_contract::abi::auth::{
+    slot, IdentifyOut, IDENTITY_BUF_BYTES, IDENTITY_GROUPS, METRIC_CACHE_FLUSHED,
+};
 use busbar_contract::abi::host::conn::connector::{
     DIRECTION_OUTBOUND, EGRESS_OPERATOR_INFRASTRUCTURE,
 };
@@ -644,6 +646,130 @@ fn cold_verifies(staggered: bool) {
     assert_eq!(idp.sent_to("/keys").len(), 1, "{seen}");
 }
 
+/// THE WAKE through the real dispatcher (THE DESIGN, auth: "every waiter wakes"): a verify that
+/// waits on another verify's discovery and JWKS fetches is woken when each lands, arming its
+/// backstop timer once per wait, rather than polling a short timer for as long as the fetch takes.
+/// Each IdP reply pends 400 ms; a waiter polling every 25 ms reads the host clock dozens of times.
+#[test]
+fn a_waiter_is_woken_by_the_fetch_it_waits_on_not_a_polling_timer() {
+    let _one = support::serial();
+    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let token = key.sign(&claims(AUDIENCE));
+    let idp = Idp::new(&key);
+    idp.pend_for(Duration::from_millis(400));
+    let b = bind(&Arm::Linked, &idp);
+    open(&b.plugin, &config(AUDIENCE), None).expect("opens");
+    let reads = support::clock_reads();
+
+    let mut bufs: Vec<(Vec<u8>, Vec<Span>)> = (0..2)
+        .map(|_| {
+            (
+                vec![0_u8; IDENTITY_BUF_BYTES],
+                vec![z::<Span>(); IDENTITY_GROUPS as usize],
+            )
+        })
+        .collect();
+    let mut replies = Vec::new();
+    for (i, (bytes, groups)) in bufs.iter_mut().enumerate() {
+        if i == 1 {
+            let until = std::time::Instant::now() + Duration::from_secs(10);
+            while idp.pended() == 0 {
+                assert!(
+                    std::time::Instant::now() < until,
+                    "the first verify never pended"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+        let ticket = b.dispatcher.mint(0).expect("a ticket");
+        let mut out: IdentifyOut = z();
+        out.head = out_head();
+        let reply = b.dispatcher.submit(
+            &b.plugin,
+            ticket,
+            slot::VERIFY,
+            Frame::new(verify_in(Some(&token), identity_buf(bytes, groups)), out),
+            busbar_contract::abi::mechanism::call::DeadlineClass::Call,
+            now_ns() + 20_000_000_000,
+        );
+        replies.push((ticket, reply));
+    }
+    for (ticket, reply) in replies {
+        let done = reply
+            .wait(Duration::from_secs(30))
+            .expect("the op completes");
+        assert_eq!(done.outcome, Outcome::Ready, "{:?}", done.error);
+        assert_eq!(done.frame.expect("the frame").out.verdict, 1, "identified");
+        b.dispatcher.recycle(ticket);
+    }
+    assert_eq!(idp.sent_to(DISCOVERY_PATH).len(), 1);
+    assert_eq!(idp.sent_to("/keys").len(), 1);
+    let waited = support::clock_reads() - reads;
+    assert!(
+        (1..=4).contains(&waited),
+        "the waiter armed its backstop once per wait (discovery, JWKS), not a timer every 25 ms: \
+         {waited} clock reads"
+    );
+}
+
+/// THE TICK (THE DESIGN, auth: "`tick` refreshes ahead of the TTL, with 1.5.5's timings"), through
+/// the real dispatcher on the instance's driver ticket: a tick before the key set is due fetches
+/// nothing; once it is within one tick period (`jwks_min_refetch_secs`) of its TTL, the tick fetches
+/// it — pending, carried on by `drive` when the IdP's answer wakes the driver ticket — before the
+/// TTL runs out, so no request is the one that waits on the refresh. Each tick asks for the next one
+/// a period on.
+#[test]
+fn a_tick_refreshes_the_key_set_ahead_of_its_ttl() {
+    let _one = support::serial();
+    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let token = key.sign(&claims(AUDIENCE));
+    let idp = Idp::new(&key);
+    let b = bind(&Arm::Linked, &idp);
+    let mut cfg: serde_json::Value = serde_json::from_str(&config(AUDIENCE)).unwrap();
+    cfg["jwks_ttl_secs"] = serde_json::json!(3);
+    cfg["jwks_min_refetch_secs"] = serde_json::json!(1);
+    open(&b.plugin, &cfg.to_string(), None).expect("opens");
+    assert!(b.verify(Some(&token), None).starts_with("verdict 1 "));
+    assert_eq!(
+        idp.sent_to("/keys").len(),
+        1,
+        "the first verify fetches the key set"
+    );
+
+    let driver = b.dispatcher.driver(&b.plugin, 0).expect("a driver ticket");
+    let tick = |at: u64| {
+        let done = b
+            .dispatcher
+            .tick(&b.plugin, driver, at)
+            .wait(Duration::from_secs(30))
+            .expect("the tick completes");
+        assert!(
+            matches!(done.outcome, Outcome::Ready | Outcome::Pending),
+            "{:?}",
+            done.outcome
+        );
+        done.frame.expect("the frame").out.next_tick_ns
+    };
+    let at = now_ns();
+    assert_eq!(tick(at), at + 1_000_000_000, "the next tick, one period on");
+    assert_eq!(idp.sent_to("/keys").len(), 1, "not due: nothing fetched");
+
+    // Within one period of the 3 s TTL, before it runs out.
+    std::thread::sleep(Duration::from_millis(2100));
+    tick(now_ns());
+    let until = std::time::Instant::now() + Duration::from_secs(10);
+    while idp.sent_to("/keys").len() < 2 {
+        assert!(
+            std::time::Instant::now() < until,
+            "the tick never refreshed the key set: {:?}",
+            idp.sent()
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let refetch = idp.sent_to("/keys").pop().expect("the refresh");
+    assert_eq!(refetch.need, 1, "on the JWKS need (anchored set)");
+}
+
 /// RED: a request on an undeclared need index, or to a target its need does not name, is caught by
 /// the check the conformance transcript holds every establish to.
 #[test]
@@ -714,6 +840,12 @@ fn red_the_statement_declares_six_outbound_http_needs_in_their_classes() {
             trust_from,
         )
     };
+    let families: Vec<_> = read.families.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(
+        families,
+        [METRIC_CACHE_FLUSHED],
+        "the one family: the verdict cache's flush count"
+    );
     let anchor = "settings.ca_cert_pem";
     assert_eq!(
         needs,

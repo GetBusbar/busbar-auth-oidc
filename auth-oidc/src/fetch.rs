@@ -165,6 +165,13 @@ pub trait Fetch {
         failed(url, ConnFailure::NoTicket)
     }
 
+    /// WAKE the ops `waiters` names: they answered PENDING waiting on a fetch this caller made,
+    /// which has now landed (THE DESIGN, auth: "one `exchange()` fetches, every waiter wakes"). A
+    /// host-backed `Fetch` wakes each ticket through the host; the default wakes nothing.
+    fn wake(&self, waiters: &[Ticket]) {
+        let _ = waiters;
+    }
+
     /// THE LOGIN TOKEN EXCHANGE, made by the plugin itself (THE DESIGN 6.7: an IdP login holds its
     /// own client secret and makes its own token exchange): `hop` sent as a form ([`form`]). The
     /// answer is the status and the body, whatever the status; a request that got no answer is
@@ -381,6 +388,14 @@ impl Fetch for HostIo<'_> {
     fn cannot_pend(&mut self, url: &str) -> String {
         self.wanted = true;
         failed(url, ConnFailure::NoTicket)
+    }
+
+    fn wake(&self, waiters: &[Ticket]) {
+        if let Some(host) = self.host {
+            for t in waiters {
+                host.wake(*t);
+            }
+        }
     }
 
     fn get(&mut self, doc: Doc, url: &str) -> Poll<Result<String, String>> {

@@ -5,7 +5,8 @@
 //! token endpoint's reply, and a count of every request made. A [`Caller`] is one op's requests
 //! against it, as the door's exchange makes them: one that pends answers its FIRST ask of a request
 //! `Pending` and the same ask on the op's re-entry `Ready`, like an exchange whose first read
-//! pends. No network.
+//! pends. A fetch that lands wakes its waiters through the caller ([`Fetch::wake`]); the IdP
+//! records every ticket woken. No network.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
@@ -45,6 +46,7 @@ pub struct Idp {
     body: Mutex<Result<String, String>>,
     calls: AtomicUsize,
     reply: Mutex<Result<LoginHttpResponse, String>>,
+    woken: Mutex<Vec<Ticket>>,
 }
 
 impl Idp {
@@ -62,7 +64,13 @@ impl Idp {
                 status: 200,
                 body: "{}".to_string(),
             })),
+            woken: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Every ticket a landed fetch woke, in order.
+    pub fn woken(&self) -> Vec<Ticket> {
+        self.woken.lock().unwrap().clone()
     }
 
     /// Swap the served body in place — the provider rotating its JWKS underneath an
@@ -141,6 +149,10 @@ impl Fetch for Caller<'_> {
             return Poll::Pending;
         }
         Poll::Ready(self.idp.body.lock().unwrap().clone())
+    }
+
+    fn wake(&self, waiters: &[Ticket]) {
+        self.idp.woken.lock().unwrap().extend_from_slice(waiters);
     }
 
     fn post(&mut self, hop: &LoginHop, _: Option<&str>) -> Poll<Result<LoginHttpResponse, String>> {
