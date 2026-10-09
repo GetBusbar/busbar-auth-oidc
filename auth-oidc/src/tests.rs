@@ -1516,6 +1516,54 @@ fn identity_from_token_response_verifies_id_token() {
 /// the OAuth `client_id`, not the bearer `audience`. With `audience` "api://x" and `client_id`
 /// "cid", an id_token for "cid" identifies and one for "api://x" is refused; the bearer path still
 /// checks `audience`.
+/// A KEY SET THAT CANNOT BE HAD AT LOGIN is a declined login, as in 1.5.5 (ARCHITECT ruling: v1.0.6
+/// `identity_from_token_response` answered `Reject` for a key set it could not fetch; v1.5.5
+/// `auth/token.rs:543-549` rendered that 401 "Sign-in was declined", 502 being only for a token
+/// hop that failed). Both ways it cannot be had: the JWKS fetch fails, or (no `jwks_url`) the
+/// discovery naming it fails. Each logs 1.5.5's warn with the cause.
+#[test]
+fn a_key_set_that_cannot_be_had_at_login_is_a_declined_login_as_in_1_5_5() {
+    let key = TestKey::generate(KID);
+    let now = now_unix();
+    let response = LoginHttpResponse {
+        status: 200,
+        body: serde_json::json!({ "id_token": key.mint(&base_claims(now)) }).to_string(),
+    };
+    let mut discovered = cfg("groups");
+    discovered.jwks_url = None;
+    for (c, cause) in [
+        (cfg("groups"), "jwks unreachable"),
+        (discovered, "issuer unreachable"),
+    ] {
+        let m = OidcModule::new(&c);
+        let down = Idp::answering(Err(cause.to_string()));
+        let cap = busbar_contract::testkit::WarnCapture::default();
+        let outcome = tracing::subscriber::with_default(cap.clone(), || {
+            ready(m.identity_from_token_response(
+                &response,
+                now,
+                Instant::now(),
+                &mut down.at_once(Some(ME)),
+            ))
+        });
+        assert!(
+            matches!(outcome, Ok(LoginOutcome::Reject)),
+            "{cause}: a declined login, never an outage: {outcome:?}"
+        );
+        assert_eq!(
+            cap.count("OIDC token signature verification failed"),
+            1,
+            "{cause}: 1.5.5's warn: {:?}",
+            cap.messages()
+        );
+        assert!(
+            cap.contains(cause),
+            "{cause}: the warn names why: {:?}",
+            cap.messages()
+        );
+    }
+}
+
 #[test]
 fn login_id_token_audience_is_the_client_id_not_the_bearer_audience() {
     let key = TestKey::generate(KID);
