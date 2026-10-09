@@ -3,8 +3,8 @@
 
 //! THE ISSUER'S DISCOVERY DOCUMENT (`<issuer>/.well-known/openid-configuration`), fetched once, on
 //! the first op that needs it, sans-IO single-flight like the JWKS ([`crate::cache`]): the claimer's
-//! op pends on its exchange, a caller arriving meanwhile waits, and every later op reads the
-//! resolved document. It names the JWKS url when `jwks_url` is not configured, and whichever login
+//! op pends on its exchange, a caller arriving meanwhile waits and is woken when the document is
+//! resolved ([`Fetch::wake`]), and every later op reads the resolved document. It names the JWKS url when `jwks_url` is not configured, and whichever login
 //! endpoint is not. A failed fetch is remembered with its error for `jwks_min_refetch_secs`, so an
 //! unreachable issuer is asked again at the JWKS cache's own retry bound, never per request.
 //!
@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::task::Poll;
 use std::time::{Duration, Instant};
 
+use busbar_contract::abi::mechanism::ticket::Ticket;
 use serde_json::Value;
 
 use crate::fetch::{Doc, Fetch};
@@ -76,7 +77,8 @@ enum State {
 pub struct Discovery {
     /// How long a failure is answered before the issuer is asked again.
     retry: Duration,
-    state: Mutex<State>,
+    /// Where the document stands, and the ops waiting on its fetch (woken when it resolves).
+    state: Mutex<(State, Vec<Ticket>)>,
 }
 
 impl Discovery {
@@ -84,11 +86,11 @@ impl Discovery {
     pub fn new(retry: Duration) -> Self {
         Self {
             retry,
-            state: Mutex::new(State::Idle),
+            state: Mutex::new((State::Idle, Vec::new())),
         }
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, (State, Vec<Ticket>)> {
         self.state.lock().unwrap_or_else(|p| p.into_inner())
     }
 
@@ -103,15 +105,19 @@ impl Discovery {
         let url = discovery_url(cfg);
         let me = io.caller();
         {
-            let mut state = self.lock();
+            let mut guard = self.lock();
+            let (state, waiters) = &mut *guard;
             match &*state {
                 State::Done(doc) => return Step::Ready(Ok(Arc::clone(doc))),
                 State::Flight(fl) if fl.mine(me) => {}
                 State::Flight(fl) if fl.held_against(me, now) => {
-                    if me.is_none() {
+                    let Some(me) = me else {
                         return Step::Ready(
                             check_document(cfg, &url, Err(io.cannot_pend(&url))).map(Arc::new),
                         );
+                    };
+                    if !waiters.contains(&me) {
+                        waiters.push(me);
                     }
                     return Step::Wait;
                 }
@@ -133,7 +139,8 @@ impl Discovery {
             Poll::Ready(r) => r,
         };
         let checked = check_document(cfg, &url, fetched).map(Arc::new);
-        let mut state = self.lock();
+        let mut guard = self.lock();
+        let (state, waiters) = &mut *guard;
         // A late answer never undoes a document another caller has since resolved.
         if !matches!(&*state, State::Done(_)) {
             *state = match &checked {
@@ -143,6 +150,12 @@ impl Discovery {
                     at: now,
                 },
             };
+        }
+        let waiters = std::mem::take(waiters);
+        drop(guard);
+        // The waiters re-enter on this wake and read the document (or its failure).
+        if !waiters.is_empty() {
+            io.wake(&waiters);
         }
         Step::Ready(checked)
     }

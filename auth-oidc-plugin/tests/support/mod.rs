@@ -82,8 +82,18 @@ pub fn serial() -> std::sync::MutexGuard<'static, ()> {
 /// fetch sets its timer by, on the dispatcher's own monotonic clock); nothing else.
 pub struct Clock;
 
+/// How many times an op read the host's clock: once per PENDING answer that waits on another op's
+/// fetch (it arms its backstop timer by it).
+static CLOCK_READS: AtomicU32 = AtomicU32::new(0);
+
+/// The host clock reads so far (every test that binds holds [`serial`], so they are its own).
+pub fn clock_reads() -> u32 {
+    CLOCK_READS.load(Ordering::SeqCst)
+}
+
 impl HostServices for Clock {
     fn now(&self) -> Reading {
+        CLOCK_READS.fetch_add(1, Ordering::SeqCst);
         Reading {
             wall_ns: 0,
             mono_ns: now_ns(),

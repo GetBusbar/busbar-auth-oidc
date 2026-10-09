@@ -32,7 +32,13 @@ fn a_caller_arriving_during_the_fetch_waits_and_takes_the_claimer_s_document() {
     let (mut a, mut b) = (idp.pending(ticket(1)), idp.pending(ticket(2)));
     assert_eq!(d.document(&c, now, &mut a), Step::Pending);
     assert_eq!(d.document(&c, now, &mut b), Step::Wait);
+    assert!(idp.woken().is_empty());
     assert!(matches!(d.document(&c, now, &mut a), Step::Ready(Ok(_))));
+    assert_eq!(
+        idp.woken(),
+        vec![ticket(2)],
+        "the waiter is woken when it lands"
+    );
     assert!(matches!(d.document(&c, now, &mut b), Step::Ready(Ok(_))));
     assert_eq!(idp.calls(), 1, "one discovery fetch for two callers");
 }
