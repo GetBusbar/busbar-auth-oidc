@@ -117,6 +117,7 @@ fn manifest(kind: &str, statement: &[u8]) -> Manifest {
         host: None,
         declares: Default::default(),
         statement: Some(statement.iter().map(|b| format!("{b:02x}")).collect()),
+        former_names: Vec::new(),
     }
 }
 

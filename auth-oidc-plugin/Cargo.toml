@@ -21,6 +21,9 @@ busbar-contract = { workspace = true }
 busbar-auth-oidc = { path = "../auth-oidc" }
 
 [dev-dependencies]
+# The shared host-services test double (`busbar_contract::services::double`): the dev-only
+# `services-double` feature, on this edge alone; a test's host overrides only what it serves.
+busbar-contract = { workspace = true, features = ["services-double"] }
 # Dev-only, same pinned busbar rev as busbar-contract (one busbar source resolves). The linked +
 # dropped-in conformance test (tests/conformance.rs) signs, packs, scans and admits the built cdylib
 # and the linked door through the REAL loader's door validation and dispatcher; the end-to-end test
