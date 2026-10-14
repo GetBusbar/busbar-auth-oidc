@@ -152,7 +152,7 @@ dependencies = [
 [[package]]
 name = "busbar-contract"
 version = "1.6.0"
-source = "git+https://github.com/GetBusbar/busbar?rev=163843dd2c59cd5a1181bdeed078f75dc6bdef97#163843dd2c59cd5a1181bdeed078f75dc6bdef97"
+source = "git+https://www.github.com/GetBusbar/busbar?rev=163843dd2c59cd5a1181bdeed078f75dc6bdef97#163843dd2c59cd5a1181bdeed078f75dc6bdef97"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
