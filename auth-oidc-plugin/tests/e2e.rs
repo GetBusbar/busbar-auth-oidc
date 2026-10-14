@@ -148,15 +148,53 @@ fn busbar_root() -> std::path::PathBuf {
         .expect("BUSBAR_CHECKOUT names an existing busbar checkout")
 }
 
+/// THE FIRST-PARTY KEY THIS TEST SIGNS THE PLUGIN WITH (its ed25519 secret, 64 hex): the module's
+/// `http` need sits in the `operator-infrastructure` egress class, which the host grants to a
+/// FIRST-PARTY plugin only (`BUSBAR-1.6.0.md` §5), and no test holds the embedded release key's
+/// private half. So the pack tool signs with this key (`BUSBAR_SIGN_KEY`), and the child busbar, a
+/// `test-harness` build, takes its public half as its first-party key through the harness seam
+/// ([`HARNESS_FIRST_PARTY_KEY_ENV`], ARCHITECT ruling busbar #700), as busbar's own end-to-end
+/// battery admits a first-party plugin it signed.
+const HARNESS_SIGN_KEY: &str = "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a";
+
+/// The variable a `test-harness` busbar reads its first-party key from (busbar's
+/// `root::boot::HARNESS_FIRST_PARTY_KEY_ENV`).
+const HARNESS_FIRST_PARTY_KEY_ENV: &str = "BUSBAR_TEST_HARNESS_FIRST_PARTY_KEY";
+
+/// The public half of [`HARNESS_SIGN_KEY`], 64 hex: what the child trusts as first-party.
+fn harness_public_key() -> String {
+    let mut secret = [0_u8; 32];
+    for (i, b) in secret.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&HARNESS_SIGN_KEY[2 * i..2 * i + 2], 16).expect("hex");
+    }
+    busbar_plugin_loader::sign::SigningKey::from_bytes(&secret)
+        .verifying_key()
+        .as_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
 /// Build (once, cached by cargo) and return the real `busbar` and `busbar-plugin-pack` binaries from
-/// the sibling busbar checkout — never a fixture, the exact binaries a real release ships.
+/// the sibling busbar checkout — never a fixture, the exact binaries a real release ships. busbar is
+/// the `test-harness` build, the one that takes a test's first-party key
+/// ([`HARNESS_FIRST_PARTY_KEY_ENV`]); no release build reads it.
 fn build_real_binaries() -> (std::path::PathBuf, std::path::PathBuf) {
     let root = busbar_root();
     // Two invocations: in busbar 1.6.0 `busbar-plugin-pack` is a feature-gated bin of the
     // `busbar-plugin-loader` package (`--features pack`), not a package of its own, and building it
     // separately keeps the `pack` feature out of the `busbar` build.
     for args in [
-        &["build", "--release", "-p", "busbar", "--bin", "busbar"][..],
+        &[
+            "build",
+            "--release",
+            "-p",
+            "busbar",
+            "--features",
+            "test-harness",
+            "--bin",
+            "busbar",
+        ][..],
         &[
             "build",
             "--release",
@@ -188,8 +226,8 @@ fn build_real_binaries() -> (std::path::PathBuf, std::path::PathBuf) {
     )
 }
 
-/// Pack the built auth-oidc-plugin cdylib into a real signed-shape tarball via the real
-/// `busbar-plugin-pack` tool, `--allow-unsigned` exactly like CI's own unsigned-key fallback.
+/// Pack the built auth-oidc-plugin cdylib into a real SIGNED tarball via the real
+/// `busbar-plugin-pack` tool, under the test's first-party key ([`HARNESS_SIGN_KEY`]).
 fn pack_oidc_tarball(
     pack_bin: &std::path::Path,
     so_path: &std::path::Path,
@@ -218,8 +256,8 @@ fn pack_oidc_tarball(
             "Apache-2.0",
             "--out",
             out.to_str().unwrap(),
-            "--allow-unsigned",
         ])
+        .env("BUSBAR_SIGN_KEY", HARNESS_SIGN_KEY)
         .status()
         .expect("run busbar-plugin-pack");
     assert!(status.success(), "packing the plugin must succeed");
@@ -348,6 +386,7 @@ fn install_oidc_plugin_via_admin_api_and_authenticate() {
         .env("BUSBAR_ADMIN_TOKEN", ADMIN_TOKEN)
         .env("MOCK_KEY", "unused-mock-provider-key")
         .env("BUSBAR_STATE_FILE", "")
+        .env(HARNESS_FIRST_PARTY_KEY_ENV, harness_public_key())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::inherit())
         .spawn()
@@ -448,6 +487,7 @@ fn install_oidc_plugin_via_admin_api_and_authenticate() {
         .env("BUSBAR_ADMIN_TOKEN", ADMIN_TOKEN)
         .env("MOCK_KEY", "unused-mock-provider-key")
         .env("BUSBAR_STATE_FILE", "")
+        .env(HARNESS_FIRST_PARTY_KEY_ENV, harness_public_key())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::inherit())
         .spawn()
