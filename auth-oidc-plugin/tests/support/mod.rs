@@ -36,14 +36,13 @@ use busbar_contract::conn::{
     ConnError, ConnId, Conns, DeclaredConns, InstanceId, NeedId, OpenDesc, Piece, PieceKind,
 };
 use busbar_contract::ids::StreamId;
-use busbar_contract::services::{
-    Caller, HostServices, Later, NestAsk, Ran, Reading, RecordsList, Stored, UNSERVED,
-};
+use busbar_contract::services::Reading;
 use busbar_contract::transport::ConnFacts;
 use busbar_plugin_loader::dispatch::kinds::auth::Auth;
 use busbar_plugin_loader::dispatch::{
-    in_head, load_dropped, load_dropped_bytes, load_linked, now_ns, out_head, Bind, DispatchConfig,
-    Dispatcher, Done, Frame, InFrame, LinkedRow, LoadError, NoSink, OutFrame, Plugin, NO_BLOB,
+    in_head, load_dropped, load_dropped_bytes, load_linked, now_ns, out_head, Bind, ConnTable,
+    DispatchConfig, Dispatcher, Done, Frame, InFrame, LinkedRow, LoadError, NoSink, OutFrame,
+    Plugin, NO_BLOB,
 };
 
 mod issuer;
@@ -91,7 +90,7 @@ pub fn clock_reads() -> u32 {
     CLOCK_READS.load(Ordering::SeqCst)
 }
 
-impl HostServices for Clock {
+impl busbar_contract::services::double::ServicesDouble for Clock {
     fn now(&self) -> Reading {
         CLOCK_READS.fetch_add(1, Ordering::SeqCst);
         Reading {
@@ -99,60 +98,12 @@ impl HostServices for Clock {
             mono_ns: now_ns(),
         }
     }
-    fn dest_judge(&self, _: &str, _: u32, _: bool, _: Option<Later>) -> Ran {
-        Ran::Now(Stored::refused(UNSERVED))
-    }
-    fn records_get(&self, _: &Caller, _: &str, _: &[u8], _: Later) -> Ran {
-        Ran::Now(Stored::refused(UNSERVED))
-    }
-    fn records_list(&self, _: &Caller, _: RecordsList, _: Later) -> Ran {
-        Ran::Now(Stored::refused(UNSERVED))
-    }
-    fn records_claim(&self, _: &Caller, _: &str, _: &[u8], _: u64, _: Later) -> Ran {
-        Ran::Now(Stored::refused(UNSERVED))
-    }
-    fn sign(&self, _: &Caller, _: &[u8]) -> Stored {
-        Stored::refused(UNSERVED)
-    }
-    fn trust_sight(&self, _: &Caller, _: &str, _: &str, _: Later) -> Ran {
-        Ran::Now(Stored::refused(UNSERVED))
-    }
-    fn trust_due(&self, _: &Caller) -> Stored {
-        Stored::refused(UNSERVED)
-    }
-    fn trust_verify(&self, _: &Caller, _: &str, _: &[u8], _: &[u8]) -> Stored {
-        Stored::refused(UNSERVED)
-    }
-    fn entitlement_check(&self, _: &Caller, _: Option<u64>, _: &str) -> Stored {
-        Stored::refused(UNSERVED)
-    }
-    fn records_secret(&self, _: &str, _: &str, _: Later) -> Ran {
-        Ran::Now(Stored::refused(UNSERVED))
-    }
-    fn random_fill(&self, _: u64) -> Stored {
-        Stored::refused(UNSERVED)
-    }
-    fn unit_nest(&self, _: &Caller, _: Option<u64>, _: NestAsk, _: Later) -> Ran {
-        Ran::Now(Stored::refused(UNSERVED))
-    }
-    fn work_open(&self, _: &Caller, _: Option<u64>, _: &str, _: &[u8], _: Later) -> Ran {
-        Ran::Now(Stored::refused(UNSERVED))
-    }
-    fn work_find(&self, _: &Caller, _: Option<u64>, _: &[u8], _: Later) -> Ran {
-        Ran::Now(Stored::refused(UNSERVED))
-    }
-    fn work_settle(&self, _: &Caller, _: u64, _: &[u8], _: Later) -> Ran {
-        Ran::Now(Stored::refused(UNSERVED))
-    }
-    fn work_resume(&self, _: &Caller, _: Option<u64>, _: u64, _: Later) -> Ran {
-        Ran::Now(Stored::refused(UNSERVED))
-    }
 }
 
 // ── the IdP, as the host's connection table ──────────────────────────────────────────────────────
 
 /// The dispatcher's connection-table wake.
-type Wake = Arc<dyn Fn(u64) + Send + Sync>;
+type Wake = busbar_contract::conn::ConnWake;
 
 /// One request as the host's framer was handed it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -299,7 +250,9 @@ fn piece(kind: PieceKind, len: usize) -> Piece {
         status_code: None,
         status_namespace: None,
         retry_after_secs: None,
+        fault: None,
         reason: None,
+        declared_len: None,
     }
 }
 
@@ -348,7 +301,7 @@ impl Conns for Idp {
     }
     fn read(
         &self,
-        _: InstanceId,
+        caller: InstanceId,
         conn: ConnId,
         ticket: u64,
         buf: &mut [u8],
@@ -370,7 +323,7 @@ impl Conns for Idp {
                 let delay = *self.delay.lock().unwrap();
                 std::thread::spawn(move || {
                     std::thread::sleep(delay);
-                    wake(ticket);
+                    wake(caller, ticket);
                 });
                 Err(ConnError::Pending)
             }
@@ -510,7 +463,7 @@ pub fn bind_as<K: busbar_plugin_loader::dispatch::Kind>(
         max_inflight_cap: 64,
         sink: Arc::new(NoSink),
         dispatcher: dispatcher.adopter(),
-        conns: Some(conns),
+        conns: ConnTable::Host(conns),
     };
     let plugin = match arm {
         Arm::Linked => load_linked::<K>(&row(), bind),

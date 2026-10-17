@@ -99,6 +99,7 @@ fn manifest(kind: &str, statement: &[u8]) -> Manifest {
     Manifest {
         name: NAME.into(),
         alias: ALIAS.into(),
+        former_names: Vec::new(),
         kind: kind.into(),
         version: env!("CARGO_PKG_VERSION").into(),
         publisher: busbar_plugin_loader::sign::FIRST_PARTY_PUBLISHER.into(),
