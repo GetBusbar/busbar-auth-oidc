@@ -207,7 +207,9 @@ fn pack_oidc_tarball(
             "--kind",
             "auth",
             "--version",
-            "0.0.0-e2e",
+            // The release version is the plugin's own, the one its Statement states (the pack tool
+            // refuses any other).
+            env!("CARGO_PKG_VERSION"),
             "--publisher",
             "busbar",
             "--description",
