@@ -2,5 +2,8 @@
   "contract_abi": {
     "min": 3,
     "max": 3
-  }
+  },
+  "needs": [
+    "http"
+  ]
 }
