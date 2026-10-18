@@ -115,7 +115,9 @@ fn validate_refuses_a_jwks_url_open_refuses() {
         "jwks_url": "http://jwks.test/keys",
     })
     .to_string();
-    let opened = crate::open::module(&settings).expect_err("open refuses it");
+    let Err(opened) = crate::open::module(&settings) else {
+        panic!("open refuses it");
+    };
     let validated = <Oidc as Life>::validate(settings.as_bytes()).expect_err("validate refuses it");
     assert_eq!(validated.text(), Some(opened.as_str()));
 }
