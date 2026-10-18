@@ -94,7 +94,9 @@ impl busbar_contract::services::double::ServicesDouble for Clock {
     fn now(&self) -> Reading {
         CLOCK_READS.fetch_add(1, Ordering::SeqCst);
         Reading {
-            wall_ns: 0,
+            wall_ns: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos() as u64),
             mono_ns: now_ns(),
         }
     }
