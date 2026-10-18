@@ -400,7 +400,7 @@ fn install_oidc_plugin_via_admin_api_and_authenticate() {
         .iter()
         .find(|p| p["target"] == file)
         .expect("the just-installed auth-oidc plugin appears in the auth catalog");
-    assert_eq!(listed["valid"], true);
+    assert_eq!(listed["valid"], true, "the catalog entry: {listed}");
 
     let _ = child1.kill();
     let _ = child1.wait();
