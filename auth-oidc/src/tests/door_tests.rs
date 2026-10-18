@@ -103,3 +103,21 @@ fn refresh_drops_the_verdict_cache_and_reports_its_count() {
         .expect("refreshes");
     assert_eq!(refreshed.counted, flushed(1.0));
 }
+
+/// `validate` RUNS `open`'S CHECKS: a `jwks_url` that is not https, which `open` refuses, is
+/// refused at `validate` too, in the same words (Q128 auth-oidc LOW). RED before the fix: `validate`
+/// parsed the config only, so `--validate` passed a config the boot then refused.
+#[test]
+fn validate_refuses_a_jwks_url_open_refuses() {
+    let settings = serde_json::json!({
+        "issuer": ISSUER,
+        "audience": AUDIENCE,
+        "jwks_url": "http://jwks.test/keys",
+    })
+    .to_string();
+    let Err(opened) = crate::open::module(&settings) else {
+        panic!("open refuses it");
+    };
+    let validated = <Oidc as Life>::validate(settings.as_bytes()).expect_err("validate refuses it");
+    assert_eq!(validated.text(), Some(opened.as_str()));
+}

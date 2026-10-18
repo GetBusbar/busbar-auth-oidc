@@ -61,8 +61,8 @@ use zeroize::Zeroizing;
 
 use crate::fetch::{Fetch, HostIo, IoState, NEEDS};
 use crate::flight::FLIGHT_MAX;
-use crate::open::{config, module};
-use crate::{now_unix, OidcModule, Step};
+use crate::open::module;
+use crate::{OidcModule, Step};
 
 /// The plugin's name: the manifest name its release packs it under.
 pub const NAME: &str = "busbar-auth-oidc";
@@ -213,7 +213,7 @@ impl Opened {
         Step::Ready(
             match step!(self
                 .module
-                .identity_from_token_response(response, now_unix(), now, io))
+                .identity_from_token_response(response, io.wall_now(), now, io))
             {
                 Ok(LoginOutcome::Identify(p)) => Login::Identity(p),
                 Ok(_) => Login::Bad,
@@ -305,8 +305,12 @@ impl Life for Oidc {
     /// tick's key-set refresh on the driver ticket.
     const DRIVE: Outcome = Outcome::Refused;
 
+    /// `open`'s own checks ([`crate::open::checked`]), so `--validate` passes nothing the boot
+    /// would refuse.
     fn validate(settings: &[u8]) -> Result<(), Refusal> {
-        config(text(settings)?).map(|_| ()).map_err(Refusal::failed)
+        crate::open::checked(text(settings)?)
+            .map(|_| ())
+            .map_err(Refusal::failed)
     }
 
     fn open(settings: &[u8], secrets: &[&[u8]], _generation: u64) -> Result<Self, Refusal> {
@@ -551,20 +555,30 @@ impl SafeSlot for Verify {
         let c = input.field(|i| &i.credential);
         let credential = (c.fmt != BLOB_ABSENT && !c.ptr.is_null()).then(|| c.bytes());
         let token = match credential.map(std::str::from_utf8) {
-            // Bytes that are not text are no JWT: not this module's credential.
+            // Bytes that are not text are no JWT: not this module's credential. Still a whole
+            // answer: the decision, and the credential line named for the transport to strip.
             Some(Err(_)) => {
-                out.set(|o| &o.verdict, VERDICT_PASS);
-                return Outcome::Ready;
+                return answer(
+                    None,
+                    Some((input.strip(), DECISION_CONTINUE)),
+                    input.field(|i| &i.out_buf),
+                    &mut out,
+                    VERDICT_PASS,
+                );
             }
             Some(Ok(token)) => Some(token),
             None => None,
         };
+        // ONE CLOCK (THE DESIGN §1): expiry is judged at the request's own timestamp, the host's
+        // clock as it arrived; a request stating none (`0`) fails closed.
+        let timestamp = input.field(|i| &i.request).timestamp;
+        let request_now = crate::clock_or_fail_closed(i64::try_from(timestamp).unwrap_or(i64::MAX));
         let ticketless = instance.ticket().is_none();
         let (mut io, parked) = resume(&instance, h);
         let opened = h.life().now();
         let verdict = match opened
             .module
-            .verify(token, now_unix(), Instant::now(), &mut io)
+            .verify(token, request_now, Instant::now(), &mut io)
         {
             // ON THE SPOT (no ticket): a verify that needs a fetch, or waits on another call's, may
             // not pend, so it answers REFUSED and the host makes it again on a ticket

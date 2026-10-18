@@ -67,8 +67,8 @@ use busbar_plugin_loader::dispatch::{now_ns, out_head, Frame, LoadError};
 use busbar_plugin_loader::sign::{sign, Manifest, SigningKey, TrustPolicy};
 use busbar_plugin_loader::PluginRegistry;
 use support::{
-    bind, bind_as, identity_buf, open, row, verify_in, verify_ticketless, z, Arm, Bound, Idp,
-    Issuer, DISCOVERY_PATH, ISSUER, UNUSED_ISSUER,
+    bind, bind_as, identity_buf, open, row, verify_bytes, verify_in, verify_ticketless, z, Arm,
+    Bound, Idp, Issuer, DISCOVERY_PATH, ISSUER, UNUSED_ISSUER,
 };
 
 /// The module's registry name and alias (what an operator's `identity-providers:` names).
@@ -895,4 +895,58 @@ fn red_the_statement_declares_six_outbound_http_needs_in_their_classes() {
     )
     .expect("the cdylib loads");
     assert_eq!(packed.as_deref(), Some(&row.statement[..]));
+}
+
+/// A CREDENTIAL THAT IS NOT TEXT IS NO JWT, AND STILL A WHOLE ANSWER (THE DESIGN §6, "Auth points
+/// and guest lists": every auth called names its credential lines; App. A.3): READY PASS with the
+/// decision CONTINUE and the credential line named for the transport to strip. RED before the fix:
+/// READY PASS with no decision and no strip name, which the host's check turns into FAULT.
+#[test]
+fn a_credential_that_is_not_text_passes_with_its_line_named() {
+    let _one = support::serial();
+    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let lib = cdylib();
+    let stated = row().statement;
+    for arm in [
+        Arm::Linked,
+        Arm::Dropped {
+            lib: &lib,
+            stated: &stated,
+        },
+    ] {
+        let idp = Idp::new(&key);
+        let b = bind(&arm, &idp);
+        open(&b.plugin, &config(AUDIENCE), None).expect("opens");
+        let (outcome, verdict, decision, strips) = verify_bytes(&b.plugin, &[0xff, 0xfe, b'x']);
+        assert_eq!(outcome, Outcome::Ready);
+        assert_eq!(verdict, busbar_contract::abi::auth::VERDICT_PASS);
+        assert_eq!(decision, busbar_contract::abi::auth::DECISION_CONTINUE);
+        assert_eq!(strips, 1, "the credential line is named");
+    }
+}
+
+/// ONE CLOCK (THE DESIGN §1): a token's expiry is judged at the request's own timestamp, the
+/// host's clock as it arrived, never one the plugin reads; a request stating none (`0`) fails
+/// closed. A token valid for the next hour is refused at a request two hours on. RED before the fix:
+/// the plugin judged expiry on the OS clock, so the late request was identified.
+#[test]
+fn a_token_s_expiry_is_judged_at_the_request_s_timestamp() {
+    let _one = support::serial();
+    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let token = key.sign(&claims(AUDIENCE));
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    for (at, identified) in [(now + 7200, false), (0, false), (now, true)] {
+        let idp = Idp::new(&key);
+        let b = bind(&Arm::Linked, &idp);
+        open(&b.plugin, &config(AUDIENCE), None).expect("opens");
+        let verdict = b.verify_at(Some(&token), at);
+        assert_eq!(
+            verdict.contains("verdict 1 "),
+            identified,
+            "at {at}: {verdict}"
+        );
+    }
 }

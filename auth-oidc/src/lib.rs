@@ -602,6 +602,8 @@ impl OidcModule {
             Ok(v) => v,
             // The key set's URL could not be discovered: the key set cannot be had, which 1.5.5
             // answered as it answered a key set it could not fetch — a declined login, logged.
+            // The warn line is 1.5.5's own words for that case, kept byte for byte (customer-visible
+            // log parity), pinned by `tests.rs` ("1.5.5's warn"); Q128 NIT rejected on that ground.
             Err(e) => {
                 tracing::warn!(module = "oidc", error = %e, "OIDC token signature verification failed");
                 AuthVerdict::Reject
@@ -890,6 +892,7 @@ pub fn build_token_exchange(
 ///   - The clock IS readable but below [`CLOCK_SANITY_FLOOR_UNIX`] — the realistic broken-clock case
 ///     (a dead RTC booting a host at the epoch, or an NTP/RTC fault landing in 1970-2000), which
 ///     `duration_since` reports as `Ok(small_value)` and would otherwise sail straight through.
+#[cfg(test)]
 pub(crate) fn now_unix() -> i64 {
     let t = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -901,7 +904,7 @@ pub(crate) fn now_unix() -> i64 {
 /// The fail-closed mapping [`now_unix`] applies to a clock reading: a sane reading passes through,
 /// anything below [`CLOCK_SANITY_FLOOR_UNIX`] becomes `i64::MAX`. Pure, so the mapping itself is
 /// testable (`now_unix` reads the real host clock).
-fn clock_or_fail_closed(t: i64) -> i64 {
+pub(crate) fn clock_or_fail_closed(t: i64) -> i64 {
     if is_clock_sane(t) {
         t
     } else {
