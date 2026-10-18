@@ -602,6 +602,8 @@ impl OidcModule {
             Ok(v) => v,
             // The key set's URL could not be discovered: the key set cannot be had, which 1.5.5
             // answered as it answered a key set it could not fetch — a declined login, logged.
+            // The warn line is 1.5.5's own words for that case, kept byte for byte (customer-visible
+            // log parity), pinned by `tests.rs` ("1.5.5's warn"); Q128 NIT rejected on that ground.
             Err(e) => {
                 tracing::warn!(module = "oidc", error = %e, "OIDC token signature verification failed");
                 AuthVerdict::Reject
