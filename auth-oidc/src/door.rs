@@ -62,7 +62,7 @@ use zeroize::Zeroizing;
 use crate::fetch::{Fetch, HostIo, IoState, NEEDS};
 use crate::flight::FLIGHT_MAX;
 use crate::open::module;
-use crate::{now_unix, OidcModule, Step};
+use crate::{OidcModule, Step};
 
 /// The plugin's name: the manifest name its release packs it under.
 pub const NAME: &str = "busbar-auth-oidc";
@@ -213,7 +213,7 @@ impl Opened {
         Step::Ready(
             match step!(self
                 .module
-                .identity_from_token_response(response, now_unix(), now, io))
+                .identity_from_token_response(response, io.wall_now(), now, io))
             {
                 Ok(LoginOutcome::Identify(p)) => Login::Identity(p),
                 Ok(_) => Login::Bad,
@@ -569,12 +569,16 @@ impl SafeSlot for Verify {
             Some(Ok(token)) => Some(token),
             None => None,
         };
+        // ONE CLOCK (THE DESIGN §1): expiry is judged at the request's own timestamp, the host's
+        // clock as it arrived; a request stating none (`0`) fails closed.
+        let timestamp = input.field(|i| &i.request).timestamp;
+        let request_now = crate::clock_or_fail_closed(i64::try_from(timestamp).unwrap_or(i64::MAX));
         let ticketless = instance.ticket().is_none();
         let (mut io, parked) = resume(&instance, h);
         let opened = h.life().now();
         let verdict = match opened
             .module
-            .verify(token, now_unix(), Instant::now(), &mut io)
+            .verify(token, request_now, Instant::now(), &mut io)
         {
             // ON THE SPOT (no ticket): a verify that needs a fetch, or waits on another call's, may
             // not pend, so it answers REFUSED and the host makes it again on a ticket

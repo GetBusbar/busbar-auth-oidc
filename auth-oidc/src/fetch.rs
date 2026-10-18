@@ -324,6 +324,21 @@ impl<'h> HostIo<'h> {
 
     /// Whether the op asked for a request it could not wait on (it runs on no ticket): whatever it
     /// answered without that request is not its verdict, and the host should ask again on a ticket.
+    /// THE HOST'S WALL CLOCK, unix seconds (`clock.now`: THE DESIGN §1, one clock), the time a
+    /// login's id_token expiry is judged at; a clock the host cannot answer, or one below the
+    /// sanity floor, fails CLOSED (`i64::MAX`), as [`crate::clock_or_fail_closed`] maps any reading.
+    #[must_use]
+    pub fn wall_now(&self) -> i64 {
+        let read = self.host.map(|h| h.connector(self.ticket).clock_now());
+        let secs = match read {
+            Some(Poll::Ready(Ok(r))) => {
+                i64::try_from(r.wall_ns / 1_000_000_000).unwrap_or(i64::MAX)
+            }
+            _ => i64::MAX,
+        };
+        crate::clock_or_fail_closed(secs)
+    }
+
     pub fn wanted_io(&self) -> bool {
         self.wanted
     }
