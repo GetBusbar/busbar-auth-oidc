@@ -39,20 +39,21 @@ use std::time::Instant;
 use busbar_contract::abi::auth::{
     AuthPoints, AuthTail, BeginLoginIn, BeginLoginOut, CompleteLoginIn, FieldsIn, FieldsOut,
     IdentifyOut, IdentityBuf, OpenOutboundIn, OpenOutboundOut, OutboundReadyIn, OutboundReadyOut,
-    VerifyIn, BEGIN_AUTHORIZE, CANCEL_ABANDONED, CAP_INBOUND, CAP_LOGIN, DECISION_CONTINUE,
-    DECISION_STOP, FACT_CACHEABLE, IDENTITY_HAS_TTL, LOGIN_BAD_CREDENTIAL, LOGIN_IDENTITY,
-    LOGIN_KIND_REDIRECT, LOGIN_OUTAGE, LOGIN_SECURITY_CHECK_FAILED, METRIC_CACHE_FLUSHED,
-    SPAN_ABSENT, VERDICT_IDENTITY, VERDICT_PASS, VERDICT_REJECT,
+    StripName, VerifyIn, BEGIN_AUTHORIZE, CANCEL_ABANDONED, CAP_INBOUND, CAP_LOGIN,
+    DECISION_CONTINUE, DECISION_STOP, FACT_CACHEABLE, IDENTITY_HAS_TTL, LOGIN_BAD_CREDENTIAL,
+    LOGIN_IDENTITY, LOGIN_KIND_REDIRECT, LOGIN_OUTAGE, LOGIN_SECURITY_CHECK_FAILED,
+    METRIC_CACHE_FLUSHED, SPAN_ABSENT, STRIP_FIELD, VERDICT_IDENTITY, VERDICT_PASS, VERDICT_REJECT,
 };
 use busbar_contract::abi::mechanism::call::{AbiStr, Blob, OutHead, Outcome, Span, BLOB_ABSENT};
 use busbar_contract::abi::mechanism::door::{
-    MetricFamily, Rewrite, Statement, FAMILY_COUNTER, REWRITE_ALIAS,
+    MarkWord, MetricFamily, Rewrite, Statement, FAMILY_COUNTER, REWRITE_ALIAS,
 };
 use busbar_contract::abi::mechanism::lifecycle::{DriveIn, TickIn, TickOut};
 use busbar_contract::abi::mechanism::ticket::Ticket;
-use busbar_contract::abi::sdk::auth_door::{verify_tail, with_tail};
+use busbar_contract::abi::sdk::auth_door::{carrier, verify_tail, with_tail};
 use busbar_contract::abi::sdk::conn::{ConnFailure, Host};
 use busbar_contract::abi::sdk::door::{abi_str, statement, AbiIn, AbiOut};
+use busbar_contract::abi::sdk::lent::HostBuf;
 use busbar_contract::abi::sdk::life::{Counted, Held, Life, Refreshed, Refusal};
 use busbar_contract::abi::sdk::{Instance, Lent, Out, Safe, SafeSlot};
 use busbar_contract::auth::{AuthVerdict, BeginLogin, LoginHttpResponse, LoginOutcome, Principal};
@@ -122,6 +123,8 @@ pub const STATEMENT: Statement = Statement {
     rewrites_len: REWRITES.len(),
     needs: NEEDS.as_ptr(),
     needs_len: NEEDS.len(),
+    mark_words: CARRIERS.as_ptr(),
+    mark_words_len: CARRIERS.len(),
     ..with_tail(statement(NAME, env!("CARGO_PKG_VERSION"), 64), &TAIL)
 };
 
@@ -298,7 +301,8 @@ fn text(settings: &[u8]) -> Result<&str, Refusal> {
 
 impl Life for Oidc {
     const CANCEL: u32 = CANCEL_ABANDONED;
-    /// Ops pend on their own tickets only, so there is no driver ticket.
+    /// The generic drive slot is not this plugin's: its `Drive` slot replaces it and carries the
+    /// tick's key-set refresh on the driver ticket.
     const DRIVE: Outcome = Outcome::Refused;
 
     fn validate(settings: &[u8]) -> Result<(), Refusal> {
@@ -444,28 +448,71 @@ const ABSENT: Span = Span {
     len: 0,
 };
 
-/// Write `p` into the host's identity buffer `buf` and answer READY with `verdict`, or the short
-/// FAILED (every `needed_*` at its full size) when it does not fit.
-fn identify(
-    p: &Principal,
+/// The one line this plugin's credential arrives on, named whatever its verdict.
+const AUTHORIZATION: &str = "authorization";
+
+/// The Statement's carrier marks: the line `verify` reads its bearer from.
+const CARRIERS: &[MarkWord] = &[carrier(AUTHORIZATION)];
+
+/// Write the answer into the host's buffers and answer READY with `verdict`: for `verify` the strip
+/// names and the decision (`strip`), and the identity `p` (if any); or the SHORT FAILED, every
+/// `needed_*` at its full size and NOTHING written, when any of them does not fit (THE DESIGN
+/// §11.13 M-SB: capacity is checked before anything is written).
+fn answer(
+    p: Option<&Principal>,
+    strip: Option<(HostBuf<'_, StripName>, u32)>,
     buf: Lent<'_, IdentityBuf>,
     out: &mut Out<'_, IdentifyOut>,
     verdict: u32,
 ) -> Outcome {
     let (mut bytes, mut groups) = (buf.buf(), buf.groups());
-    let subject = bytes.span(p.id.as_bytes());
-    let name = p.name.as_deref().map(|n| bytes.span(n.as_bytes()));
-    for role in &p.roles {
-        let s = bytes.span(role.as_bytes());
-        groups.push(s);
-    }
-    if !bytes.fits() || !groups.fits() {
-        out.set(|o| &o.needed_bytes, bytes.asked() as u64);
+    let strips: &[&str] = if strip.is_some() {
+        &[AUTHORIZATION]
+    } else {
+        &[]
+    };
+    let roles: &[String] = p.map_or(&[][..], |p| p.roles.as_slice());
+    // The FULL sizes first.
+    let need_bytes = p.map_or(0, |p| p.id.len() + p.name.as_deref().map_or(0, str::len))
+        + roles.iter().map(String::len).sum::<usize>()
+        + strips.iter().map(|s| s.len()).sum::<usize>();
+    let strip_cap = strip.as_ref().map_or(0, |(h, _)| h.cap());
+    if need_bytes > bytes.cap() || roles.len() > groups.cap() || strips.len() > strip_cap {
+        out.set(|o| &o.needed_bytes, need_bytes as u64);
         out.set(
             |o| &o.needed_groups,
-            u32::try_from(groups.asked()).unwrap_or(u32::MAX),
+            u32::try_from(roles.len()).unwrap_or(u32::MAX),
+        );
+        out.set(
+            |o| &o.needed_strip,
+            u32::try_from(strips.len()).unwrap_or(u32::MAX),
         );
         return Outcome::Failed;
+    }
+    if let Some((mut host, decision)) = strip {
+        for name in strips {
+            let span = bytes.span(name.as_bytes());
+            host.push(StripName {
+                name: span,
+                place: STRIP_FIELD,
+                _reserved: 0,
+            });
+        }
+        out.set(
+            |o| &o.strip_len,
+            u32::try_from(host.written()).unwrap_or(u32::MAX),
+        );
+        out.set(|o| &o.decision, decision);
+    }
+    let Some(p) = p else {
+        out.set(|o| &o.verdict, verdict);
+        return Outcome::Ready;
+    };
+    let subject = bytes.span(p.id.as_bytes());
+    let name = p.name.as_deref().map(|n| bytes.span(n.as_bytes()));
+    for role in roles {
+        let s = bytes.span(role.as_bytes());
+        groups.push(s);
     }
     out.set(|o| &o.identity.subject, subject);
     out.set(|o| &o.identity.name, name.unwrap_or(ABSENT));
@@ -536,26 +583,21 @@ impl SafeSlot for Verify {
             Step::Wait => return pend(&instance, h.host(), io, parked, &mut out, true),
         };
         // The transport's decision, the SDK's default for each verdict (`Answer::from(Verdict)`):
-        // continue on an identity or a pass, stop on a reject. No strip names are written
-        // (`strip_len` stays 0).
-        let decision = match verdict {
-            AuthVerdict::Identify(_) | AuthVerdict::Pass => DECISION_CONTINUE,
-            AuthVerdict::Reject => DECISION_STOP,
+        // continue on an identity or a pass, stop on a reject; and the credential line named for
+        // the transport to strip WHATEVER the verdict (THE DESIGN §6, "Auth points and guest
+        // lists": every auth called names its credential lines).
+        let (p, verdict, decision) = match &verdict {
+            AuthVerdict::Identify(p) => (Some(p), VERDICT_IDENTITY, DECISION_CONTINUE),
+            AuthVerdict::Pass => (None, VERDICT_PASS, DECISION_CONTINUE),
+            AuthVerdict::Reject => (None, VERDICT_REJECT, DECISION_STOP),
         };
-        out.set(|o| &o.decision, decision);
-        match verdict {
-            AuthVerdict::Identify(p) => {
-                identify(&p, input.field(|i| &i.out_buf), &mut out, VERDICT_IDENTITY)
-            }
-            AuthVerdict::Reject => {
-                out.set(|o| &o.verdict, VERDICT_REJECT);
-                Outcome::Ready
-            }
-            AuthVerdict::Pass => {
-                out.set(|o| &o.verdict, VERDICT_PASS);
-                Outcome::Ready
-            }
-        }
+        answer(
+            p,
+            Some((input.strip(), decision)),
+            input.field(|i| &i.out_buf),
+            &mut out,
+            verdict,
+        )
     }
 }
 
@@ -666,8 +708,9 @@ impl SafeSlot for Complete {
                 }
             }
         };
-        let answered = identify(
-            &principal,
+        let answered = answer(
+            Some(&principal),
+            None,
             input.field(|i| &i.out_buf),
             &mut out,
             LOGIN_IDENTITY,
