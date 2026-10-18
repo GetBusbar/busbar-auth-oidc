@@ -30,11 +30,17 @@ pub fn config(cfg: &str) -> Result<OidcConfig, String> {
     serde_json::from_str(cfg).map_err(|e| format!("invalid oidc plugin config: {e}"))
 }
 
-/// The module `open` builds from the settings: parsed, its explicit `jwks_url` held to https.
-pub(crate) fn module(cfg: &str) -> Result<OidcModule, String> {
+/// The settings as `open` accepts them: parsed, the explicit `jwks_url` held to https. `validate`
+/// runs exactly this.
+pub(crate) fn checked(cfg: &str) -> Result<OidcConfig, String> {
     let cfg = config(cfg)?;
     check_jwks_url(&cfg)?;
-    Ok(OidcModule::new(&cfg))
+    Ok(cfg)
+}
+
+/// The module `open` builds from the settings ([`checked`]).
+pub(crate) fn module(cfg: &str) -> Result<OidcModule, String> {
+    Ok(OidcModule::new(&checked(cfg)?))
 }
 
 #[cfg(test)]
