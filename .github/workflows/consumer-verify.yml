@@ -1,12 +1,12 @@
-# RENDERED by `busbar-release plugin sync busbar-auth-oidc` from GetBusbar/busbar-release template/; a hand
-# edit is overwritten by the next sync. Daily: does the newest
+# RENDERED by `busbar-release plugin heal busbar-auth-oidc` from GetBusbar/busbar-release template/; a hand
+# edit is overwritten by the next sync. Weekly: does the newest
 # PUBLISHED release still work for a user (busbar's plugin-consumer-verify.yml)? A publish-time check
 # cannot see an artifact that rots afterwards; release.yml verifies each release as it publishes.
 name: consumer-verify
 
 on:
   schedule:
-    - cron: "38 9 * * *"
+    - cron: "52 9 * * 1"
   workflow_dispatch:
     inputs:
       version:
@@ -21,7 +21,7 @@ permissions:
 
 jobs:
   consumer:
-    uses: GetBusbar/busbar/.github/workflows/plugin-consumer-verify.yml@33671357f37a411fd135a2d15cbed3d9947f34f0
+    uses: GetBusbar/busbar/.github/workflows/plugin-consumer-verify.yml@565f24f25e42370f3f8b5d8b2d91d56950eb4866
     with:
       version: ${{ inputs.version || '' }}
       asset_prefix: busbar-auth-oidc

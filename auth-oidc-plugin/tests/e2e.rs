@@ -156,7 +156,19 @@ fn build_real_binaries() -> (std::path::PathBuf, std::path::PathBuf) {
     // `busbar-plugin-loader` package (`--features pack`), not a package of its own, and building it
     // separately keeps the `pack` feature out of the `busbar` build.
     for args in [
-        &["build", "--release", "-p", "busbar", "--bin", "busbar"][..],
+        // `test-harness`: the child takes its first-party key from the harness seam
+        // (BUSBAR_TEST_HARNESS_FIRST_PARTY_KEY), so it admits the first-party-signed plugin below:
+        // the OIDC module's needs are in an egress class the host grants a first-party plugin only.
+        &[
+            "build",
+            "--release",
+            "-p",
+            "busbar",
+            "--bin",
+            "busbar",
+            "--features",
+            "test-harness",
+        ][..],
         &[
             "build",
             "--release",
@@ -188,10 +200,31 @@ fn build_real_binaries() -> (std::path::PathBuf, std::path::PathBuf) {
     )
 }
 
-/// Pack the built auth-oidc-plugin cdylib into a real signed-shape tarball via the real
-/// `busbar-plugin-pack` tool, `--allow-unsigned` exactly like CI's own unsigned-key fallback.
+/// A fresh first-party test keypair from the real `busbar-plugin-pack keygen`: (private seed hex,
+/// public key hex). The private half signs the tarball, the public half is what the child busbar
+/// is told is the first-party key.
+fn first_party_keypair(pack_bin: &std::path::Path) -> (String, String) {
+    let out = std::process::Command::new(pack_bin)
+        .arg("keygen")
+        .output()
+        .expect("run busbar-plugin-pack keygen");
+    assert!(out.status.success(), "keygen must succeed");
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let half = |label: &str| {
+        text.lines()
+            .find(|l| l.starts_with(label))
+            .and_then(|l| l.rsplit(' ').next())
+            .map(str::to_owned)
+            .unwrap_or_else(|| panic!("keygen printed no {label} line: {text}"))
+    };
+    (half("private"), half("public"))
+}
+
+/// Pack the built auth-oidc-plugin cdylib into a real tarball via the real `busbar-plugin-pack`
+/// tool, SIGNED first-party (publisher `busbar`) with `sign_key`.
 fn pack_oidc_tarball(
     pack_bin: &std::path::Path,
+    sign_key: &str,
     so_path: &std::path::Path,
     out: &std::path::Path,
 ) -> Vec<u8> {
@@ -207,7 +240,9 @@ fn pack_oidc_tarball(
             "--kind",
             "auth",
             "--version",
-            "0.0.0-e2e",
+            // The release version is the plugin's own, the one its Statement states (the pack tool
+            // refuses any other).
+            env!("CARGO_PKG_VERSION"),
             "--publisher",
             "busbar",
             "--description",
@@ -216,8 +251,8 @@ fn pack_oidc_tarball(
             "Apache-2.0",
             "--out",
             out.to_str().unwrap(),
-            "--allow-unsigned",
         ])
+        .env("BUSBAR_SIGN_KEY", sign_key)
         .status()
         .expect("run busbar-plugin-pack");
     assert!(status.success(), "packing the plugin must succeed");
@@ -289,6 +324,7 @@ fn install_oidc_plugin_via_admin_api_and_authenticate() {
         return;
     }
     let (busbar_bin, pack_bin) = build_real_binaries();
+    let (sign_key, first_party_pub) = first_party_keypair(&pack_bin);
 
     let key = Issuer::start(UNUSED_ISSUER, "admin-e2e-kid");
     let (jwks_url, cert_pem) = (key.jwks_url().to_string(), key.cert_pem().to_string());
@@ -342,6 +378,7 @@ fn install_oidc_plugin_via_admin_api_and_authenticate() {
 
     let mut child1 = std::process::Command::new(&busbar_bin)
         .env("BUSBAR_CONFIG", &config1)
+        .env("BUSBAR_TEST_HARNESS_FIRST_PARTY_KEY", &first_party_pub)
         .env("BUSBAR_PROVIDERS", &providers)
         .env("BUSBAR_ADMIN_TOKEN", ADMIN_TOKEN)
         .env("MOCK_KEY", "unused-mock-provider-key")
@@ -357,7 +394,7 @@ fn install_oidc_plugin_via_admin_api_and_authenticate() {
 
     // ── REAL ADMIN-API INSTALL: POST the packed auth-oidc plugin tarball to /api/v1/admin/plugins. ──
     let tarball_path = work.join("auth-oidc-admin.tar.gz");
-    let tarball = pack_oidc_tarball(&pack_bin, &so_path, &tarball_path);
+    let tarball = pack_oidc_tarball(&pack_bin, &sign_key, &so_path, &tarball_path);
     let file = "auth-oidc-admin.tar.gz";
     use base64::Engine as _;
     let install_resp = client
@@ -398,7 +435,7 @@ fn install_oidc_plugin_via_admin_api_and_authenticate() {
         .iter()
         .find(|p| p["target"] == file)
         .expect("the just-installed auth-oidc plugin appears in the auth catalog");
-    assert_eq!(listed["valid"], true);
+    assert_eq!(listed["valid"], true, "the catalog entry: {listed}");
 
     let _ = child1.kill();
     let _ = child1.wait();
@@ -439,6 +476,7 @@ fn install_oidc_plugin_via_admin_api_and_authenticate() {
 
     let mut child2 = std::process::Command::new(&busbar_bin)
         .env("BUSBAR_CONFIG", &config2)
+        .env("BUSBAR_TEST_HARNESS_FIRST_PARTY_KEY", &first_party_pub)
         .env("BUSBAR_PROVIDERS", &providers)
         .env("BUSBAR_ADMIN_TOKEN", ADMIN_TOKEN)
         .env("MOCK_KEY", "unused-mock-provider-key")
