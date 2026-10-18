@@ -24,8 +24,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use busbar_contract::abi::auth::{
-    slot, BeginLoginIn, BeginLoginOut, CompleteLoginIn, IdentifyOut, IdentityBuf, VerifyIn,
-    IDENTITY_BUF_BYTES, IDENTITY_GROUPS, SPAN_ABSENT,
+    slot, BeginLoginIn, BeginLoginOut, CompleteLoginIn, IdentifyOut, IdentityBuf, StripName,
+    VerifyIn, FIELDS_MAX, IDENTITY_BUF_BYTES, IDENTITY_GROUPS, SPAN_ABSENT,
 };
 use busbar_contract::abi::mechanism::call::{
     AbiStr, Blob, DeadlineClass, Outcome, Span, BLOB_JSON, BLOB_OCTETS,
@@ -711,6 +711,13 @@ pub fn verify_in(credential: Option<&str>, out_buf: IdentityBuf) -> VerifyIn {
     i.head = in_head();
     i.credential = credential.map_or(NO_BLOB, |c| blob(c.as_bytes(), BLOB_OCTETS));
     i.out_buf = out_buf;
+    // The strip array a host hands `verify` to start (`FIELDS_MAX` entries), as the kernel's door
+    // and the published suite hand it: the plugin names its credential line there. Each call gets
+    // its own (leaked: a test's few hundred bytes), so concurrent verifies never share one.
+    let strips: &'static mut [StripName] =
+        Box::leak(vec![z::<StripName>(); FIELDS_MAX as usize].into_boxed_slice());
+    i.strip = strips.as_mut_ptr();
+    i.strip_cap = FIELDS_MAX;
     i
 }
 
