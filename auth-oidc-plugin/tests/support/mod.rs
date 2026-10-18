@@ -750,3 +750,24 @@ pub fn verify_ticketless(p: &Plugin<Auth>, credential: Option<&str>) -> String {
         other => format!("{other:?} {}", error_of(called.error.as_deref())),
     }
 }
+
+/// A ticket-less `verify` of the raw credential bytes `credential` (any bytes, text or not): the
+/// outcome, the verdict, the decision and how many strip names the answer wrote.
+pub fn verify_bytes(p: &Plugin<Auth>, credential: &[u8]) -> (Outcome, u32, u32, u32) {
+    let (mut bytes, mut groups) = (
+        vec![0_u8; IDENTITY_BUF_BYTES],
+        vec![z::<Span>(); IDENTITY_GROUPS as usize],
+    );
+    let mut i = verify_in(None, identity_buf(&mut bytes, &mut groups));
+    i.credential = blob(credential, BLOB_OCTETS);
+    let mut out: IdentifyOut = z();
+    out.head = out_head();
+    let mut f = Frame::new(i, out);
+    let called = p.call(slot::VERIFY, &mut f);
+    (
+        called.outcome,
+        f.out.verdict,
+        f.out.decision,
+        f.out.strip_len,
+    )
+}
