@@ -926,3 +926,49 @@ fn a_bearer_that_is_not_utf8_passes_with_a_decision_and_its_line_named() {
         assert!(idp.sent().is_empty(), "nothing is fetched for it");
     }
 }
+
+/// AN IDENTITY CARRIES THE CREDENTIAL IT WAS VERIFIED FROM (Q128 auth-oidc LOW, reader r81 on
+/// 59293c0; THE DESIGN §6 "Auth points and guest lists", step 4; `IdentityOut::credential`): the
+/// kernel holds it on the unit for the `caller-credential` style. RED before the fix: the span was
+/// absent.
+#[test]
+fn an_identity_carries_the_credential_it_was_verified_from() {
+    let _one = support::serial();
+    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let token = key.sign(&claims(AUDIENCE));
+    let idp = Idp::new(&key);
+    let b = bind(&Arm::Linked, &idp);
+    open(&b.plugin, &config(AUDIENCE), None).expect("opens");
+    let (mut bytes, mut groups) = (
+        vec![0_u8; IDENTITY_BUF_BYTES],
+        vec![z::<Span>(); IDENTITY_GROUPS as usize],
+    );
+    let ticket = b.dispatcher.mint(0).expect("a ticket");
+    let mut out: IdentifyOut = z();
+    out.head = out_head();
+    let done = b
+        .dispatcher
+        .submit(
+            &b.plugin,
+            ticket,
+            slot::VERIFY,
+            Frame::new(
+                verify_in(Some(&token), identity_buf(&mut bytes, &mut groups)),
+                out,
+            ),
+            busbar_contract::abi::mechanism::call::DeadlineClass::Call,
+            now_ns() + 20_000_000_000,
+        )
+        .wait(Duration::from_secs(30))
+        .expect("the op completes");
+    b.dispatcher.recycle(ticket);
+    assert_eq!(done.outcome, Outcome::Ready, "{:?}", done.error);
+    let out = done.frame.expect("the frame").out;
+    assert_eq!(out.verdict, 1, "identified");
+    let held = out.identity.credential;
+    assert_eq!(
+        &bytes[held.offset as usize..(held.offset as usize + held.len as usize)],
+        token.as_bytes(),
+        "the verified credential rides the identity"
+    );
+}
