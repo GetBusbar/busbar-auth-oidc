@@ -306,7 +306,11 @@ impl Life for Oidc {
     const DRIVE: Outcome = Outcome::Refused;
 
     fn validate(settings: &[u8]) -> Result<(), Refusal> {
-        config(text(settings)?).map(|_| ()).map_err(Refusal::failed)
+        // The checks `open` makes of the settings alone, so a config `--validate` accepts is one
+        // boot opens: parsed, and an explicit `jwks_url` held to https.
+        config(text(settings)?)
+            .and_then(|c| crate::check_jwks_url(&c))
+            .map_err(Refusal::failed)
     }
 
     fn open(settings: &[u8], secrets: &[&[u8]], _generation: u64) -> Result<Self, Refusal> {
@@ -377,11 +381,20 @@ impl Life for Oidc {
 }
 
 /// What an op parks on its ticket across PENDING: its requests' state and, for a login, the token
-/// endpoint's answer (the code redeems once).
+/// endpoint's answer (the code redeems once). The answer carries the issued tokens, so its body is
+/// wiped when the parked op goes.
 #[derive(Default)]
 struct Parked {
     io: IoState,
     answer: Option<LoginHttpResponse>,
+}
+
+impl Drop for Parked {
+    fn drop(&mut self) {
+        if let Some(answer) = self.answer.as_mut() {
+            zeroize::Zeroize::zeroize(&mut answer.body);
+        }
+    }
 }
 
 /// The op's requests on its ticket, resumed from what it parked.
@@ -460,6 +473,7 @@ const CARRIERS: &[MarkWord] = &[carrier(AUTHORIZATION)];
 /// §11.13 M-SB: capacity is checked before anything is written).
 fn answer(
     p: Option<&Principal>,
+    credential: Option<&[u8]>,
     strip: Option<(HostBuf<'_, StripName>, u32)>,
     buf: Lent<'_, IdentityBuf>,
     out: &mut Out<'_, IdentifyOut>,
@@ -472,10 +486,15 @@ fn answer(
         &[]
     };
     let roles: &[String] = p.map_or(&[][..], |p| p.roles.as_slice());
+    // The credential the identity was verified from goes to the kernel with it (the
+    // `caller-credential` style's passthrough; THE DESIGN §6 "Auth points and guest lists", step
+    // 4): only with an identity.
+    let credential = credential.filter(|_| p.is_some()).unwrap_or_default();
     // The FULL sizes first.
     let need_bytes = p.map_or(0, |p| p.id.len() + p.name.as_deref().map_or(0, str::len))
         + roles.iter().map(String::len).sum::<usize>()
-        + strips.iter().map(|s| s.len()).sum::<usize>();
+        + strips.iter().map(|s| s.len()).sum::<usize>()
+        + credential.len();
     let strip_cap = strip.as_ref().map_or(0, |(h, _)| h.cap());
     if need_bytes > bytes.cap() || roles.len() > groups.cap() || strips.len() > strip_cap {
         out.set(|o| &o.needed_bytes, need_bytes as u64);
@@ -529,6 +548,10 @@ fn answer(
     let (flags, ttl) = p.ttl_secs.map_or((0, 0), |t| (IDENTITY_HAS_TTL, t));
     out.set(|o| &o.identity.flags, flags);
     out.set(|o| &o.identity.ttl_secs, ttl);
+    if !credential.is_empty() {
+        let held = bytes.span(credential);
+        out.set(|o| &o.identity.credential, held);
+    }
     out.set(|o| &o.verdict, verdict);
     Outcome::Ready
 }
@@ -551,10 +574,19 @@ impl SafeSlot for Verify {
         let c = input.field(|i| &i.credential);
         let credential = (c.fmt != BLOB_ABSENT && !c.ptr.is_null()).then(|| c.bytes());
         let token = match credential.map(std::str::from_utf8) {
-            // Bytes that are not text are no JWT: not this module's credential.
+            // Bytes that are not text are no JWT: not this module's credential, answered as one (as
+            // 1.5.5 passed a header that did not read as text): PASS, the chain continues, and the
+            // credential line is named for the transport to strip, whatever the verdict (THE DESIGN
+            // §6, "Auth points and guest lists").
             Some(Err(_)) => {
-                out.set(|o| &o.verdict, VERDICT_PASS);
-                return Outcome::Ready;
+                return answer(
+                    None,
+                    None,
+                    Some((input.strip(), DECISION_CONTINUE)),
+                    input.field(|i| &i.out_buf),
+                    &mut out,
+                    VERDICT_PASS,
+                );
             }
             Some(Ok(token)) => Some(token),
             None => None,
@@ -593,6 +625,7 @@ impl SafeSlot for Verify {
         };
         answer(
             p,
+            token.map(str::as_bytes),
             Some((input.strip(), decision)),
             input.field(|i| &i.out_buf),
             &mut out,
@@ -710,6 +743,7 @@ impl SafeSlot for Complete {
         };
         let answered = answer(
             Some(&principal),
+            None,
             None,
             input.field(|i| &i.out_buf),
             &mut out,
