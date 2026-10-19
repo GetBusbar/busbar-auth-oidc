@@ -41,7 +41,7 @@ busbar-plugin-loader = { git = "https://github.com/GetBusbar/busbar", rev = "a59
 # rendered because the declares file states network needs): busbar's connector and its TLS
 # test kit at the pin, and the transport framers those needs name, at the revs busbar links.
 busbar-core-connector = { git = "https://github.com/GetBusbar/busbar", rev = "a5945cd2e13b6e07b5e1489a1ad22aef199b67a7", features = ["test-support"] }
-busbar-transport-http = { git = "https://github.com/GetBusbar/busbar-transport-http", rev = "a220d8732cb57fd39f8ec102bb692998f813bb87" }
+busbar-transport-http = { git = "https://github.com/GetBusbar/busbar-transport-http", rev = "12b078389496d4c1fd81b730f5d9d0887537c3b0" }
 busbar-transport-tcp = { git = "https://github.com/GetBusbar/busbar-transport-tcp", rev = "e5014aef4f1cff11901843ddf4cf7a2910585ac6" }
 # busbar's root [workspace.dependencies], third-party rows, at a5945cd2e13b6e07b5e1489a1ad22aef199b67a7
 arc-swap = "1"
