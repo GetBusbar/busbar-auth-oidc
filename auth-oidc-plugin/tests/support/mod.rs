@@ -750,3 +750,25 @@ pub fn verify_ticketless(p: &Plugin<Auth>, credential: Option<&str>) -> String {
         other => format!("{other:?} {}", error_of(called.error.as_deref())),
     }
 }
+
+/// A `verify` of the raw `credential` bytes made with NO ticket: `(verdict, decision, strip_len)`,
+/// or the outcome when it is not READY.
+pub fn verify_ticketless_raw(
+    p: &Plugin<Auth>,
+    credential: &[u8],
+) -> Result<(u32, u32, u32), Outcome> {
+    let (mut bytes, mut groups) = (
+        vec![0_u8; IDENTITY_BUF_BYTES],
+        vec![z::<Span>(); IDENTITY_GROUPS as usize],
+    );
+    let mut out: IdentifyOut = z();
+    out.head = out_head();
+    let mut i = verify_in(None, identity_buf(&mut bytes, &mut groups));
+    i.credential = blob(credential, BLOB_OCTETS);
+    let mut f = Frame::new(i, out);
+    let called = p.call(slot::VERIFY, &mut f);
+    match called.outcome {
+        Outcome::Ready => Ok((f.out.verdict, f.out.decision, f.out.strip_len)),
+        other => Err(other),
+    }
+}
