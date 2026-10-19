@@ -473,6 +473,7 @@ const CARRIERS: &[MarkWord] = &[carrier(AUTHORIZATION)];
 /// §11.13 M-SB: capacity is checked before anything is written).
 fn answer(
     p: Option<&Principal>,
+    credential: Option<&[u8]>,
     strip: Option<(HostBuf<'_, StripName>, u32)>,
     buf: Lent<'_, IdentityBuf>,
     out: &mut Out<'_, IdentifyOut>,
@@ -485,10 +486,15 @@ fn answer(
         &[]
     };
     let roles: &[String] = p.map_or(&[][..], |p| p.roles.as_slice());
+    // The credential the identity was verified from goes to the kernel with it (the
+    // `caller-credential` style's passthrough; THE DESIGN §6 "Auth points and guest lists", step
+    // 4): only with an identity.
+    let credential = credential.filter(|_| p.is_some()).unwrap_or_default();
     // The FULL sizes first.
     let need_bytes = p.map_or(0, |p| p.id.len() + p.name.as_deref().map_or(0, str::len))
         + roles.iter().map(String::len).sum::<usize>()
-        + strips.iter().map(|s| s.len()).sum::<usize>();
+        + strips.iter().map(|s| s.len()).sum::<usize>()
+        + credential.len();
     let strip_cap = strip.as_ref().map_or(0, |(h, _)| h.cap());
     if need_bytes > bytes.cap() || roles.len() > groups.cap() || strips.len() > strip_cap {
         out.set(|o| &o.needed_bytes, need_bytes as u64);
@@ -542,6 +548,10 @@ fn answer(
     let (flags, ttl) = p.ttl_secs.map_or((0, 0), |t| (IDENTITY_HAS_TTL, t));
     out.set(|o| &o.identity.flags, flags);
     out.set(|o| &o.identity.ttl_secs, ttl);
+    if !credential.is_empty() {
+        let held = bytes.span(credential);
+        out.set(|o| &o.identity.credential, held);
+    }
     out.set(|o| &o.verdict, verdict);
     Outcome::Ready
 }
@@ -570,6 +580,7 @@ impl SafeSlot for Verify {
             // §6, "Auth points and guest lists").
             Some(Err(_)) => {
                 return answer(
+                    None,
                     None,
                     Some((input.strip(), DECISION_CONTINUE)),
                     input.field(|i| &i.out_buf),
@@ -614,6 +625,7 @@ impl SafeSlot for Verify {
         };
         answer(
             p,
+            token.map(str::as_bytes),
             Some((input.strip(), decision)),
             input.field(|i| &i.out_buf),
             &mut out,
@@ -731,6 +743,7 @@ impl SafeSlot for Complete {
         };
         let answered = answer(
             Some(&principal),
+            None,
             None,
             input.field(|i| &i.out_buf),
             &mut out,
