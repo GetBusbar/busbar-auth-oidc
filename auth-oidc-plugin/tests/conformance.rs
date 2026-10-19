@@ -67,8 +67,8 @@ use busbar_plugin_loader::dispatch::{now_ns, out_head, Frame, LoadError};
 use busbar_plugin_loader::sign::{sign, Manifest, SigningKey, TrustPolicy};
 use busbar_plugin_loader::PluginRegistry;
 use support::{
-    bind, bind_as, identity_buf, open, row, verify_in, verify_ticketless, z, Arm, Bound, Idp,
-    Issuer, DISCOVERY_PATH, ISSUER, UNUSED_ISSUER,
+    bind, bind_as, identity_buf, open, row, verify_in, verify_ticketless, verify_ticketless_raw, z,
+    Arm, Bound, Idp, Issuer, DISCOVERY_PATH, ISSUER, UNUSED_ISSUER,
 };
 
 /// The module's registry name and alias (what an operator's `identity-providers:` names).
@@ -895,4 +895,34 @@ fn red_the_statement_declares_six_outbound_http_needs_in_their_classes() {
     )
     .expect("the cdylib loads");
     assert_eq!(packed.as_deref(), Some(&row.statement[..]));
+}
+
+/// A BEARER THAT IS NOT UTF-8 IS NOT THIS MODULE'S CREDENTIAL, ANSWERED AS ONE (Q128 auth-oidc
+/// MEDIUM, reader r61 on 7b84416; THE DESIGN §6 "Auth points and guest lists": every auth called
+/// names its credential lines whatever its verdict): PASS with the chain's CONTINUE decision and the
+/// credential line named for the transport to strip, as 1.5.5 passed a header that did not read as
+/// text (no bearer for this module). RED before the fix: PASS with no decision and no strip name,
+/// which the host faults.
+#[test]
+fn a_bearer_that_is_not_utf8_passes_with_a_decision_and_its_line_named() {
+    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let lib = cdylib();
+    let stated = row().statement;
+    for arm in [
+        Arm::Linked,
+        Arm::Dropped {
+            lib: &lib,
+            stated: &stated,
+        },
+    ] {
+        let idp = Idp::new(&key);
+        let b = bind(&arm, &idp);
+        open(&b.plugin, &config(AUDIENCE), None).expect("opens");
+        let (verdict, decision, strips) =
+            verify_ticketless_raw(&b.plugin, b"eyJ\xff\xfe.not-text").expect("answered at once");
+        assert_eq!(verdict, busbar_contract::abi::auth::VERDICT_PASS);
+        assert_eq!(decision, busbar_contract::abi::auth::DECISION_CONTINUE);
+        assert!(strips >= 1, "the credential line is named for stripping");
+        assert!(idp.sent().is_empty(), "nothing is fetched for it");
+    }
 }
