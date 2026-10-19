@@ -79,7 +79,12 @@ const ABSENT: AbiStr = AbiStr {
 /// The egress class of every need: `operator-infrastructure` (ARCHITECT ruling 2026-10-09). 1.5.5
 /// accepted a plaintext token endpoint on a PRIVATE host, not only on loopback (`auth/token.rs`
 /// `vet_hop_url`), which `open-web` (secure only) and `loopback-allowed` (plaintext to loopback
-/// only) would both refuse at the connector.
+/// only) would both refuse at the connector. The discovery and JWKS fetches are 1.5.5's too: the
+/// v1.0.6 module (shipped with 1.5.5) fetched both through a plain client with no address guard
+/// (`auth-oidc/src/reqwest_fetcher.rs`, `reqwest::blocking::Client::builder()`), and its
+/// `ca_cert_pem` setting exists for an on-prem IdP on an internal host (an internal-CA Keycloak,
+/// `auth-oidc/src/lib.rs` `ca_cert_pem`), so an IdP on a private address, a discovered `jwks_uri`
+/// among them, is served as 1.5.5 served it. The guarded `open-web` class would refuse it.
 pub const EGRESS_CLASS: u32 = EGRESS_OPERATOR_INFRASTRUCTURE;
 
 /// One outbound need over the `http` transport (the scheme the http framer claims) in
