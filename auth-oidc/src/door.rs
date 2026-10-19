@@ -551,10 +551,18 @@ impl SafeSlot for Verify {
         let c = input.field(|i| &i.credential);
         let credential = (c.fmt != BLOB_ABSENT && !c.ptr.is_null()).then(|| c.bytes());
         let token = match credential.map(std::str::from_utf8) {
-            // Bytes that are not text are no JWT: not this module's credential.
+            // Bytes that are not text are no JWT: not this module's credential, answered as one (as
+            // 1.5.5 passed a header that did not read as text): PASS, the chain continues, and the
+            // credential line is named for the transport to strip, whatever the verdict (THE DESIGN
+            // §6, "Auth points and guest lists").
             Some(Err(_)) => {
-                out.set(|o| &o.verdict, VERDICT_PASS);
-                return Outcome::Ready;
+                return answer(
+                    None,
+                    Some((input.strip(), DECISION_CONTINUE)),
+                    input.field(|i| &i.out_buf),
+                    &mut out,
+                    VERDICT_PASS,
+                );
             }
             Some(Ok(token)) => Some(token),
             None => None,
