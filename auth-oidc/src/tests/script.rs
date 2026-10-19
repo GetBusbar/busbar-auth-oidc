@@ -22,6 +22,7 @@ use crate::flight::Step;
 pub const ME: Ticket = Ticket {
     slot: 1,
     generation: 1,
+    ..Ticket::ZERO
 };
 
 /// The ticket of the `n`th concurrent op.
@@ -29,6 +30,7 @@ pub const fn ticket(n: u32) -> Ticket {
     Ticket {
         slot: n,
         generation: 1,
+        ..Ticket::ZERO
     }
 }
 

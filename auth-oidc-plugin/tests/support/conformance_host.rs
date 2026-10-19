@@ -220,7 +220,8 @@ impl Opened {
             len: 0,
             fmt: BLOB_ABSENT,
             flags: 0,
-        };
+..Blob::ZERO
+};
         let mut f = Frame::new(i, blank_out::<OpenOut>());
         let opened = plugin.call(life::OPEN, &mut f);
         assert_eq!(

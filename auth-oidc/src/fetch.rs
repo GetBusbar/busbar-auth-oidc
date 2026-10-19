@@ -74,6 +74,7 @@ const CA_CERT_PATH: &str = "settings.ca_cert_pem";
 const ABSENT: AbiStr = AbiStr {
     ptr: std::ptr::null(),
     len: 0,
+    ..AbiStr::ZERO
 };
 
 /// The egress class of every need: `operator-infrastructure` (ARCHITECT ruling 2026-10-09). 1.5.5
@@ -106,6 +107,7 @@ const fn need(target_from: AbiStr, trust_from: AbiStr) -> Need {
         _reserved: 0,
         deny_response_headers: std::ptr::null(),
         deny_response_headers_len: 0,
+        ..Need::ZERO
     }
 }
 

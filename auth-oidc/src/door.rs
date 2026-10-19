@@ -87,12 +87,15 @@ const REWRITES: &[Rewrite] = &[Rewrite {
     to: AbiStr {
         ptr: std::ptr::null(),
         len: 0,
+        ..AbiStr::ZERO
     },
+    ..Rewrite::ZERO
 }];
 
 const ABSENT_STR: AbiStr = AbiStr {
     ptr: std::ptr::null(),
     len: 0,
+    ..AbiStr::ZERO
 };
 
 /// The metric families `refresh`'s envelope indexes into: the verdict cache's flush count
@@ -106,6 +109,7 @@ const FAMILIES: &[MetricFamily] = &[MetricFamily {
     label_keys_len: 0,
     kind: FAMILY_COUNTER,
     _reserved: [0; 7],
+    ..MetricFamily::ZERO
 }];
 
 /// The index of the flush-count family in [`FAMILIES`].
@@ -459,6 +463,7 @@ fn str_text(s: Lent<'_, AbiStr>) -> Option<&str> {
 const ABSENT: Span = Span {
     offset: SPAN_ABSENT,
     len: 0,
+    ..Span::ZERO
 };
 
 /// The one line this plugin's credential arrives on, named whatever its verdict.

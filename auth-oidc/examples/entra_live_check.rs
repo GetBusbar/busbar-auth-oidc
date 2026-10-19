@@ -31,6 +31,7 @@ impl Fetch for Blocking {
         Some(Ticket {
             slot: 1,
             generation: 1,
+            ..Ticket::ZERO
         })
     }
 

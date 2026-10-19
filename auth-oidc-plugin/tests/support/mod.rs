@@ -496,6 +496,7 @@ fn blob(bytes: &[u8], fmt: u32) -> Blob {
         len: bytes.len(),
         fmt,
         flags: 0,
+        ..Blob::ZERO
     }
 }
 
@@ -503,6 +504,7 @@ fn abi_str(s: &str) -> AbiStr {
     AbiStr {
         ptr: s.as_ptr(),
         len: s.len(),
+        ..AbiStr::ZERO
     }
 }
 
