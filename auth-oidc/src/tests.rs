@@ -1512,10 +1512,6 @@ fn identity_from_token_response_verifies_id_token() {
     ));
 }
 
-/// OIDC-1 (OIDC Core 1.0 §3.1.3.7 step 3): the browser-login `id_token`'s `aud` must contain
-/// the OAuth `client_id`, not the bearer `audience`. With `audience` "api://x" and `client_id`
-/// "cid", an id_token for "cid" identifies and one for "api://x" is refused; the bearer path still
-/// checks `audience`.
 /// A KEY SET THAT CANNOT BE HAD AT LOGIN is a declined login, as in 1.5.5 (ARCHITECT ruling: v1.0.6
 /// `identity_from_token_response` answered `Reject` for a key set it could not fetch; v1.5.5
 /// `auth/token.rs:543-549` rendered that 401 "Sign-in was declined", 502 being only for a token
@@ -1564,6 +1560,10 @@ fn a_key_set_that_cannot_be_had_at_login_is_a_declined_login_as_in_1_5_5() {
     }
 }
 
+/// OIDC-1 (OIDC Core 1.0 §3.1.3.7 step 3): the browser-login `id_token`'s `aud` must contain
+/// the OAuth `client_id`, not the bearer `audience`. With `audience` "api://x" and `client_id`
+/// "cid", an id_token for "cid" identifies and one for "api://x" is refused; the bearer path still
+/// checks `audience`.
 #[test]
 fn login_id_token_audience_is_the_client_id_not_the_bearer_audience() {
     let key = TestKey::generate(KID);
