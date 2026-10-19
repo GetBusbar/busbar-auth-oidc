@@ -269,9 +269,15 @@ pub fn get_request(url: &url::Url) -> Request {
 /// can carry), the form url-encoded as 1.5.5's client encoded it, then the hop's own fields.
 pub fn post_request(url: &url::Url, hop: &LoginHop, secret: Option<&str>) -> Request {
     let method = http::Method::from_bytes(hop.method.as_bytes()).unwrap_or(http::Method::POST);
+    // The form holds the lent client secret: its pairs are wiped once the body is encoded.
+    let mut pairs = form(hop, secret);
     let body = url::form_urlencoded::Serializer::new(String::new())
-        .extend_pairs(form(hop, secret))
+        .extend_pairs(pairs.iter())
         .finish();
+    for (name, value) in &mut pairs {
+        zeroize::Zeroize::zeroize(name);
+        zeroize::Zeroize::zeroize(value);
+    }
     // 1.5.5's order: the form's content-type, then the client's `accept` (the oracle's
     // `egress.auth|login-hop|oidc` cell holds the wire bytes).
     let mut fields = vec![

@@ -306,7 +306,11 @@ impl Life for Oidc {
     const DRIVE: Outcome = Outcome::Refused;
 
     fn validate(settings: &[u8]) -> Result<(), Refusal> {
-        config(text(settings)?).map(|_| ()).map_err(Refusal::failed)
+        // The checks `open` makes of the settings alone, so a config `--validate` accepts is one
+        // boot opens: parsed, and an explicit `jwks_url` held to https.
+        config(text(settings)?)
+            .and_then(|c| crate::check_jwks_url(&c))
+            .map_err(Refusal::failed)
     }
 
     fn open(settings: &[u8], secrets: &[&[u8]], _generation: u64) -> Result<Self, Refusal> {
@@ -377,11 +381,20 @@ impl Life for Oidc {
 }
 
 /// What an op parks on its ticket across PENDING: its requests' state and, for a login, the token
-/// endpoint's answer (the code redeems once).
+/// endpoint's answer (the code redeems once). The answer carries the issued tokens, so its body is
+/// wiped when the parked op goes.
 #[derive(Default)]
 struct Parked {
     io: IoState,
     answer: Option<LoginHttpResponse>,
+}
+
+impl Drop for Parked {
+    fn drop(&mut self) {
+        if let Some(answer) = self.answer.as_mut() {
+            zeroize::Zeroize::zeroize(&mut answer.body);
+        }
+    }
 }
 
 /// The op's requests on its ticket, resumed from what it parked.
