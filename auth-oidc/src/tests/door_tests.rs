@@ -103,3 +103,19 @@ fn refresh_drops_the_verdict_cache_and_reports_its_count() {
         .expect("refreshes");
     assert_eq!(refreshed.counted, flushed(1.0));
 }
+
+/// `validate` HOLDS `jwks_url` TO HTTPS AS `open` DOES (Q128 auth-oidc LOW, reader r82 on 59293c0):
+/// a config `--validate` accepts is one boot opens. RED before the fix: validate parsed the config
+/// and skipped the https check `open` applies.
+#[test]
+fn validate_refuses_a_plaintext_jwks_url_as_open_does() {
+    let plaintext = serde_json::json!({
+        "issuer": ISSUER,
+        "audience": AUDIENCE,
+        "jwks_url": "http://jwks.test/keys",
+    })
+    .to_string();
+    let refused = <Oidc as Life>::validate(plaintext.as_bytes());
+    assert!(refused.is_err(), "validate accepted what open refuses");
+    assert!(<Oidc as Life>::validate(&settings()).is_ok());
+}
