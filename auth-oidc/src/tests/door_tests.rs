@@ -104,18 +104,24 @@ fn refresh_drops_the_verdict_cache_and_reports_its_count() {
     assert_eq!(refreshed.counted, flushed(1.0));
 }
 
-/// `validate` HOLDS `jwks_url` TO HTTPS AS `open` DOES (Q128 auth-oidc LOW, reader r82 on 59293c0):
-/// a config `--validate` accepts is one boot opens. RED before the fix: validate parsed the config
-/// and skipped the https check `open` applies.
+/// `validate` ACCEPTS A PLAINTEXT `jwks_url` AS `open` DOES, as 1.5.5 did (OWNER 2026-10-20: a 1.5.5
+/// config loads unchanged; supersedes the Q128 r82 refusal). A config `--validate` accepts is still
+/// one boot opens.
 #[test]
-fn validate_refuses_a_plaintext_jwks_url_as_open_does() {
+fn validate_accepts_a_plaintext_jwks_url_as_open_does() {
     let plaintext = serde_json::json!({
         "issuer": ISSUER,
         "audience": AUDIENCE,
         "jwks_url": "http://jwks.test/keys",
     })
     .to_string();
-    let refused = <Oidc as Life>::validate(plaintext.as_bytes());
-    assert!(refused.is_err(), "validate accepted what open refuses");
+    assert!(
+        <Oidc as Life>::validate(plaintext.as_bytes()).is_ok(),
+        "validate refused a 1.5.5-valid plaintext jwks_url"
+    );
     assert!(<Oidc as Life>::validate(&settings()).is_ok());
+    assert!(
+        <Oidc as Life>::validate(b"not json").is_err(),
+        "validate still refuses settings that are not this module's config"
+    );
 }

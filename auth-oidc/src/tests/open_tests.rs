@@ -94,20 +94,24 @@ fn an_explicit_jwks_url_opens_and_resolves_without_a_request() {
 }
 
 #[test]
-fn an_explicit_http_jwks_url_is_refused_at_open() {
-    // OIDC-5 (owner-approved 2026-09-30): every request is https-only, so an http `jwks_url` would
-    // open and then reject every token. It is refused at open, naming the field.
-    let err = expect_err(module(
+fn an_explicit_http_jwks_url_opens_as_in_1_5_5() {
+    // OWNER 2026-10-20: a 1.5.5 config loads unchanged. 1.5.5 opened an http `jwks_url` (the oracle
+    // cell `egress.auth|login-hop|oidc` boots with one); it opens again, and the URL is used as
+    // configured, with no discovery. The JWKS fetch stays https-only, as 1.5.5's was.
+    let m = module(
         r#"{"issuer":"https://issuer.invalid.example","audience":"api://busbar-client",
-            "jwks_url":"http://issuer.invalid.example/keys"}"#,
-    ));
-    assert!(
-        err.contains("jwks_url"),
-        "the error must name jwks_url: {err}"
+            "jwks_url":"http://127.0.0.1:8080/jwks"}"#,
+    )
+    .expect("an http jwks_url opens, as it did in 1.5.5");
+    let idp = Idp::answering(Err("no fetch expected".to_string()));
+    assert_eq!(
+        ready(m.jwks_url(Instant::now(), &mut idp.at_once(Some(ME)))).as_deref(),
+        Ok("http://127.0.0.1:8080/jwks")
     );
-    assert!(
-        err.contains("https"),
-        "the error must say https is required: {err}"
+    assert_eq!(
+        idp.calls(),
+        0,
+        "an explicit jwks_url never triggers discovery"
     );
 }
 
