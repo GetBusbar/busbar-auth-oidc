@@ -6,7 +6,7 @@
 //! fetched at `open`: it runs on no ticket and is handed no connector, so the JWKS and (when a URL
 //! is not configured) the issuer's discovery document are fetched by the first op that needs them.
 
-use crate::{check_jwks_url, OidcConfig, OidcModule};
+use crate::{jwks_url_warning, OidcConfig, OidcModule};
 
 /// The settings, parsed: the check `validate` makes and the first step of `open`. Shape:
 ///
@@ -30,10 +30,13 @@ pub fn config(cfg: &str) -> Result<OidcConfig, String> {
     serde_json::from_str(cfg).map_err(|e| format!("invalid oidc plugin config: {e}"))
 }
 
-/// The module `open` builds from the settings: parsed, its explicit `jwks_url` held to https.
+/// The module `open` builds from the settings: parsed. An explicit `jwks_url` that is not https
+/// loads, as in 1.5.5, with a WARNING naming it ([`jwks_url_warning`]).
 pub(crate) fn module(cfg: &str) -> Result<OidcModule, String> {
     let cfg = config(cfg)?;
-    check_jwks_url(&cfg)?;
+    if let Some(warning) = jwks_url_warning(&cfg) {
+        tracing::warn!(module = "oidc", "{warning}");
+    }
     Ok(OidcModule::new(&cfg))
 }
 

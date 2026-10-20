@@ -149,9 +149,8 @@ impl Module {
     }
 }
 
-/// 1.5.5's `resolve_jwks_url`: the explicit URL (held to https), else discovered.
+/// 1.5.5's `resolve_jwks_url`: the explicit URL (unchecked, as 1.5.5's), else discovered.
 fn resolve_jwks_url(c: &OidcConfig, idp: &Idp) -> Result<String, String> {
-    check_jwks_url(c)?;
     ready(OidcModule::new(c).jwks_url(Instant::now(), &mut idp.at_once(Some(ME))))
 }
 
@@ -1916,37 +1915,54 @@ fn a_hostile_discovery_issuer_is_escaped_in_the_mismatch_error() {
     }
 }
 
-/// An explicit `jwks_url` that is not https is refused at resolve time, naming the field: the
-/// fetcher is https-only, so such a config used to load cleanly and then reject every token
-/// (OIDC-5, owner-approved 2026-09-30). An https one still resolves with no fetch at all.
+/// An explicit `jwks_url` that is not https LOADS, as it did in 1.5.5: `resolve_jwks_url` hands back
+/// the configured URL unchecked and fetches nothing (OWNER 2026-10-20: a 1.5.5 config loads
+/// unchanged; this supersedes the OIDC-5 boot refusal of 2026-09-30). The JWKS fetch itself stays
+/// https-only, as 1.5.5's was, so such a config still rejects every token at first use.
 #[test]
-fn an_explicit_non_https_jwks_url_is_refused_at_resolve_time() {
+fn an_explicit_non_https_jwks_url_loads_as_in_1_5_5() {
     let fetcher = FixtureFetcher::new(String::new());
-    for bad in ["http://idp.invalid/k", "not a url", "ftp://idp.invalid/k"] {
+    for url in [
+        "http://idp.invalid/k",
+        "http://127.0.0.1:8080/jwks",
+        "not a url",
+        "ftp://idp.invalid/k",
+        "https://idp.invalid/keys",
+    ] {
         let mut c = cfg("groups");
-        c.jwks_url = Some(bad.to_string());
-        let err = resolve_jwks_url(&c, &fetcher)
-            .expect_err("a non-https jwks_url must be refused at boot");
-        assert!(
-            err.contains("jwks_url"),
-            "the error must name jwks_url: {err}"
-        );
-        assert!(
-            err.contains("https"),
-            "the error must say https is required: {err}"
+        c.jwks_url = Some(url.to_string());
+        assert_eq!(
+            resolve_jwks_url(&c, &fetcher).as_deref(),
+            Ok(url),
+            "a 1.5.5-valid explicit jwks_url must load unchanged"
         );
     }
-    let mut c = cfg("groups");
-    c.jwks_url = Some("https://idp.invalid/keys".to_string());
-    assert_eq!(
-        resolve_jwks_url(&c, &fetcher).as_deref(),
-        Ok("https://idp.invalid/keys")
-    );
     assert_eq!(
         fetcher.calls(),
         0,
         "an explicit jwks_url never triggers discovery"
     );
+}
+
+/// The operator is told, not refused: a non-https or unparseable explicit `jwks_url` earns a
+/// warning naming the field; an https one, or none, earns nothing.
+#[test]
+fn a_non_https_jwks_url_earns_a_warning_naming_the_field() {
+    for bad in ["http://idp.invalid/k", "not a url", "ftp://idp.invalid/k"] {
+        let mut c = cfg("groups");
+        c.jwks_url = Some(bad.to_string());
+        let w = jwks_url_warning(&c).expect("a non-https jwks_url earns a warning");
+        assert!(
+            w.contains("jwks_url"),
+            "the warning must name jwks_url: {w}"
+        );
+        assert!(w.contains("https"), "the warning must say https: {w}");
+    }
+    let mut c = cfg("groups");
+    c.jwks_url = Some("https://idp.invalid/keys".to_string());
+    assert_eq!(jwks_url_warning(&c), None);
+    c.jwks_url = None;
+    assert_eq!(jwks_url_warning(&c), None);
 }
 
 /// One malformed JWK entry (here: no `kty`; there: a numeric `kid`) must not fail the parse of the
