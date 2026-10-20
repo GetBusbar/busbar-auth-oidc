@@ -426,7 +426,7 @@ pub struct OidcModule {
 }
 
 impl OidcModule {
-    /// Construct from parsed (and [`check_jwks_url`]-checked) config. Nothing is fetched here: the
+    /// Construct from parsed config. Nothing is fetched here: the
     /// JWKS, and the discovery document when a URL is not configured, are fetched by the first op
     /// that needs them.
     pub fn new(cfg: &OidcConfig) -> Self {
@@ -917,26 +917,25 @@ fn is_clock_sane(t: i64) -> bool {
     t >= CLOCK_SANITY_FLOOR_UNIX
 }
 
-/// The configured `jwks_url`, checked: it must be an `https` URL. Every request is https-only, so
-/// any other value would load cleanly and then reject every token at first use; it is refused at
-/// `open` instead, with an error naming the field. Absent is fine: discovery names it.
-///
-/// # Errors
-/// The URL does not parse, or is not https.
-pub fn check_jwks_url(cfg: &OidcConfig) -> Result<(), String> {
-    let Some(url) = &cfg.jwks_url else {
-        return Ok(());
-    };
-    let parsed = url::Url::parse(url)
-        .map_err(|e| format!("jwks_url is not a valid URL ({e}); it must be an https URL"))?;
-    if parsed.scheme() != "https" {
-        return Err(format!(
-            "jwks_url must be an https URL (got scheme '{}'); the JWKS is only ever fetched \
-             over https",
+/// The warning an explicit `jwks_url` that is not an `https` URL earns, or `None`. Such a config
+/// LOADS, as it did in 1.5.5 (OWNER 2026-10-20: a 1.5.5 config loads unchanged; this supersedes the
+/// OIDC-5 boot refusal of 2026-09-30), but the JWKS is only ever fetched over https (1.5.5's
+/// fetcher was https-only too), so every token it is asked to verify is rejected. `open` logs this
+/// so the operator is told; absent is fine (discovery names the URL).
+pub fn jwks_url_warning(cfg: &OidcConfig) -> Option<String> {
+    let url = cfg.jwks_url.as_ref()?;
+    match url::Url::parse(url) {
+        Ok(parsed) if parsed.scheme() == "https" => None,
+        Ok(parsed) => Some(format!(
+            "jwks_url is not an https URL (scheme '{}'): the JWKS is only ever fetched over \
+             https, so every OIDC token will be rejected; set an https jwks_url",
             parsed.scheme().escape_debug()
-        ));
+        )),
+        Err(e) => Some(format!(
+            "jwks_url is not a valid URL ({e}): the JWKS cannot be fetched, so every OIDC \
+             token will be rejected; set an https jwks_url"
+        )),
     }
-    Ok(())
 }
 
 #[cfg(test)]
