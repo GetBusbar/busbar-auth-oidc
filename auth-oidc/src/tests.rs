@@ -149,9 +149,8 @@ impl Module {
     }
 }
 
-/// 1.5.5's `resolve_jwks_url`: the explicit URL (held to https), else discovered.
+/// 1.5.5's `resolve_jwks_url`: the explicit URL (unchecked, as 1.5.5's), else discovered.
 fn resolve_jwks_url(c: &OidcConfig, idp: &Idp) -> Result<String, String> {
-    check_jwks_url(c)?;
     ready(OidcModule::new(c).jwks_url(Instant::now(), &mut idp.at_once(Some(ME))))
 }
 
@@ -1943,6 +1942,27 @@ fn an_explicit_non_https_jwks_url_loads_as_in_1_5_5() {
         0,
         "an explicit jwks_url never triggers discovery"
     );
+}
+
+/// The operator is told, not refused: a non-https or unparseable explicit `jwks_url` earns a
+/// warning naming the field; an https one, or none, earns nothing.
+#[test]
+fn a_non_https_jwks_url_earns_a_warning_naming_the_field() {
+    for bad in ["http://idp.invalid/k", "not a url", "ftp://idp.invalid/k"] {
+        let mut c = cfg("groups");
+        c.jwks_url = Some(bad.to_string());
+        let w = jwks_url_warning(&c).expect("a non-https jwks_url earns a warning");
+        assert!(
+            w.contains("jwks_url"),
+            "the warning must name jwks_url: {w}"
+        );
+        assert!(w.contains("https"), "the warning must say https: {w}");
+    }
+    let mut c = cfg("groups");
+    c.jwks_url = Some("https://idp.invalid/keys".to_string());
+    assert_eq!(jwks_url_warning(&c), None);
+    c.jwks_url = None;
+    assert_eq!(jwks_url_warning(&c), None);
 }
 
 /// One malformed JWK entry (here: no `kty`; there: a numeric `kid`) must not fail the parse of the
