@@ -757,7 +757,7 @@ fn a_redirect_hop_carries_the_previous_url_as_its_referer() {
 
 /// EVERY ERROR NAMES THE URL ASKED, whichever hop failed (1.5.5's `request to {url} failed: ..`).
 #[test]
-fn a_later_hop_failure_names_the_url_asked() {
+fn a_redirect_hop_failure_names_the_url_asked() {
     let mut far = Far::new(&[(URL, moved(302, "https://cdn.idp.example/jwks"))]);
     assert_eq!(
         far.get(URL),
@@ -846,18 +846,16 @@ fn a_reply_past_the_bound_is_1_5_5_s_cap_text_unprefixed() {
     );
 }
 
-/// A HOP IN FLIGHT IS RESUMED PAST THE DEADLINE, never cut (the host enforces the budget it was
-/// sent with): only a NEW hop is judged against the chain's deadline.
+/// A HOP IN FLIGHT IS JUDGED AGAINST THE DEADLINE TOO (the host's timeout ends at the first piece of
+/// the answer, so a trickling body is bounded here): with the budget spent it is driven once more
+/// and given up only if still pending. The unit harness has no host clock or connector, so what is
+/// tested is the predicate `get_hop` branches on and the deadline it applies; the end-to-end RED
+/// `red_a_body_trickling_past_the_budget_times_out_and_counts_its_handles` drives the rest.
 #[test]
-fn only_a_new_hop_is_judged_against_the_deadline() {
+fn a_hop_in_flight_is_resumed_but_judged_against_the_deadline() {
     const MS: u64 = 1_000_000;
-    // The deadline fn itself says "spent" at 12s...
     assert!(chain_left_ms(0, 12_000 * MS, URL).is_err());
-    // ...but a state holding the exchange for the hop is RESUMED (`get_hop` then skips the clock
-    // check, so the exchange finishes and counts its handles as every ending does). The harness
-    // cannot drive a host clock at this pin, so the predicate `get_hop` branches on is tested.
     let mut io = HostIo::new(None, Ticket::NONE, IoState::default(), false);
-    io.state_mut_for_test().chain_started_ns = Some(0);
     let url = url::Url::parse(URL).unwrap();
     let ex = Exchange::request(get_request(&url, None, 1_000)).unwrap();
     io.state_mut_for_test().current = Some((URL.to_string(), ex));
