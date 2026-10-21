@@ -423,34 +423,30 @@ pub struct IoState {
     redirected: Option<Redirected>,
 }
 
-/// What [`HostIo`] asks of the host handle it borrows for the call: its connector and its wake.
-/// The handle is the call's own borrow (never the host's `'static` install handle), held here as a
-/// trait object so no field names a `Host`.
-pub(crate) trait Connects: std::fmt::Debug {
-    /// The connector for one entry on `ticket`, its handles counting on from `issued`.
-    fn connector_from(&self, ticket: Ticket, issued: u32) -> Connector<'_>;
-    /// Wake `ticket`.
-    fn wake(&self, ticket: Ticket);
-}
+/// The connector for one entry on a ticket, its handles counting on from the second argument.
+type Connect<'h> = Box<dyn Fn(Ticket, u32) -> Connector<'h> + 'h>;
 
-impl Connects for Host {
-    fn connector_from(&self, ticket: Ticket, issued: u32) -> Connector<'_> {
-        Host::connector_from(self, ticket, issued)
-    }
-
-    fn wake(&self, ticket: Ticket) {
-        Host::wake(self, ticket);
-    }
-}
-
-/// [`Fetch`] over the host's connector, for ONE entry of one op on `ticket`.
-#[derive(Debug)]
+/// [`Fetch`] over the host's connector, for ONE entry of one op on `ticket`. It holds closures over
+/// the call's own host borrow (never the host's `'static` install handle), so no field names a
+/// `Host`.
 pub struct HostIo<'h> {
-    host: Option<&'h dyn Connects>,
+    host: Option<(Connect<'h>, Box<dyn Fn(Ticket) + 'h>)>,
     ticket: Ticket,
     state: IoState,
     anchored: bool,
     wanted: bool,
+}
+
+impl std::fmt::Debug for HostIo<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HostIo")
+            .field("armed", &self.host.is_some())
+            .field("ticket", &self.ticket)
+            .field("state", &self.state)
+            .field("anchored", &self.anchored)
+            .field("wanted", &self.wanted)
+            .finish()
+    }
 }
 
 impl<'h> HostIo<'h> {
@@ -459,7 +455,11 @@ impl<'h> HostIo<'h> {
     /// PUBLIC ones.
     pub fn new(host: Option<&'h Host>, ticket: Ticket, state: IoState, anchored: bool) -> Self {
         Self {
-            host: host.map(|h| h as &dyn Connects),
+            host: host.map(|h| {
+                let connect: Connect<'h> = Box::new(move |t, n| h.connector_from(t, n));
+                let wake: Box<dyn Fn(Ticket) + 'h> = Box::new(move |t| h.wake(t));
+                (connect, wake)
+            }),
             ticket,
             state,
             anchored,
@@ -498,14 +498,14 @@ impl<'h> HostIo<'h> {
         if parsed.scheme() != "https" && !plaintext_allowed(need, url) {
             return Poll::Ready(Err(failed(url, "URL scheme is not allowed")));
         }
-        let Some(host) = self.host else {
+        let Some((connect, _)) = &self.host else {
             return Poll::Ready(Err(failed(url, ConnFailure::Unarmed)));
         };
         // A call on no ticket may not pend, so it makes no request.
         if self.ticket.is_none() {
             return Poll::Ready(Err(Fetch::cannot_pend(self, url)));
         }
-        let mut c = host.connector_from(self.ticket, self.state.issued);
+        let mut c = connect(self.ticket, self.state.issued);
         let mut ex = match self.state.current.take() {
             Some((at, ex)) if at == url => ex,
             _ => match Exchange::request(request(&parsed)) {
@@ -537,9 +537,9 @@ impl Fetch for HostIo<'_> {
     }
 
     fn wake(&self, waiters: &[Ticket]) {
-        if let Some(host) = self.host {
+        if let Some((_, wake)) = &self.host {
             for t in waiters {
-                host.wake(*t);
+                wake(*t);
             }
         }
     }

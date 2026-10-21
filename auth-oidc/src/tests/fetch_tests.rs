@@ -450,14 +450,14 @@ fn the_needs_are_outbound_in_their_class_anchored_then_public() {
         for need in [NEED_DISCOVERY, NEED_JWKS] {
             let n = &NEEDS[on(need, anchored) as usize];
             assert_eq!(n.keep_mode, KEEP_NAMED);
-            assert_eq!(n.keep_response_headers_len, 1);
-            assert!(!n.keep_response_headers.is_null());
+            assert_eq!(n.keep_response_headers_len(), 1);
+            assert!(!n.keep_response_headers_ptr().is_null());
         }
         let token = &NEEDS[on(NEED_TOKEN, anchored) as usize];
-        assert_eq!(token.keep_response_headers_len, 0);
+        assert_eq!(token.keep_response_headers_len(), 0);
     }
     assert_eq!(KEEP_LOCATION.len(), 1);
-    assert_eq!(KEEP_LOCATION[0].len, "location".len());
+    assert_eq!(KEEP_LOCATION[0].len(), "location".len());
 }
 
 /// THE CONNECTOR'S SCHEME RULE PER EGRESS CLASS, for a plaintext dial (`secure = false`) that the
