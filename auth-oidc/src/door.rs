@@ -270,16 +270,22 @@ impl Oidc {
     /// The tick's refresh ahead of the TTL on `opened`, over `host`'s connector on the driver
     /// ticket `ticket`, from `state`: PENDING (parked for `drive`) while its fetch is in flight,
     /// READY when it is done or nothing is due.
-    fn refresh_ahead(
+    fn refresh_ahead<O: AbiOut>(
         &self,
         host: Option<&Host>,
         ticket: Ticket,
         opened: Arc<Opened>,
         state: IoState,
+        out: &mut Out<'_, O>,
     ) -> Outcome {
         let mut io = HostIo::new(host, ticket, state, opened.module.anchored());
         match opened.module.refresh_ahead(Instant::now(), &mut io) {
             Step::Pending => {
+                // Woken at the fetch's 10s deadline, so a body that stalls dead is given up by
+                // the next `drive` rather than at the next tick.
+                if let Some(at) = io.deadline_ns() {
+                    out.wake_at(at);
+                }
                 let state = io.into_state();
                 *self.driving.lock().unwrap_or_else(PoisonError::into_inner) =
                     Some((opened, state));
@@ -362,7 +368,7 @@ impl Life for Oidc {
     ) -> Result<Refreshed, Refusal> {
         let now = self.now();
         let same_secret = match (
-            now.secret.as_deref().map(str::as_bytes),
+            now.secret.as_deref().map(String::as_bytes),
             lent_secret(secrets),
         ) {
             (Some(a), Some(b)) => busbar_contract::constant_time_eq(a, b),
@@ -816,7 +822,7 @@ impl SafeSlot for Tick {
         }
         // A tick starts its driver ticket's cycle: whatever the last one left in flight is over.
         *oidc.driving.lock().unwrap_or_else(PoisonError::into_inner) = None;
-        oidc.refresh_ahead(h.host(), ticket, opened, IoState::default())
+        oidc.refresh_ahead(h.host(), ticket, opened, IoState::default(), &mut out)
     }
 }
 
@@ -830,7 +836,7 @@ impl SafeSlot for Drive {
     fn call(
         instance: Instance<'_, Held<Oidc>>,
         _: Lent<'_, DriveIn>,
-        _: Out<'_, OutHead>,
+        mut out: Out<'_, OutHead>,
     ) -> Outcome {
         let Some(h) = instance.get() else {
             return Outcome::Fault;
@@ -842,7 +848,9 @@ impl SafeSlot for Drive {
             .unwrap_or_else(PoisonError::into_inner)
             .take();
         match parked {
-            Some((opened, state)) => oidc.refresh_ahead(h.host(), instance.ticket(), opened, state),
+            Some((opened, state)) => {
+                oidc.refresh_ahead(h.host(), instance.ticket(), opened, state, &mut out)
+            }
             None => Outcome::Ready,
         }
     }

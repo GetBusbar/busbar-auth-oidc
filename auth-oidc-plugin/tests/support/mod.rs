@@ -273,13 +273,6 @@ impl Idp {
         *self.stall.lock().unwrap() = Some(path.to_string());
     }
 
-    /// Deliver bodies whole again.
-    pub fn stop_trickling(&self) {
-        *self.trickle.lock().unwrap() = (None, 0);
-        *self.skew.lock().unwrap() = Duration::ZERO;
-        *self.stall.lock().unwrap() = None;
-    }
-
     /// The connections closed so far.
     pub fn closed(&self) -> Vec<u64> {
         self.closed.lock().unwrap().clone()
