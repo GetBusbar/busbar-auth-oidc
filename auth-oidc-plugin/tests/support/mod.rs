@@ -41,8 +41,8 @@ use busbar_contract::transport::ConnFacts;
 use busbar_plugin_loader::dispatch::kinds::auth::Auth;
 use busbar_plugin_loader::dispatch::{
     in_head, load_dropped, load_dropped_bytes, load_linked, now_ns, out_head, Bind, ConnTable,
-    DispatchConfig, Dispatcher, Done, Frame, InFrame, LinkedRow, LoadError, NoSink, OutFrame,
-    Plugin, NO_BLOB,
+    DispatchConfig, Dispatcher, Done, Frame, InFrame, LinkedRow, LoadError, LoadedDoor, NoSink,
+    OutFrame, Plugin, NO_BLOB,
 };
 
 mod issuer;
@@ -421,9 +421,17 @@ pub fn cdylib_path() -> Option<PathBuf> {
         .map(|(_, p)| p)
 }
 
+/// This crate's own bare `door`, as the loader takes a door it did not read from a library.
+#[allow(unused_unsafe)]
+pub fn loaded() -> LoadedDoor {
+    // SAFETY: `door` is this crate's own `plugin_door!` entry: it answers the `'static`, fully
+    // initialised door the SDK laid out.
+    unsafe { LoadedDoor::from_raw(busbar_auth_oidc::door) }
+}
+
 /// THE LINKED ROW: the door and the Statement it states.
 pub fn row() -> LinkedRow {
-    LinkedRow::of(busbar_auth_oidc::door).expect("the door states itself")
+    LinkedRow::of_loaded(loaded()).expect("the door states itself")
 }
 
 /// The Statement the door states, read back: its name and its needs are read off here, never off
@@ -514,28 +522,22 @@ pub fn bind(arm: &Arm<'_>, idp: &Arc<Idp>) -> Bound {
 }
 
 fn blob(bytes: &[u8], fmt: u32) -> Blob {
-    Blob {
-        ptr: bytes.as_ptr(),
-        len: bytes.len(),
-        fmt,
-        flags: 0,
-    }
+    // SAFETY: `bytes` is test-owned and outlives the `in` this view is stated in.
+    unsafe { Blob::from_raw_parts(bytes.as_ptr(), bytes.len(), fmt, 0) }
 }
 
 fn abi_str(s: &str) -> AbiStr {
-    AbiStr {
-        ptr: s.as_ptr(),
-        len: s.len(),
-    }
+    // SAFETY: `s` is test-owned and outlives the `in` this view is stated in.
+    unsafe { AbiStr::from_raw_parts(s.as_ptr(), s.len()) }
 }
 
 /// The plugin memory `s` names, as text (valid until its lease is released).
 fn text(s: AbiStr) -> String {
-    if s.ptr.is_null() {
+    if s.ptr().is_null() {
         return String::new();
     }
     // SAFETY: the door answered `s` READY under a lease the caller has not released yet.
-    String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(s.ptr, s.len) }).into_owned()
+    String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(s.ptr(), s.len()) }).into_owned()
 }
 
 /// The text a FAILED/REFUSED answer carried.

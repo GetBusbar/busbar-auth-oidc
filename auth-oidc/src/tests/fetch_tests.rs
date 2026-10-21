@@ -419,22 +419,27 @@ fn the_needs_are_outbound_in_their_class_anchored_then_public() {
     for (i, n) in NEEDS.iter().enumerate() {
         assert_eq!(n.direction, DIRECTION_OUTBOUND, "need {i}");
         assert_eq!(n.egress_class, EGRESS_OPERATOR_INFRASTRUCTURE, "need {i}");
-        assert_eq!(n.transport.len, "http".len(), "need {i}");
+        assert_eq!(n.transport.len(), "http".len(), "need {i}");
         let trust = if (i as u32) < PUBLIC {
             "settings.ca_cert_pem".len()
         } else {
             0
         };
-        assert_eq!(n.trust_from.len, trust, "need {i}");
+        assert_eq!(n.trust_from.len(), trust, "need {i}");
         assert_eq!(n.timeout_ms, FETCH_TIMEOUT_MS, "need {i}");
     }
     for anchored in [true, false] {
         assert_eq!(
-            NEEDS[on(NEED_DISCOVERY, anchored) as usize].target_from.len,
+            NEEDS[on(NEED_DISCOVERY, anchored) as usize]
+                .target_from
+                .len(),
             "settings.issuer".len()
         );
-        assert_eq!(NEEDS[on(NEED_JWKS, anchored) as usize].target_from.len, 0);
-        assert_eq!(NEEDS[on(NEED_TOKEN, anchored) as usize].target_from.len, 0);
+        assert_eq!(NEEDS[on(NEED_JWKS, anchored) as usize].target_from.len(), 0);
+        assert_eq!(
+            NEEDS[on(NEED_TOKEN, anchored) as usize].target_from.len(),
+            0
+        );
     }
     assert_eq!(
         (on(NEED_JWKS, true), on(NEED_JWKS, false)),

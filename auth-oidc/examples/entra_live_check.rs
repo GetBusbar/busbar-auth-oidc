@@ -40,7 +40,7 @@ use busbar_contract::transport::ConnFacts;
 use busbar_plugin_loader::dispatch::kinds::auth::Auth;
 use busbar_plugin_loader::dispatch::{
     in_head, load_linked, now_ns, out_head, Bind, ConnTable, DispatchConfig, Dispatcher, Frame,
-    LinkedRow, NoSink, Plugin,
+    LinkedRow, LoadedDoor, NoSink, Plugin,
 };
 
 /// An all-zero `T` (every ABI `in`/`out` is plain C data).
@@ -255,7 +255,11 @@ impl Host {
         ));
         *idp.wake.lock().unwrap() = Some(dispatcher.conn_waker());
         let conns: Arc<dyn DeclaredConns> = idp.clone();
-        let row = LinkedRow::of(busbar_auth_oidc::door).expect("the door states its Statement");
+        // SAFETY: `door` is this crate's own `plugin_door!` entry: it answers the `'static`, fully
+        // initialised door the SDK laid out.
+        #[allow(unused_unsafe)]
+        let door = unsafe { LoadedDoor::from_raw(busbar_auth_oidc::door) };
+        let row = LinkedRow::of_loaded(door).expect("the door states its Statement");
         let plugin = load_linked::<Auth>(
             &row,
             Bind {
@@ -270,12 +274,9 @@ impl Host {
         let mut reason = vec![0_u8; 1024];
         let mut i: OpenIn = z();
         i.head = in_head();
-        i.settings = Blob {
-            ptr: settings.as_ptr(),
-            len: settings.len(),
-            fmt: BLOB_JSON,
-            flags: 0,
-        };
+        // SAFETY: `settings` outlives the `open` this `in` is read by.
+        i.settings =
+            unsafe { Blob::from_raw_parts(settings.as_ptr(), settings.len(), BLOB_JSON, 0) };
         i.generation = 1;
         i.err_buf = reason.as_mut_ptr();
         i.err_cap = reason.len();
@@ -303,12 +304,8 @@ impl Host {
         );
         let mut i: VerifyIn = z();
         i.head = in_head();
-        i.credential = Blob {
-            ptr: token.as_ptr(),
-            len: token.len(),
-            fmt: BLOB_OCTETS,
-            flags: 0,
-        };
+        // SAFETY: `token` outlives the `verify` this `in` is read by.
+        i.credential = unsafe { Blob::from_raw_parts(token.as_ptr(), token.len(), BLOB_OCTETS, 0) };
         i.out_buf = IdentityBuf {
             buf: bytes.as_mut_ptr(),
             buf_cap: bytes.len(),

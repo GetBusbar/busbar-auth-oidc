@@ -6,7 +6,7 @@
 //! one table), run against the busbar rev this repo pins (`.busbar-ref`).
 //!
 //! The door is held two ways at once: LINKED (`busbar_auth_oidc::door`, the row a busbar
-//! build that compiles the module in registers, `LinkedRow::of`) and DROPPED IN (this crate's built
+//! build that compiles the module in registers, `LinkedRow::of_loaded`) and DROPPED IN (this crate's built
 //! cdylib, signed first-party into a temp `plugins/` directory under a manifest stating the door's
 //! Statement, found by the loader's scan and admitted against that signed Statement). Each is bound
 //! to a real dispatcher serving the host's clock and to a connection table that PLAYS THE IdP
@@ -39,7 +39,7 @@ mod support;
 // family, the far ends the module's needs reach: `conformance.json`), exact crossings, both folds
 // equal, its RED arms kept.
 busbar_plugin_loader::conformance_suite! {
-    door: busbar_auth_oidc::door,
+    loaded: support::loaded(),
     cdylib: "busbar_auth_oidc_plugin",
     inputs: include_str!("conformance.json"),
 }

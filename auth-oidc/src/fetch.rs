@@ -42,9 +42,9 @@ use std::task::Poll;
 use busbar_contract::abi::host::conn::connector::{
     Need, DIRECTION_OUTBOUND, EGRESS_OPERATOR_INFRASTRUCTURE, KEEP_NAMED,
 };
-use busbar_contract::abi::mechanism::call::{AbiStr, Blob};
+use busbar_contract::abi::mechanism::call::AbiStr;
 use busbar_contract::abi::mechanism::ticket::Ticket;
-use busbar_contract::abi::sdk::conn::{ConnFailure, Host};
+use busbar_contract::abi::sdk::conn::{ConnFailure, Connector, Host};
 use busbar_contract::abi::sdk::door::abi_str;
 use busbar_contract::abi::sdk::exchange::{exchange, Exchange, ExchangeResponse, Request};
 use busbar_contract::abi::sdk::net::{
@@ -87,10 +87,7 @@ const ISSUER_PATH: &str = "settings.issuer";
 /// The setting every need's extra trusted root comes from.
 const CA_CERT_PATH: &str = "settings.ca_cert_pem";
 
-const ABSENT: AbiStr = AbiStr {
-    ptr: std::ptr::null(),
-    len: 0,
-};
+const ABSENT: AbiStr = AbiStr::ABSENT;
 
 /// The egress class of every need: `operator-infrastructure` (ARCHITECT ruling 2026-10-09). 1.5.5
 /// accepted a plaintext token endpoint on a PRIVATE host, not only on loopback (`auth/token.rs`
@@ -107,26 +104,18 @@ pub const EGRESS_CLASS: u32 = EGRESS_OPERATOR_INFRASTRUCTURE;
 /// [`EGRESS_CLASS`], trusting the root `trust_from` names beside the public roots (`ABSENT`: the
 /// public roots only), reading back the response head fields `keep` names.
 const fn need(target_from: AbiStr, trust_from: AbiStr, keep: &'static [AbiStr]) -> Need {
-    Need {
-        direction: DIRECTION_OUTBOUND,
-        egress_class: EGRESS_CLASS,
-        transport: abi_str("http"),
-        auth: ABSENT,
-        target_from,
-        trust_from,
-        details: Blob::ABSENT,
-        keep_response_headers: if keep.is_empty() {
-            std::ptr::null()
-        } else {
-            keep.as_ptr()
-        },
-        keep_response_headers_len: keep.len(),
-        timeout_ms: FETCH_TIMEOUT_MS,
-        keep_mode: KEEP_NAMED,
-        _reserved: 0,
-        deny_response_headers: std::ptr::null(),
-        deny_response_headers_len: 0,
+    let mut n = Need::EMPTY;
+    n.direction = DIRECTION_OUTBOUND;
+    n.egress_class = EGRESS_CLASS;
+    n.transport = abi_str("http");
+    n.target_from = target_from;
+    n.trust_from = trust_from;
+    n.timeout_ms = FETCH_TIMEOUT_MS;
+    n.keep_mode = KEEP_NAMED;
+    if !keep.is_empty() {
+        n = n.with_keep_response_headers(keep);
     }
+    n
 }
 
 /// THE NEEDS, in index order: the ANCHORED set (trusting `ca_cert_pem`), then the PUBLIC set
@@ -434,10 +423,30 @@ pub struct IoState {
     redirected: Option<Redirected>,
 }
 
+/// What [`HostIo`] asks of the host handle it borrows for the call: its connector and its wake.
+/// The handle is the call's own borrow (never the host's `'static` install handle), held here as a
+/// trait object so no field names a `Host`.
+pub(crate) trait Connects: std::fmt::Debug {
+    /// The connector for one entry on `ticket`, its handles counting on from `issued`.
+    fn connector_from(&self, ticket: Ticket, issued: u32) -> Connector<'_>;
+    /// Wake `ticket`.
+    fn wake(&self, ticket: Ticket);
+}
+
+impl Connects for Host {
+    fn connector_from(&self, ticket: Ticket, issued: u32) -> Connector<'_> {
+        Host::connector_from(self, ticket, issued)
+    }
+
+    fn wake(&self, ticket: Ticket) {
+        Host::wake(self, ticket);
+    }
+}
+
 /// [`Fetch`] over the host's connector, for ONE entry of one op on `ticket`.
 #[derive(Debug)]
 pub struct HostIo<'h> {
-    host: Option<&'h Host>,
+    host: Option<&'h dyn Connects>,
     ticket: Ticket,
     state: IoState,
     anchored: bool,
@@ -450,7 +459,7 @@ impl<'h> HostIo<'h> {
     /// PUBLIC ones.
     pub fn new(host: Option<&'h Host>, ticket: Ticket, state: IoState, anchored: bool) -> Self {
         Self {
-            host,
+            host: host.map(|h| h as &dyn Connects),
             ticket,
             state,
             anchored,
