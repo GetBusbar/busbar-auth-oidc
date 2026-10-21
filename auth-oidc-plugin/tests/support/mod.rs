@@ -93,6 +93,15 @@ pub fn reset_clock_skew() {
     CLOCK_SKEW_NS.store(0, Ordering::SeqCst);
 }
 
+/// Puts the host clock back when dropped, so a failing test cannot leave it moved on.
+pub struct SkewGuard;
+
+impl Drop for SkewGuard {
+    fn drop(&mut self) {
+        reset_clock_skew();
+    }
+}
+
 /// The host clock reads so far (every test that binds holds [`serial`], so they are its own).
 pub fn clock_reads() -> u32 {
     CLOCK_READS.load(Ordering::SeqCst)
@@ -181,6 +190,11 @@ pub struct Idp {
     delay: Mutex<Duration>,
     /// How far each reply's wake moves the host clock on (zero: not at all).
     skew: Mutex<Duration>,
+    /// After the head, the body's first read pends, the clock moves on by the skew as its wake
+    /// fires, and every read after that pends for good (a body that trickles past the budget).
+    trickle: Mutex<bool>,
+    /// The connections the plugin closed, in order.
+    closed: Mutex<Vec<u64>>,
 }
 
 impl Idp {
@@ -200,6 +214,8 @@ impl Idp {
             pended: AtomicU32::new(0),
             delay: Mutex::new(Duration::from_millis(5)),
             skew: Mutex::new(Duration::ZERO),
+            trickle: Mutex::new(false),
+            closed: Mutex::new(Vec::new()),
         });
         let doc = serde_json::json!({
             "issuer": ISSUER,
@@ -230,6 +246,23 @@ impl Idp {
     /// time budget spent when it resumes.
     pub fn skew_clock_on_reply(&self, by: Duration) {
         *self.skew.lock().unwrap() = by;
+    }
+
+    /// Make every reply's body trickle (see the field), moving the clock on by `skew`.
+    pub fn trickle_body(&self, skew: Duration) {
+        *self.trickle.lock().unwrap() = true;
+        *self.skew.lock().unwrap() = skew;
+    }
+
+    /// Deliver bodies whole again.
+    pub fn stop_trickling(&self) {
+        *self.trickle.lock().unwrap() = false;
+        *self.skew.lock().unwrap() = Duration::ZERO;
+    }
+
+    /// The connections closed so far.
+    pub fn closed(&self) -> Vec<u64> {
+        self.closed.lock().unwrap().clone()
     }
 
     /// How long a reply's first read pends before the op's ticket is woken.
@@ -349,7 +382,11 @@ impl Conns for Idp {
                     .clone()
                     .expect("the table is armed");
                 let delay = *self.delay.lock().unwrap();
-                let skew = *self.skew.lock().unwrap();
+                let skew = if *self.trickle.lock().unwrap() {
+                    Duration::ZERO
+                } else {
+                    *self.skew.lock().unwrap()
+                };
                 std::thread::spawn(move || {
                     std::thread::sleep(delay);
                     CLOCK_SKEW_NS.fetch_add(skew.as_nanos() as u64, Ordering::SeqCst);
@@ -367,6 +404,26 @@ impl Conns for Idp {
                     ..piece(PieceKind::Fields, 0)
                 })
             }
+            2 if *self.trickle.lock().unwrap() => {
+                // The head came in budget; the body does not: pend, move the clock past the
+                // budget as the wake fires, and pend on every read after.
+                r.step = 9;
+                let wake = self
+                    .wake
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .expect("the table is armed");
+                let delay = *self.delay.lock().unwrap();
+                let skew = *self.skew.lock().unwrap();
+                std::thread::spawn(move || {
+                    std::thread::sleep(delay);
+                    CLOCK_SKEW_NS.fetch_add(skew.as_nanos() as u64, Ordering::SeqCst);
+                    wake(caller, ticket);
+                });
+                Err(ConnError::Pending)
+            }
+            9 => Err(ConnError::Pending),
             _ if r.at < r.body.len() => {
                 let n = (r.body.len() - r.at).min(buf.len());
                 buf[..n].copy_from_slice(&r.body[r.at..r.at + n]);
@@ -384,6 +441,7 @@ impl Conns for Idp {
     }
     fn close(&self, _: InstanceId, conn: ConnId) -> Result<(), ConnError> {
         self.reads.lock().unwrap().remove(&conn.0);
+        self.closed.lock().unwrap().push(conn.0);
         Ok(())
     }
 }

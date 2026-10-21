@@ -622,6 +622,7 @@ impl<'h> HostIo<'h> {
         need: u32,
         url: &str,
         asked: &str,
+        spent: Option<String>,
         request: impl FnOnce(&url::Url) -> Request,
     ) -> Poll<Result<ExchangeResponse, String>> {
         let parsed = match url::Url::parse(url) {
@@ -661,6 +662,17 @@ impl<'h> HostIo<'h> {
         };
         match exchange(&mut c, &mut ex, on(need, self.anchored), Some(url)) {
             Poll::Pending => {
+                if let Some(timeout) = spent {
+                    // The budget is spent and the exchange still pends (a body trickling past it):
+                    // give it up. `c.issued()` counts every handle it issued, the pending read
+                    // included, so the op's next request goes out fresh and replays nothing; the
+                    // stream the exchange established is closed on the host.
+                    if let Some(stream) = ex.stream() {
+                        let _ = c.close(stream);
+                    }
+                    self.state.issued = c.issued();
+                    return Poll::Ready(Err(timeout));
+                }
                 self.state.current = Some((url.to_string(), ex));
                 Poll::Pending
             }
@@ -684,25 +696,27 @@ impl<'h> HostIo<'h> {
     ) -> Poll<Result<ExchangeResponse, String>> {
         let need = need_for_hop(doc, hop.hops);
         let mut left_ms = FETCH_TIMEOUT_MS;
-        // A hop already in flight is RESUMED, never cut: the host enforces the budget the request was
-        // sent with and its timeout comes back through `send_failure` with the same text. The
-        // deadline is judged only before a new hop starts.
+        // The chain's one deadline is judged on every entry. The host's `timeout_ms` bounds only
+        // up to the first piece of the answer (an answer begun spends it), so a body that trickles
+        // is bounded here. A NEW hop with the budget spent never starts; a hop IN FLIGHT is driven
+        // once more (`run`), and given up only if it is still pending.
         let resuming = self.resumes(hop.at);
-        if let (Some((connect, _)), false, false) = (&self.host, self.ticket.is_none(), resuming) {
+        let mut spent: Option<String> = None;
+        if let (Some((connect, _)), false) = (&self.host, self.ticket.is_none()) {
             let mut c = connect(self.ticket, self.state.issued);
             if let Poll::Ready(Ok(now)) = c.clock_now() {
                 let began = *self.state.chain_started_ns.get_or_insert(now.mono_ns);
                 match chain_left_ms(began, now.mono_ns, asked) {
                     Ok(left) => left_ms = left,
-                    Err(text) => {
-                        // No hop is in flight here (a new one was about to start), so the chain
-                        // ends with nothing to drop.
-                        return Poll::Ready(Err(text));
-                    }
+                    Err(text) if resuming => spent = Some(text),
+                    // No hop is in flight here (a new one was about to start): nothing to drop.
+                    Err(text) => return Poll::Ready(Err(text)),
                 }
             }
         }
-        self.run(need, hop.at, asked, |u| get_request(u, hop.from, left_ms))
+        self.run(need, hop.at, asked, spent, |u| {
+            get_request(u, hop.from, left_ms)
+        })
     }
 }
 
@@ -740,7 +754,7 @@ impl Fetch for HostIo<'_> {
         secret: Option<&str>,
     ) -> Poll<Result<LoginHttpResponse, String>> {
         let url = hop.url.as_str();
-        self.run(NEED_TOKEN, url, url, |u| post_request(u, hop, secret))
+        self.run(NEED_TOKEN, url, url, None, |u| post_request(u, hop, secret))
             .map(|r| {
                 r.map_err(|e| failed(url, e)).and_then(|reply| {
                     Ok(LoginHttpResponse {

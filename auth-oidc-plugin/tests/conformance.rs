@@ -621,13 +621,12 @@ fn red_an_exchange_in_flight_past_the_budget_is_resumed_not_dropped() {
             stated: &stated,
         },
     ] {
-        support::reset_clock_skew();
+        let _skew = support::SkewGuard;
         let idp = Idp::new(&key);
         idp.skew_clock_on_reply(Duration::from_secs(11));
         let b = bind(&arm, &idp);
         open(&b.plugin, &config(AUDIENCE), None).expect("opens");
         let verdict = b.verify(Some(&token), None);
-        support::reset_clock_skew();
         assert!(verdict.starts_with("verdict 1 "), "{verdict}");
         assert_eq!(
             idp.sent_to(DISCOVERY_PATH).len(),
@@ -638,6 +637,56 @@ fn red_an_exchange_in_flight_past_the_budget_is_resumed_not_dropped() {
             idp.sent_to("/keys").len(),
             1,
             "one JWKS request, sent fresh"
+        );
+    }
+}
+
+/// RED, END TO END: the host's timeout ends at the first piece of the answer, so a body that
+/// trickles past the 10 s budget is bounded by the plugin. The head arrives in budget, the body's
+/// wake finds the clock 11 s on and the read still pending: the exchange is given up with reqwest's
+/// timed-out request text, its stream closed on the host, and the next verify goes out fresh and
+/// identifies. Both doors.
+#[test]
+fn red_a_body_trickling_past_the_budget_times_out_and_counts_its_handles() {
+    let _one = support::serial();
+    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let token = key.sign(&claims(AUDIENCE));
+    let lib = cdylib();
+    let stated = row().statement;
+    let url = format!("https://idp.conformance.example{DISCOVERY_PATH}");
+    for arm in [
+        Arm::Linked,
+        Arm::Dropped {
+            lib: &lib,
+            stated: &stated,
+        },
+    ] {
+        let _skew = support::SkewGuard;
+        let idp = Idp::new(&key);
+        idp.trickle_body(Duration::from_secs(11));
+        let b = bind(&arm, &idp);
+        open(&b.plugin, &config(AUDIENCE), None).expect("opens");
+        assert_eq!(
+            b.verify(Some(&token), None),
+            format!(
+                "Failed OIDC discovery fetch failed ({url}): request to {url} failed: error \
+                 sending request for url ({url}); set jwks_url explicitly"
+            )
+        );
+        let first = idp.sent_to(DISCOVERY_PATH);
+        assert_eq!(first.len(), 1);
+        assert!(
+            idp.closed().contains(&first[0].conn),
+            "the abandoned stream is closed on the host"
+        );
+        idp.stop_trickling();
+        support::reset_clock_skew();
+        let again = b.verify(Some(&token), None);
+        assert!(again.starts_with("verdict 1 "), "{again}");
+        assert_eq!(
+            idp.sent_to(DISCOVERY_PATH).len(),
+            2,
+            "sent fresh, not replayed"
         );
     }
 }
