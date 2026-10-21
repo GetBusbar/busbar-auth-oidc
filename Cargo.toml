@@ -10,8 +10,8 @@
 # `.busbar-ref`; no sibling-checkout path dependency ships in any manifest.
 #
 # THIRD-PARTY VERSIONS ARE THE FLEET'S, NOT THIS REPO'S. The table below is busbar's own root
-# `[workspace.dependencies]` (third-party rows) at busbar 7263f4e61b7af7fdadb9079394d139547e61d1c0, followed by the plugin-only rows
-# of busbar's `.github/fleet/deps.toml` at 7263f4e61b7af7fdadb9079394d139547e61d1c0. A member takes a crate with
+# `[workspace.dependencies]` (third-party rows) at busbar 317744d1a03a455e324c93f3789a9baf8b817a6a, followed by the plugin-only rows
+# of busbar's `.github/fleet/deps.toml` at 317744d1a03a455e324c93f3789a9baf8b817a6a. A member takes a crate with
 # `{ workspace = true }` (adding features if it needs them); a crate in neither table is a new
 # `deps.toml` row in busbar first. CI holds this repo's Cargo.lock to busbar's lock at the pin.
 [workspace]
@@ -43,7 +43,7 @@ busbar-plugin-loader = { git = "https://github.com/GetBusbar/busbar", rev = "317
 busbar-core-connector = { git = "https://github.com/GetBusbar/busbar", rev = "317744d1a03a455e324c93f3789a9baf8b817a6a", features = ["test-support"] }
 busbar-transport-http = { git = "https://github.com/GetBusbar/busbar-transport-http", rev = "12b078389496d4c1fd81b730f5d9d0887537c3b0" }
 busbar-transport-tcp = { git = "https://github.com/GetBusbar/busbar-transport-tcp", rev = "223ec3f02000de94089a1752635b9e206f7492e5" }
-# busbar's root [workspace.dependencies], third-party rows, at 7263f4e61b7af7fdadb9079394d139547e61d1c0
+# busbar's root [workspace.dependencies], third-party rows, at 317744d1a03a455e324c93f3789a9baf8b817a6a
 arc-swap = "1"
 async-trait = "0.1"
 axum = "0.8"
@@ -80,7 +80,6 @@ metrics-util = { version = "0.20.4", default-features = false }
 oauth-as = { version = "1.0.0", features = ["http", "jwt", "consent", "resource-metadata", "par", "dpop", "client-assertion"] }
 opentelemetry-proto = { version = "0.32", default-features = false, features = ["gen-tonic-messages", "trace"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
-proptest = "1"
 prost = { version = "0.14", default-features = false, features = ["std"] }
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
@@ -114,7 +113,7 @@ url = "2"
 webpki = { package = "rustls-webpki", version = "0.103", default-features = false, features = ["std", "ring"] }
 webpki-roots = "1"
 zeroize = "1"
-# busbar .github/fleet/deps.toml [plugin-deps], at 7263f4e61b7af7fdadb9079394d139547e61d1c0
+# busbar .github/fleet/deps.toml [plugin-deps], at 317744d1a03a455e324c93f3789a9baf8b817a6a
 fallible-iterator = "0.2"
 ldap3 = { version = "0.12", default-features = false, features = ["sync"] }
 mysql = { version = "28", default-features = false, features = ["minimal-rust"] }
