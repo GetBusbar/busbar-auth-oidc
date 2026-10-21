@@ -35,12 +35,12 @@ repository = "https://github.com/GetBusbar/busbar-auth-oidc"
 needless_update = "allow"
 
 [workspace.dependencies]
-busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "317744d1a03a455e324c93f3789a9baf8b817a6a" }
-busbar-plugin-loader = { git = "https://github.com/GetBusbar/busbar", rev = "317744d1a03a455e324c93f3789a9baf8b817a6a" }
+busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "59fbf4f99203652652ebde869c9dbe232af0e967" }
+busbar-plugin-loader = { git = "https://github.com/GetBusbar/busbar", rev = "59fbf4f99203652652ebde869c9dbe232af0e967" }
 # THE SUITE'S HOST CONNECTOR (dev-only; auth-oidc-plugin/tests/support/conformance_host.rs,
 # rendered because the declares file states network needs): busbar's connector and its TLS
 # test kit at the pin, and the transport framers those needs name, at the revs busbar links.
-busbar-core-connector = { git = "https://github.com/GetBusbar/busbar", rev = "317744d1a03a455e324c93f3789a9baf8b817a6a", features = ["test-support"] }
+busbar-core-connector = { git = "https://github.com/GetBusbar/busbar", rev = "59fbf4f99203652652ebde869c9dbe232af0e967", features = ["test-support"] }
 busbar-transport-http = { git = "https://github.com/GetBusbar/busbar-transport-http", rev = "12b078389496d4c1fd81b730f5d9d0887537c3b0" }
 busbar-transport-tcp = { git = "https://github.com/GetBusbar/busbar-transport-tcp", rev = "223ec3f02000de94089a1752635b9e206f7492e5" }
 # busbar's root [workspace.dependencies], third-party rows, at 7263f4e61b7af7fdadb9079394d139547e61d1c0
