@@ -226,9 +226,11 @@ fn a_redirect_to_http_is_refused() {
     assert_eq!(far.asked, vec![URL]);
 }
 
-/// A REDIRECT TO A METADATA OR PRIVATE ADDRESS IS REFUSED before it is asked for: a public IdP
-/// cannot bounce the module's GET into the node's own network. A private IdP's redirect to its
-/// own host is followed (it was configured, or discovered, there).
+/// A REDIRECT TO A METADATA ADDRESS IS REFUSED, and a redirect from a PUBLIC host to a private or
+/// loopback one is refused, before either is asked for: a public IdP cannot bounce the module's
+/// GET into the node's own network. A private IdP is followed within private addresses, its own
+/// host or another, as 1.5.5's client followed it (reqwest's default policy, no address check:
+/// busbar-auth-oidc v1.0.6 `reqwest_fetcher.rs`).
 #[test]
 fn a_redirect_to_a_private_or_metadata_address_is_refused() {
     for to in [
@@ -264,6 +266,29 @@ fn a_redirect_to_a_private_or_metadata_address_is_refused() {
         ("https://10.0.0.7/realms/corp/openid", served("{}")),
     ]);
     assert_eq!(far.get(private).as_deref(), Ok("{}"));
+    let mut far = Far::new(&[
+        (private, moved(307, "https://192.168.4.2/keys")),
+        ("https://192.168.4.2/keys", served("{}")),
+    ]);
+    assert_eq!(far.get(private).as_deref(), Ok("{}"));
+    // Public to private is refused at whichever hop it comes: a private IdP sent out to a public
+    // host is not let back into the private network by it.
+    let mut far = Far::new(&[
+        (private, moved(302, "https://cdn.idp.example/jwks")),
+        (
+            "https://cdn.idp.example/jwks",
+            moved(302, "https://10.0.0.8/jwks"),
+        ),
+    ]);
+    assert_eq!(
+        far.get(private),
+        Err(
+            "request to https://10.0.0.8/jwks failed: a redirect to a private or loopback \
+             address is not allowed"
+                .to_string()
+        )
+    );
+    assert_eq!(far.asked, vec![private, "https://cdn.idp.example/jwks"]);
 }
 
 /// A 3xx that is no redirect 1.5.5's client followed (no `location`, or a status it does not
