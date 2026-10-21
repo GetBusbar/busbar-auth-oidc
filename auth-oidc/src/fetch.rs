@@ -13,7 +13,8 @@
 //! class, cloud metadata refused, the destination guard applying. The module narrows the scheme to
 //! exactly what 1.5.5 accepted ([`plaintext_allowed`]): discovery and the JWKS https only (1.5.5's
 //! `https_only` fetcher); the token exchange https, or plaintext to a private or loopback host only
-//! (1.5.5 `auth/token.rs` `vet_hop_url`: a public host must use https). Every need rides the `http`
+//! (the rule is 1.5.5's `auth/token.rs` `vet_hop_url`: a public host must use https; it returned
+//! `Err(())`, so the refusal's words are the plugin's own). Every need rides the `http`
 //! transport, its connections secured by the target's `https` scheme (the connector's TLS). The
 //! discovery need is pinned to the `issuer` setting's target (`target_from`); the JWKS and token
 //! endpoints may be discovered, so the module names them per request.
@@ -199,8 +200,9 @@ pub trait Fetch {
 
 /// Whether a request on `need` may go to `url` in plaintext, as 1.5.5 judged it: never for
 /// discovery or the JWKS (1.5.5's fetcher was `https_only`); for the token exchange only when the
-/// URL's host is private or loopback (1.5.5 `auth/token.rs` `vet_hop_url`: "https for public hosts;
-/// http only for loopback/private (a local/on-prem IdP)"), read by the same host reader 1.5.5 used.
+/// URL's host is private or loopback (the rule of 1.5.5 `auth/token.rs` `vet_hop_url`: "https for
+/// public hosts; http only for loopback/private (a local/on-prem IdP)", which returned `Err(())`
+/// with no text), read by the same host reader 1.5.5 used.
 pub fn plaintext_allowed(need: u32, url: &str) -> bool {
     need == NEED_TOKEN
         && scheme_is(url, "http")
@@ -260,54 +262,73 @@ fn reqwest_says(kind: &str, url: &str) -> String {
     format!("{kind} for url ({url})")
 }
 
-/// Why a redirect from `asked` (the hop that answered it) to `next` is not followed, if it is not,
-/// as its text and the URL the report names (`request to {url} failed: ..`): the URL asked for
-/// reqwest's own refusals (1.5.5's `{url}` was the URL asked), `next` for the address refusals.
-/// - a URL that is not https: 1.5.5's `https_only` client refused it with reqwest's own text
-///   (`redirect.rs` `TowerRedirectPolicy::redirect`): `error following redirect for url (<next>)` for
-///   an `http` target, `builder error for url (<next>)` for any other scheme;
+/// Why a redirect from `asked` (the hop that answered it) to `next` is not followed, if it is not:
+/// - a URL that is not https: 1.5.5's `https_only` client refused it with reqwest's own text,
+///   `error following redirect for url (<url>)` for an `http` target and `builder error for url
+///   (<url>)` for any other scheme, where `<url>` is the URL ASKED (`url`): reqwest's blocking client
+///   overwrites the error's URL with the one the caller asked (`blocking/client.rs`, `with_url`);
 /// - a cloud-metadata or IPv6 link-local host, and a private or loopback host when the host that
 ///   redirected is public (owner-approved 2026-10-21, narrower than 1.5.5, which followed every
 ///   https target: reqwest's default ten-hop policy with no address check, busbar-auth-oidc v1.0.6
 ///   `auth-oidc/src/reqwest_fetcher.rs`). A private IdP is still followed within private addresses.
-pub fn refused_hop<'a>(asked: &str, next: &'a str, url: &'a str) -> Option<(&'a str, String)> {
+///
+/// The text is the cause only; the report is `request to {url} failed: <text>` ([`failed`]).
+pub fn refused_hop(asked: &str, next: &str, url: &str) -> Option<String> {
     if !scheme_is(next, "https") {
-        return Some((
-            url,
-            if scheme_is(next, "http") {
-                reqwest_says("error following redirect", next)
-            } else {
-                reqwest_says("builder error", next)
-            },
-        ));
+        return Some(if scheme_is(next, "http") {
+            reqwest_says("error following redirect", url)
+        } else {
+            reqwest_says("builder error", url)
+        });
     }
     let Some(host) = extract_normalized_host(next) else {
-        return Some((next, "the redirect names no host".to_string()));
+        return Some("the redirect names no host".to_string());
     };
     if host_is_cloud_metadata(&host) || host_is_link_local_v6(&host) {
-        return Some((
-            next,
-            "a redirect to a cloud metadata address is not allowed".to_string(),
-        ));
+        return Some("a redirect to a cloud metadata address is not allowed".to_string());
     }
     let from_private =
         extract_normalized_host(asked).is_some_and(|a| host_is_private_or_loopback(&a));
     if host_is_private_or_loopback(&host) && !from_private {
-        return Some((
-            next,
-            "a redirect to a private or loopback address is not allowed".to_string(),
-        ));
+        return Some("a redirect to a private or loopback address is not allowed".to_string());
     }
     None
 }
 
-/// Where a redirected GET stands across PENDING: the URL asked, the hop in flight, and how many
-/// redirects led to it.
+/// Where a redirected GET stands across PENDING: the URL asked, the hop in flight, the hop that
+/// redirected to it (its `Referer`) and how many redirects led to it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Redirected {
     asked: String,
     at: String,
+    from: Option<String>,
     hops: u8,
+}
+
+/// One request of a followed GET: the URL, how many redirects led to it, and the URL that
+/// redirected to it (`None` for the first).
+#[derive(Debug, Clone, Copy)]
+pub struct Hop<'a> {
+    /// The URL to ask.
+    pub at: &'a str,
+    /// Redirects followed to reach it.
+    pub hops: u8,
+    /// The `Referer` the hop is sent with (the hop that redirected here, [`referer`]).
+    pub from: Option<&'a str>,
+}
+
+/// The `Referer` reqwest sets on a redirect hop (`redirect.rs` `make_referer`): the previous URL
+/// without userinfo or fragment; none when going from https to http (never followed here).
+fn referer(previous: &str, next: &str) -> Option<String> {
+    let mut prev = url::Url::parse(previous).ok()?;
+    let next = url::Url::parse(next).ok()?;
+    if next.scheme() == "http" && prev.scheme() == "https" {
+        return None;
+    }
+    let _ = prev.set_username("");
+    let _ = prev.set_password(None);
+    prev.set_fragment(None);
+    Some(prev.into())
 }
 
 /// THE GET OF `url`, FOLLOWED (1.5.5's client: reqwest's default redirect policy under
@@ -322,42 +343,48 @@ pub struct Redirected {
 pub fn follow(
     url: &str,
     chain: &mut Option<Redirected>,
-    mut one: impl FnMut(&str) -> Poll<Result<ExchangeResponse, String>>,
+    mut one: impl FnMut(Hop<'_>) -> Poll<Result<ExchangeResponse, String>>,
 ) -> Poll<Result<String, String>> {
-    let (mut at, mut hops) = match chain.take() {
-        Some(r) if r.asked == url => (r.at, r.hops),
-        _ => (url.to_string(), 0),
+    let (mut at, mut from, mut hops) = match chain.take() {
+        Some(r) if r.asked == url => (r.at, r.from, r.hops),
+        _ => (url.to_string(), None, 0),
     };
     loop {
-        let reply = match one(&at) {
+        let reply = match one(Hop {
+            at: &at,
+            hops,
+            from: from.as_deref(),
+        }) {
             Poll::Pending => {
                 if hops > 0 {
                     *chain = Some(Redirected {
                         asked: url.to_string(),
                         at,
+                        from,
                         hops,
                     });
                 }
                 return Poll::Pending;
             }
-            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+            Poll::Ready(Err(e)) => return Poll::Ready(Err(failed(url, e))),
             Poll::Ready(Ok(reply)) => reply,
         };
         let Some(next) = redirect(&at, &reply) else {
             return Poll::Ready(document(url, reply.status, reply.body));
         };
         if hops >= MAX_REDIRECTS {
-            // reqwest's `TooManyRedirects`, wrapped as a redirect error naming the hop that
-            // answered the eleventh redirect.
+            // reqwest's `TooManyRedirects`, wrapped as a redirect error (its URL overwritten with
+            // the one asked).
             return Poll::Ready(Err(failed(
                 url,
-                reqwest_says("error following redirect", &at),
+                reqwest_says("error following redirect", url),
             )));
         }
-        if let Some((named, why)) = refused_hop(&at, &next, url) {
-            return Poll::Ready(Err(failed(named, why)));
+        if let Some(why) = refused_hop(&at, &next, url) {
+            return Poll::Ready(Err(failed(url, why)));
         }
         hops += 1;
+        from = referer(&at, &next);
         at = next;
     }
 }
@@ -388,14 +415,19 @@ fn head_target(url: &url::Url) -> Vec<u8> {
     .into_bytes()
 }
 
-/// The GET of `url`, as 1.5.5's client sent it.
-pub fn get_request(url: &url::Url) -> Request {
+/// The GET of `url`, as 1.5.5's client sent it, bounded by `timeout_ms` (what is left of the
+/// chain's one total deadline), with the `Referer` reqwest adds on a redirect hop.
+pub fn get_request(url: &url::Url, referer: Option<&str>, timeout_ms: u64) -> Request {
+    let mut fields = vec![(b"accept".to_vec(), b"*/*".to_vec())];
+    if let Some(from) = referer {
+        fields.push((b"referer".to_vec(), from.as_bytes().to_vec()));
+    }
     Request {
         method: b"GET".to_vec(),
         target: head_target(url),
-        fields: vec![(b"accept".to_vec(), b"*/*".to_vec())],
+        fields,
         body: Vec::new(),
-        timeout_ms: FETCH_TIMEOUT_MS,
+        timeout_ms,
     }
 }
 
@@ -440,11 +472,25 @@ pub fn post_request(url: &url::Url, hop: &LoginHop, secret: Option<&str>) -> Req
 
 /// What an op parks of its requests across PENDING: the handles its finished exchanges issued, the
 /// exchange in flight (with the URL it fetches), and the redirects a GET has followed to it.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct IoState {
     issued: u32,
     current: Option<(String, Exchange)>,
     redirected: Option<Redirected>,
+    /// The host's monotonic clock when the GET in flight began: the chain's one 10s deadline runs
+    /// from it (1.5.5's client timeout covered the whole request, redirects included).
+    chain_started_ns: Option<u64>,
+}
+
+// Not derived: `current` holds a request in flight, its form body the encoded client secret.
+impl std::fmt::Debug for IoState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IoState")
+            .field("issued", &self.issued)
+            .field("in_flight", &self.current.as_ref().map(|(url, _)| url))
+            .field("redirected", &self.redirected)
+            .finish_non_exhaustive()
+    }
 }
 
 /// The connector for one entry on a ticket, its handles counting on from the second argument.
@@ -470,6 +516,17 @@ impl std::fmt::Debug for HostIo<'_> {
             .field("anchored", &self.anchored)
             .field("wanted", &self.wanted)
             .finish()
+    }
+}
+
+/// The need hop number `hops` of a GET for `doc` goes out on: the document's own need for the first
+/// hop; the untargeted JWKS need for every redirect hop (a redirect may leave the issuer's host,
+/// which the discovery need, pinned to the issuer's target, would refuse).
+pub const fn need_for_hop(doc: Doc, hops: u8) -> u32 {
+    if hops > 0 {
+        NEED_JWKS
+    } else {
+        doc.need()
     }
 }
 
@@ -503,7 +560,8 @@ impl<'h> HostIo<'h> {
     }
 
     /// The https-only exchange `request` builds for `url`, on `need`: resumed when it is the one in
-    /// flight, else started.
+    /// flight, else started. An error is the bare cause; the caller names the URL asked
+    /// (`request to {url} failed: {cause}`, [`failed`]).
     fn run(
         &mut self,
         need: u32,
@@ -512,7 +570,7 @@ impl<'h> HostIo<'h> {
     ) -> Poll<Result<ExchangeResponse, String>> {
         let parsed = match url::Url::parse(url) {
             Ok(u) => u,
-            Err(e) => return Poll::Ready(Err(failed(url, e))),
+            Err(e) => return Poll::Ready(Err(e.to_string())),
         };
         // THE SCHEME, as 1.5.5 judged it ([`plaintext_allowed`]): https, or (the token exchange
         // only) plaintext to a private or loopback host. The operator-infrastructure class lets
@@ -520,30 +578,29 @@ impl<'h> HostIo<'h> {
         // is asked and before the secret is in any request. (The token exchange's HOST is held
         // to the operator's hosts before its hop is built: `OidcModule::token_exchange`.)
         if parsed.scheme() != "https" && !plaintext_allowed(need, url) {
-            // The token exchange's refusal is 1.5.5's core (`vet_hop_url`); a document fetch was
-            // 1.5.5's `https_only` client, whose refusal is reqwest's own text.
-            return Poll::Ready(Err(failed(
-                url,
-                if need == NEED_TOKEN {
-                    "URL scheme is not allowed".to_string()
-                } else {
-                    reqwest_says("builder error", parsed.as_str())
-                },
-            )));
+            // A document fetch was 1.5.5's `https_only` client, whose refusal is reqwest's own
+            // text. The token exchange was 1.5.5's core (`vet_hop_url`), which returned `Err(())`
+            // with no text; its words reach a warning log only, so this text is the plugin's own.
+            return Poll::Ready(Err(if need == NEED_TOKEN {
+                "URL scheme is not allowed".to_string()
+            } else {
+                reqwest_says("builder error", parsed.as_str())
+            }));
         }
         let Some((connect, _)) = &self.host else {
-            return Poll::Ready(Err(failed(url, ConnFailure::Unarmed)));
+            return Poll::Ready(Err(ConnFailure::Unarmed.to_string()));
         };
         // A call on no ticket may not pend, so it makes no request.
         if self.ticket.is_none() {
-            return Poll::Ready(Err(Fetch::cannot_pend(self, url)));
+            self.wanted = true;
+            return Poll::Ready(Err(ConnFailure::NoTicket.to_string()));
         }
         let mut c = connect(self.ticket, self.state.issued);
         let mut ex = match self.state.current.take() {
             Some((at, ex)) if at == url => ex,
             _ => match Exchange::request(request(&parsed)) {
                 Ok(ex) => ex,
-                Err(e) => return Poll::Ready(Err(failed(url, e))),
+                Err(e) => return Poll::Ready(Err(e.to_string())),
             },
         };
         match exchange(&mut c, &mut ex, on(need, self.anchored), Some(url)) {
@@ -553,9 +610,37 @@ impl<'h> HostIo<'h> {
             }
             Poll::Ready(r) => {
                 self.state.issued = c.issued();
-                Poll::Ready(r.map_err(|e| failed(url, e)))
+                Poll::Ready(r.map_err(|e| e.to_string()))
             }
         }
+    }
+
+    /// One hop of a followed GET of `asked` (for `doc`): the first hop goes out on the document's
+    /// own need; a REDIRECT hop on the untargeted JWKS need (the host ABI's per-request target), as
+    /// 1.5.5's client followed a redirect to another host, which the discovery need, pinned to the
+    /// issuer's target, would refuse. The request carries what is left of the chain's one 10s
+    /// deadline (1.5.5's client timeout covered the whole request).
+    fn get_hop(
+        &mut self,
+        doc: Doc,
+        asked: &str,
+        hop: Hop<'_>,
+    ) -> Poll<Result<ExchangeResponse, String>> {
+        let need = need_for_hop(doc, hop.hops);
+        let mut left_ms = FETCH_TIMEOUT_MS;
+        if let (Some((connect, _)), false) = (&self.host, self.ticket.is_none()) {
+            let mut c = connect(self.ticket, self.state.issued);
+            if let Poll::Ready(Ok(now)) = c.clock_now() {
+                let began = *self.state.chain_started_ns.get_or_insert(now.mono_ns);
+                let spent_ms = now.mono_ns.saturating_sub(began) / 1_000_000;
+                if spent_ms >= FETCH_TIMEOUT_MS {
+                    // reqwest's timed-out request, its URL the one asked.
+                    return Poll::Ready(Err(reqwest_says("error sending request", asked)));
+                }
+                left_ms = FETCH_TIMEOUT_MS - spent_ms;
+            }
+        }
+        self.run(need, hop.at, |u| get_request(u, hop.from, left_ms))
     }
 }
 
@@ -578,10 +663,12 @@ impl Fetch for HostIo<'_> {
     }
 
     fn get(&mut self, doc: Doc, url: &str) -> Poll<Result<String, String>> {
-        let need = doc.need();
         let mut chain = self.state.redirected.take();
-        let got = follow(url, &mut chain, |at| self.run(need, at, get_request));
+        let got = follow(url, &mut chain, |hop| self.get_hop(doc, url, hop));
         self.state.redirected = chain;
+        if got.is_ready() {
+            self.state.chain_started_ns = None;
+        }
         got
     }
 
@@ -593,7 +680,7 @@ impl Fetch for HostIo<'_> {
         let url = hop.url.as_str();
         self.run(NEED_TOKEN, url, |u| post_request(u, hop, secret))
             .map(|r| {
-                r.and_then(|reply| {
+                r.map_err(|e| failed(url, e)).and_then(|reply| {
                     Ok(LoginHttpResponse {
                         status: reply.status,
                         body: capped(url, reply.body, MAX_JWKS_BYTES)?,

@@ -361,7 +361,14 @@ impl Life for Oidc {
         _generation: u64,
     ) -> Result<Refreshed, Refusal> {
         let now = self.now();
-        let same_secret = now.secret.as_deref().map(String::as_bytes) == lent_secret(secrets);
+        let same_secret = match (
+            now.secret.as_deref().map(str::as_bytes),
+            lent_secret(secrets),
+        ) {
+            (Some(a), Some(b)) => busbar_contract::constant_time_eq(a, b),
+            (None, None) => true,
+            _ => false,
+        };
         let reopened = if now.settings == settings && same_secret {
             None
         } else {

@@ -99,14 +99,14 @@ impl Far {
                 .iter()
                 .find(|(u, _)| u == at)
                 .map(|(_, r)| r.clone())
-                .ok_or_else(|| failed(at, "nothing answers here")),
+                .ok_or_else(|| "nothing answers here".to_string()),
         )
     }
 
     fn get(&mut self, url: &str) -> Result<String, String> {
         let mut chain = None;
         loop {
-            if let Poll::Ready(r) = follow(url, &mut chain, |at| self.one(at)) {
+            if let Poll::Ready(r) = follow(url, &mut chain, |hop| self.one(hop.at)) {
                 return r;
             }
         }
@@ -264,6 +264,12 @@ fn a_redirect_to_a_private_or_metadata_address_is_refused() {
     ] {
         let mut far = Far::new(&[(URL, moved(302, to))]);
         let err = far.get(URL).expect_err(to);
+        assert!(
+            err.starts_with(&format!(
+                "request to {URL} failed: a redirect to a cloud metadata"
+            )),
+            "{to}: {err}"
+        );
         assert!(err.ends_with("is not allowed"), "{to}: {err}");
         assert_eq!(far.asked, vec![URL], "{to} is never asked");
     }
@@ -277,7 +283,7 @@ fn a_redirect_to_a_private_or_metadata_address_is_refused() {
         assert_eq!(
             far.get(URL),
             Err(format!(
-                "request to {to} failed: a redirect to a private or loopback address is not \
+                "request to {URL} failed: a redirect to a private or loopback address is not \
                  allowed"
             ))
         );
@@ -306,8 +312,8 @@ fn a_redirect_to_a_private_or_metadata_address_is_refused() {
     assert_eq!(
         far.get(private),
         Err(
-            "request to https://10.0.0.8/jwks failed: a redirect to a private or loopback \
-             address is not allowed"
+            "request to https://10.0.0.7/realms/corp/.well-known/openid-configuration failed: \
+             a redirect to a private or loopback address is not allowed"
                 .to_string()
         )
     );
@@ -412,7 +418,7 @@ fn the_token_exchange_is_a_url_encoded_form_post_to_the_endpoint_path() {
 #[test]
 fn a_document_get_names_the_path_and_query() {
     let url = url::Url::parse("https://idp.example/tenant/keys?appid=1").unwrap();
-    let r = get_request(&url);
+    let r = get_request(&url, None, FETCH_TIMEOUT_MS);
     assert_eq!(
         (r.method.as_slice(), r.target.as_slice()),
         (&b"GET"[..], &b"/tenant/keys?appid=1"[..])
@@ -649,4 +655,88 @@ fn documents_stay_https_only_whatever_the_host() {
     }
     assert!(plaintext_allowed(NEED_TOKEN, "http://10.1.2.3/token"));
     assert!(!plaintext_allowed(NEED_TOKEN, "https://10.1.2.3/token"));
+}
+
+/// A REDIRECT HOP GOES OUT ON THE UNTARGETED NEED (a redirect may leave the issuer's host, which
+/// the discovery need, pinned to the issuer's target, refuses); the first hop on its document's own.
+#[test]
+fn a_redirect_hop_goes_out_on_the_untargeted_need() {
+    assert_eq!(need_for_hop(Doc::Discovery, 0), NEED_DISCOVERY);
+    assert_eq!(need_for_hop(Doc::Jwks, 0), NEED_JWKS);
+    for doc in [Doc::Discovery, Doc::Jwks] {
+        for hops in 1..=MAX_REDIRECTS {
+            assert_eq!(need_for_hop(doc, hops), NEED_JWKS);
+        }
+    }
+    for anchored in [true, false] {
+        let hop_need = &NEEDS[on(need_for_hop(Doc::Discovery, 1), anchored) as usize];
+        assert!(hop_need.target_from.is_empty(), "no pinned target");
+        assert_eq!(
+            hop_need.keep_response_headers_len(),
+            1,
+            "it reads `location` back"
+        );
+    }
+}
+
+/// A REDIRECT HOP CARRIES A `Referer` (reqwest's `make_referer`): the previous URL without userinfo
+/// or fragment; the first hop none.
+#[test]
+fn a_redirect_hop_carries_the_previous_url_as_its_referer() {
+    let mut seen: Vec<(String, u8, Option<String>)> = Vec::new();
+    let mut chain = None;
+    let answers = [
+        (
+            "https://u:p@idp.example/a#frag",
+            moved(302, "https://cdn.example/b"),
+        ),
+        ("https://cdn.example/b", moved(302, "/c")),
+        ("https://cdn.example/c", served("{}")),
+    ];
+    let got = follow("https://u:p@idp.example/a#frag", &mut chain, |hop| {
+        seen.push((hop.at.to_string(), hop.hops, hop.from.map(str::to_string)));
+        let r = answers
+            .iter()
+            .find(|(u, _)| url::Url::parse(u).unwrap().as_str() == hop.at);
+        Poll::Ready(Ok(r.expect("scripted").1.clone()))
+    });
+    assert_eq!(got, Poll::Ready(Ok("{}".to_string())));
+    assert_eq!(seen[0].2, None);
+    assert_eq!(seen[1].2.as_deref(), Some("https://idp.example/a"));
+    assert_eq!(seen[2].2.as_deref(), Some("https://cdn.example/b"));
+    let r = get_request(
+        &url::Url::parse("https://cdn.example/b").unwrap(),
+        Some("https://idp.example/a"),
+        7_000,
+    );
+    assert!(r
+        .fields
+        .contains(&(b"referer".to_vec(), b"https://idp.example/a".to_vec())));
+    assert_eq!(r.timeout_ms, 7_000);
+}
+
+/// EVERY ERROR NAMES THE URL ASKED, whichever hop failed (1.5.5's `request to {url} failed: ..`).
+#[test]
+fn a_later_hop_failure_names_the_url_asked() {
+    let mut far = Far::new(&[(URL, moved(302, "https://cdn.idp.example/jwks"))]);
+    assert_eq!(
+        far.get(URL),
+        Err(format!("request to {URL} failed: nothing answers here"))
+    );
+}
+
+/// THE HOST HANDLE'S DEBUG NAMES NO REQUEST IN FLIGHT (its form body is the encoded client secret).
+#[test]
+fn the_io_debug_prints_no_exchange_state() {
+    let url = url::Url::parse("https://idp.example/token").unwrap();
+    let mut h = hop();
+    h.form
+        .push(("client_secret".to_string(), "hunter2-secret".to_string()));
+    let ex = Exchange::request(post_request(&url, &h, Some("hunter2-secret"))).unwrap();
+    let state = IoState {
+        current: Some((url.to_string(), ex)),
+        ..IoState::default()
+    };
+    let io = HostIo::new(None, Ticket::NONE, state, false);
+    assert!(!format!("{io:?}").contains("hunter2"));
 }
