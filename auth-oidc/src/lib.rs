@@ -42,6 +42,7 @@ use std::time::{Duration, Instant};
 #[macro_use]
 mod flight;
 pub mod cache;
+pub mod carried;
 pub mod discovery;
 pub mod door;
 pub mod fetch;

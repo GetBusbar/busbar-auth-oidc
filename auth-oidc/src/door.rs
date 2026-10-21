@@ -461,11 +461,14 @@ const ABSENT: Span = Span {
     len: 0,
 };
 
-/// The one line this plugin's credential arrives on, named whatever its verdict.
-const AUTHORIZATION: &str = "authorization";
-
-/// The Statement's carrier marks: the line `verify` reads its bearer from.
-const CARRIERS: &[MarkWord] = &[carrier(AUTHORIZATION)];
+/// The Statement's carrier marks: the lines `verify` reads its bearer from when the host lends no
+/// credential ([`crate::carried::LINES`], in their order), the lines a host lends `verify`; and
+/// the lines it names for the transport to strip whatever its verdict.
+const CARRIERS: &[MarkWord] = &[
+    carrier(crate::carried::AUTHORIZATION),
+    carrier(crate::carried::X_API_KEY),
+    carrier(crate::carried::X_GOOG_API_KEY),
+];
 
 /// Write the answer into the host's buffers and answer READY with `verdict`: for `verify` the strip
 /// names and the decision (`strip`), and the identity `p` (if any); or the SHORT FAILED, every
@@ -481,7 +484,7 @@ fn answer(
 ) -> Outcome {
     let (mut bytes, mut groups) = (buf.buf(), buf.groups());
     let strips: &[&str] = if strip.is_some() {
-        &[AUTHORIZATION]
+        &crate::carried::LINES
     } else {
         &[]
     };
@@ -556,7 +559,25 @@ fn answer(
     Outcome::Ready
 }
 
-/// `verify`: the presented credential judged as a bearer token.
+/// The value of the first field line `verify` was lent under `name` (ASCII case-insensitive); `None`
+/// when no line of that name was lent.
+fn line<'a>(input: Lent<'a, VerifyIn>, name: &str) -> Option<&'a [u8]> {
+    input
+        .lines()
+        .iter()
+        .find(|l| {
+            l.field(|l| &l.name)
+                .bytes()
+                .eq_ignore_ascii_case(name.as_bytes())
+        })
+        .map(|l| l.field(|l| &l.value))
+        .filter(|v| v.fmt != BLOB_ABSENT && !v.ptr.is_null())
+        .map(Lent::<Blob>::bytes)
+}
+
+/// `verify`: the presented credential judged as a bearer token — the credential the host lent, or,
+/// with none lent, the bearer this module's own lines carry ([`crate::carried`]). A lent credential
+/// (the chain's candidate, a DPoP-proven token) is judged first, so both paths judge one token.
 #[derive(Debug)]
 pub struct Verify;
 impl SafeSlot for Verify {
@@ -572,7 +593,12 @@ impl SafeSlot for Verify {
             return Outcome::Fault;
         };
         let c = input.field(|i| &i.credential);
-        let credential = (c.fmt != BLOB_ABSENT && !c.ptr.is_null()).then(|| c.bytes());
+        let lent = (c.fmt != BLOB_ABSENT && !c.ptr.is_null()).then(|| c.bytes());
+        // No credential lent (THE DESIGN §6, "Auth points and guest lists": no kernel step names
+        // an inbound credential line; the line's style names them): the bearer on this module's
+        // own lines, by the extraction the chain lent it with.
+        let credential =
+            lent.or_else(|| crate::carried::carried(|name| line(input, name)).map(str::as_bytes));
         let token = match credential.map(std::str::from_utf8) {
             // Bytes that are not text are no JWT: not this module's credential, answered as one (as
             // 1.5.5 passed a header that did not read as text): PASS, the chain continues, and the
