@@ -683,6 +683,41 @@ impl<'h> HostIo<'h> {
         }
     }
 
+    /// The chain's one deadline, judged on every entry (the host's `timeout_ms` bounds only up to
+    /// the first piece of the answer, so a body that trickles or stalls is bounded here): the
+    /// milliseconds left for the request, and, when the budget is spent on a request IN FLIGHT
+    /// (`resuming`), the timeout text to give it up with once `run` has driven it once more. A NEW
+    /// request with the budget spent never starts (`Err`: nothing to drop).
+    ///
+    /// # Errors
+    /// The budget is spent and no request is in flight.
+    fn budget(&mut self, asked: &str, resuming: bool) -> Result<(u64, Option<String>), String> {
+        let mut left_ms = FETCH_TIMEOUT_MS;
+        let mut spent = None;
+        if let (Some((connect, _)), false) = (&self.host, self.ticket.is_none()) {
+            let mut c = connect(self.ticket, self.state.issued);
+            if let Poll::Ready(Ok(now)) = c.clock_now() {
+                let began = *self.state.chain_started_ns.get_or_insert(now.mono_ns);
+                match chain_left_ms(began, now.mono_ns, asked) {
+                    Ok(left) => left_ms = left,
+                    Err(text) if resuming => spent = Some(text),
+                    Err(text) => return Err(text),
+                }
+            }
+        }
+        Ok((left_ms, spent))
+    }
+
+    /// When the request in flight runs out of budget, on the host's monotonic clock: the wake the
+    /// op arms so a body that stalls dead (no wake of its own) is still given up at the deadline.
+    pub fn deadline_ns(&self) -> Option<u64> {
+        self.state
+            .current
+            .as_ref()
+            .and(self.state.chain_started_ns)
+            .map(|began| began.saturating_add(FETCH_TIMEOUT_MS * 1_000_000))
+    }
+
     /// One hop of a followed GET of `asked` (for `doc`): the first hop goes out on the document's
     /// own need; a REDIRECT hop on the untargeted JWKS need (the host ABI's per-request target), as
     /// 1.5.5's client followed a redirect to another host, which the discovery need, pinned to the
@@ -695,25 +730,11 @@ impl<'h> HostIo<'h> {
         hop: Hop<'_>,
     ) -> Poll<Result<ExchangeResponse, String>> {
         let need = need_for_hop(doc, hop.hops);
-        let mut left_ms = FETCH_TIMEOUT_MS;
-        // The chain's one deadline is judged on every entry. The host's `timeout_ms` bounds only
-        // up to the first piece of the answer (an answer begun spends it), so a body that trickles
-        // is bounded here. A NEW hop with the budget spent never starts; a hop IN FLIGHT is driven
-        // once more (`run`), and given up only if it is still pending.
         let resuming = self.resumes(hop.at);
-        let mut spent: Option<String> = None;
-        if let (Some((connect, _)), false) = (&self.host, self.ticket.is_none()) {
-            let mut c = connect(self.ticket, self.state.issued);
-            if let Poll::Ready(Ok(now)) = c.clock_now() {
-                let began = *self.state.chain_started_ns.get_or_insert(now.mono_ns);
-                match chain_left_ms(began, now.mono_ns, asked) {
-                    Ok(left) => left_ms = left,
-                    Err(text) if resuming => spent = Some(text),
-                    // No hop is in flight here (a new one was about to start): nothing to drop.
-                    Err(text) => return Poll::Ready(Err(text)),
-                }
-            }
-        }
+        let (left_ms, spent) = match self.budget(asked, resuming) {
+            Ok(b) => b,
+            Err(text) => return Poll::Ready(Err(text)),
+        };
         self.run(need, hop.at, asked, spent, |u| {
             get_request(u, hop.from, left_ms)
         })
@@ -754,15 +775,30 @@ impl Fetch for HostIo<'_> {
         secret: Option<&str>,
     ) -> Poll<Result<LoginHttpResponse, String>> {
         let url = hop.url.as_str();
-        self.run(NEED_TOKEN, url, url, None, |u| post_request(u, hop, secret))
-            .map(|r| {
-                r.map_err(|e| failed(url, e)).and_then(|reply| {
-                    Ok(LoginHttpResponse {
-                        status: reply.status,
-                        body: capped(url, reply.body, MAX_JWKS_BYTES)?,
-                    })
+        // The token exchange has its own 10s budget from its first request (1.5.5's hop client
+        // `.timeout(10s)`, `auth/token.rs`): in flight past it, it is driven once more and given up
+        // (stream closed, handles counted) as a failure, which the login serves as an outage.
+        let resuming = self.resumes(url);
+        let (left_ms, spent) = match self.budget(url, resuming) {
+            Ok(b) => b,
+            Err(text) => return Poll::Ready(Err(failed(url, text))),
+        };
+        let got = self.run(NEED_TOKEN, url, url, spent, |u| {
+            let mut r = post_request(u, hop, secret);
+            r.timeout_ms = left_ms;
+            r
+        });
+        if got.is_ready() {
+            self.state.chain_started_ns = None;
+        }
+        got.map(|r| {
+            r.map_err(|e| failed(url, e)).and_then(|reply| {
+                Ok(LoginHttpResponse {
+                    status: reply.status,
+                    body: capped(url, reply.body, MAX_JWKS_BYTES)?,
                 })
             })
+        })
     }
 }
 

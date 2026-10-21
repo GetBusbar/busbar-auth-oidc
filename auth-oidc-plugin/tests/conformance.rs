@@ -643,11 +643,12 @@ fn red_an_exchange_in_flight_past_the_budget_is_resumed_not_dropped() {
 
 /// RED, END TO END: the host's timeout ends at the first piece of the answer, so a body that
 /// trickles past the 10 s budget is bounded by the plugin. The head arrives in budget, the body's
-/// wake finds the clock 11 s on and the read still pending: the exchange is given up with reqwest's
-/// timed-out request text, its stream closed on the host, and the next verify goes out fresh and
-/// identifies. Both doors.
+/// wake finds the clock 11 s on and the read still pending: the exchange is given up with the
+/// timed-out request text, its stream closed on the host. (1.5.5 printed `reading {url} response
+/// body failed: ..` for a mid-body stall: a KNOWN DIFFERENCE, the SDK cannot tell head from body.)
+/// Both doors.
 #[test]
-fn red_a_body_trickling_past_the_budget_times_out_and_counts_its_handles() {
+fn red_a_body_trickling_past_the_budget_is_given_up_and_closed() {
     let _one = support::serial();
     let key = Issuer::start(UNUSED_ISSUER, KID);
     let token = key.sign(&claims(AUDIENCE));
@@ -679,14 +680,128 @@ fn red_a_body_trickling_past_the_budget_times_out_and_counts_its_handles() {
             idp.closed().contains(&first[0].conn),
             "the abandoned stream is closed on the host"
         );
-        idp.stop_trickling();
-        support::reset_clock_skew();
-        let again = b.verify(Some(&token), None);
-        assert!(again.starts_with("verdict 1 "), "{again}");
+    }
+}
+
+/// RED, END TO END, ONE OP: an abandoned exchange's handles are COUNTED, so the op's next request
+/// goes out fresh. `jwks_min_refetch_secs` is 0 and the warm key set is stale: the Refresh GET's
+/// body trickles past the budget and is given up (settle keeps the stale keys), the token's kid
+/// misses, and the Rotation refetch, a second GET in the same op, is answered with the rotated key
+/// set and identifies. Were the close not counted, that second establish would replay the close's
+/// kept answer and the verify would fail. Both doors.
+#[test]
+fn red_an_abandoned_refresh_counts_its_handles_so_the_rotation_refetch_goes_out_fresh() {
+    let _one = support::serial();
+    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let rotated = Issuer::start(UNUSED_ISSUER, "rotated-kid");
+    let warm = key.sign(&claims(AUDIENCE));
+    let new_kid = rotated.sign(&claims(AUDIENCE));
+    let lib = cdylib();
+    let stated = row().statement;
+    for arm in [
+        Arm::Linked,
+        Arm::Dropped {
+            lib: &lib,
+            stated: &stated,
+        },
+    ] {
+        let _skew = support::SkewGuard;
+        let idp = Idp::new(&key);
+        let b = bind(&arm, &idp);
+        let mut cfg: serde_json::Value = serde_json::from_str(&config(AUDIENCE)).unwrap();
+        cfg["jwks_ttl_secs"] = serde_json::json!(1);
+        cfg["jwks_min_refetch_secs"] = serde_json::json!(0);
+        open(&b.plugin, &cfg.to_string(), None).expect("opens");
+        assert!(b.verify(Some(&warm), None).starts_with("verdict 1 "));
+        // The IdP rotates its key; the warm set goes stale; the Refresh GET trickles once.
+        idp.answer("/keys", 200, rotated.jwks());
+        std::thread::sleep(Duration::from_millis(1300));
+        idp.trickle_path("/keys", 1, Duration::from_secs(11));
+        let verdict = b.verify(Some(&new_kid), None);
+        assert!(verdict.starts_with("verdict 1 "), "{verdict}");
+        let keys = idp.sent_to("/keys");
         assert_eq!(
-            idp.sent_to(DISCOVERY_PATH).len(),
-            2,
-            "sent fresh, not replayed"
+            keys.len(),
+            3,
+            "warm, the abandoned refresh, the rotation refetch"
+        );
+        assert!(
+            idp.closed().contains(&keys[1].conn),
+            "the abandoned stream is closed"
+        );
+    }
+}
+
+/// RED, END TO END: a body that stalls DEAD after the head (nothing wakes the read) is still given
+/// up at the 10 s deadline, because the op arms a wake at it. Both doors; it takes the 10 s.
+#[test]
+fn red_a_body_that_stalls_dead_times_out_at_ten_seconds() {
+    let _one = support::serial();
+    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let token = key.sign(&claims(AUDIENCE));
+    let lib = cdylib();
+    let stated = row().statement;
+    let url = format!("https://idp.conformance.example{DISCOVERY_PATH}");
+    for arm in [
+        Arm::Linked,
+        Arm::Dropped {
+            lib: &lib,
+            stated: &stated,
+        },
+    ] {
+        let idp = Idp::new(&key);
+        idp.stall_body(DISCOVERY_PATH);
+        let b = bind(&arm, &idp);
+        open(&b.plugin, &config(AUDIENCE), None).expect("opens");
+        let began = std::time::Instant::now();
+        assert_eq!(
+            b.verify(Some(&token), None),
+            format!(
+                "Failed OIDC discovery fetch failed ({url}): request to {url} failed: error \
+                 sending request for url ({url}); set jwks_url explicitly"
+            )
+        );
+        assert!(
+            began.elapsed() >= Duration::from_secs(9),
+            "{:?}",
+            began.elapsed()
+        );
+    }
+}
+
+/// RED, END TO END: a token endpoint that stalls dead after its head is cut at the exchange's own
+/// 10 s (1.5.5's hop client `.timeout(10s)`) and the login answers `LOGIN_OUTAGE` (the host's 502
+/// "Couldn't reach your provider"), not the 60 s deadline's 401. Both doors; it takes the 10 s.
+#[test]
+fn red_a_token_endpoint_that_stalls_is_an_outage_after_ten_seconds() {
+    let _one = support::serial();
+    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let lib = cdylib();
+    let stated = row().statement;
+    for arm in [
+        Arm::Linked,
+        Arm::Dropped {
+            lib: &lib,
+            stated: &stated,
+        },
+    ] {
+        let idp = Idp::new(&key);
+        idp.stall_body("/token");
+        let b = bind(&arm, &idp);
+        let mut cfg: serde_json::Value = serde_json::from_str(&config(AUDIENCE)).unwrap();
+        cfg["token_endpoint"] = serde_json::json!(support::TOKEN_URL);
+        open(&b.plugin, &cfg.to_string(), Some(CLIENT_SECRET)).expect("opens");
+        let began = std::time::Instant::now();
+        let answer = b.complete("code-1", ("st", NONCE), REDIRECT, "the-verifier", None);
+        assert_eq!(answer.trim_end(), format!("verdict {LOGIN_OUTAGE}"));
+        assert!(
+            began.elapsed() >= Duration::from_secs(9),
+            "{:?}",
+            began.elapsed()
+        );
+        assert!(
+            began.elapsed() < Duration::from_secs(30),
+            "before the 60 s login deadline"
         );
     }
 }

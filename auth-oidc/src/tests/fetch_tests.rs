@@ -850,7 +850,7 @@ fn a_reply_past_the_bound_is_1_5_5_s_cap_text_unprefixed() {
 /// the answer, so a trickling body is bounded here): with the budget spent it is driven once more
 /// and given up only if still pending. The unit harness has no host clock or connector, so what is
 /// tested is the predicate `get_hop` branches on and the deadline it applies; the end-to-end RED
-/// `red_a_body_trickling_past_the_budget_times_out_and_counts_its_handles` drives the rest.
+/// the end-to-end REDs `red_a_body_trickling_past_the_budget_is_given_up_and_closed`, `red_an_abandoned_refresh_counts_its_handles_so_the_rotation_refetch_goes_out_fresh`, `red_a_body_that_stalls_dead_times_out_at_ten_seconds` and `red_a_token_endpoint_that_stalls_is_an_outage_after_ten_seconds` drive the rest.
 #[test]
 fn a_hop_in_flight_is_resumed_but_judged_against_the_deadline() {
     const MS: u64 = 1_000_000;

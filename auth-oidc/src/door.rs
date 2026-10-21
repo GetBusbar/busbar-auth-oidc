@@ -446,6 +446,13 @@ fn pend<O: AbiOut>(
             }
         }
     }
+    // The op's own request in flight is bounded by its 10s deadline: wake at it, so a body that
+    // stalls dead (no wake of its own) is driven once more and given up.
+    if !wait {
+        if let Some(at) = io.deadline_ns() {
+            out.wake_at(at);
+        }
+    }
     parked.io = io.into_state();
     instance.park(parked);
     Outcome::Pending

@@ -163,6 +163,10 @@ pub fn strays(sent: &[Sent], needs: u32, allowed: &[(u32, String)]) -> Vec<Strin
 
 /// One reply being read: how far, and what.
 struct Reply {
+    /// This reply's body trickles past the budget (see [`Idp::trickle_body`]).
+    trickle: bool,
+    /// This reply's body stalls dead after the head (see [`Idp::stall_body`]).
+    stall: bool,
     step: u8,
     at: usize,
     status: u32,
@@ -192,7 +196,9 @@ pub struct Idp {
     skew: Mutex<Duration>,
     /// After the head, the body's first read pends, the clock moves on by the skew as its wake
     /// fires, and every read after that pends for good (a body that trickles past the budget).
-    trickle: Mutex<bool>,
+    trickle: Mutex<(Option<String>, u32)>,
+    /// The path whose reply body stalls dead after the head, with no wake of its own.
+    stall: Mutex<Option<String>>,
     /// The connections the plugin closed, in order.
     closed: Mutex<Vec<u64>>,
 }
@@ -214,7 +220,8 @@ impl Idp {
             pended: AtomicU32::new(0),
             delay: Mutex::new(Duration::from_millis(5)),
             skew: Mutex::new(Duration::ZERO),
-            trickle: Mutex::new(false),
+            trickle: Mutex::new((None, 0)),
+            stall: Mutex::new(None),
             closed: Mutex::new(Vec::new()),
         });
         let doc = serde_json::json!({
@@ -250,14 +257,27 @@ impl Idp {
 
     /// Make every reply's body trickle (see the field), moving the clock on by `skew`.
     pub fn trickle_body(&self, skew: Duration) {
-        *self.trickle.lock().unwrap() = true;
+        *self.trickle.lock().unwrap() = (None, u32::MAX);
         *self.skew.lock().unwrap() = skew;
+    }
+
+    /// Make the next `times` replies to `path` trickle, moving the clock on by `skew` as the body's
+    /// wake fires.
+    pub fn trickle_path(&self, path: &str, times: u32, skew: Duration) {
+        *self.trickle.lock().unwrap() = (Some(path.to_string()), times);
+        *self.skew.lock().unwrap() = skew;
+    }
+
+    /// Stall every reply to `path` dead after its head: the body read pends and nothing wakes it.
+    pub fn stall_body(&self, path: &str) {
+        *self.stall.lock().unwrap() = Some(path.to_string());
     }
 
     /// Deliver bodies whole again.
     pub fn stop_trickling(&self) {
-        *self.trickle.lock().unwrap() = false;
+        *self.trickle.lock().unwrap() = (None, 0);
         *self.skew.lock().unwrap() = Duration::ZERO;
+        *self.stall.lock().unwrap() = None;
     }
 
     /// The connections closed so far.
@@ -323,6 +343,15 @@ impl Conns for Idp {
         if self.failing.lock().unwrap().contains(&path) {
             return Err(ConnError::Refused);
         }
+        let trickle = {
+            let mut t = self.trickle.lock().unwrap();
+            let hit = t.1 > 0 && t.0.as_ref().is_none_or(|p| *p == path);
+            if hit {
+                t.1 -= 1;
+            }
+            hit
+        };
+        let stall = self.stall.lock().unwrap().as_ref() == Some(&path);
         let id = self.next.fetch_add(1, Ordering::SeqCst);
         self.sent.lock().unwrap().push(Sent {
             conn: id,
@@ -342,6 +371,8 @@ impl Conns for Idp {
         self.reads.lock().unwrap().insert(
             id,
             Reply {
+                trickle,
+                stall,
                 step: 0,
                 at: 0,
                 status,
@@ -382,7 +413,7 @@ impl Conns for Idp {
                     .clone()
                     .expect("the table is armed");
                 let delay = *self.delay.lock().unwrap();
-                let skew = if *self.trickle.lock().unwrap() {
+                let skew = if r.trickle {
                     Duration::ZERO
                 } else {
                     *self.skew.lock().unwrap()
@@ -404,7 +435,12 @@ impl Conns for Idp {
                     ..piece(PieceKind::Fields, 0)
                 })
             }
-            2 if *self.trickle.lock().unwrap() => {
+            2 if r.stall => {
+                // The head came in budget; the body never does and nothing wakes the read.
+                r.step = 9;
+                Err(ConnError::Pending)
+            }
+            2 if r.trickle => {
                 // The head came in budget; the body does not: pend, move the clock past the
                 // budget as the wake fires, and pend on every read after.
                 r.step = 9;
