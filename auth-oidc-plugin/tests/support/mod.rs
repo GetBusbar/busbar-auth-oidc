@@ -24,8 +24,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use busbar_contract::abi::auth::{
-    slot, BeginLoginIn, BeginLoginOut, CompleteLoginIn, IdentifyOut, IdentityBuf, StripName,
-    VerifyIn, FIELDS_MAX, IDENTITY_BUF_BYTES, IDENTITY_GROUPS, SPAN_ABSENT,
+    slot, BeginLoginIn, BeginLoginOut, CompleteLoginIn, IdentifyOut, IdentityBuf, NamedValue,
+    StripName, VerifyIn, FIELDS_MAX, IDENTITY_BUF_BYTES, IDENTITY_GROUPS, SPAN_ABSENT,
 };
 use busbar_contract::abi::mechanism::call::{
     AbiStr, Blob, DeadlineClass, Outcome, Span, BLOB_JSON, BLOB_OCTETS,
@@ -651,6 +651,16 @@ impl Bound {
         )
     }
 
+    /// `verify` of `credential` (none = none lent) with the request's field `lines` lent beside it,
+    /// with the host's starting buffers.
+    pub fn verify_lines(&self, credential: Option<&str>, lines: &[(&str, &[u8])]) -> String {
+        self.identify(
+            slot::VERIFY,
+            |out_buf| verify_in_lines(credential, lines, out_buf),
+            (IDENTITY_BUF_BYTES, IDENTITY_GROUPS),
+        )
+    }
+
     /// `begin_login` for the core's `state`, `challenge` and `nonce`: the authorize URL, or the
     /// refusal.
     pub fn begin(&self, redirect: &str, state: &str, challenge: &str, nonce: &str) -> String {
@@ -721,6 +731,38 @@ pub fn verify_in(credential: Option<&str>, out_buf: IdentityBuf) -> VerifyIn {
     i
 }
 
+/// A `verify` `in` for `credential` over `out_buf`, the request's field `lines` (name, value) lent
+/// in order, as a host lends the lines the Statement's carrier marks name. Each call gets its own
+/// copy (leaked, as the strip array is: a test's few hundred bytes), so the lent lines outlive any
+/// re-call.
+pub fn verify_in_lines(
+    credential: Option<&str>,
+    lines: &[(&str, &[u8])],
+    out_buf: IdentityBuf,
+) -> VerifyIn {
+    let mut i = verify_in(credential, out_buf);
+    let named: &'static [NamedValue] = Box::leak(
+        lines
+            .iter()
+            .map(|(name, value)| {
+                let name: &'static [u8] = Box::leak(name.as_bytes().to_vec().into_boxed_slice());
+                let value: &'static [u8] = Box::leak(value.to_vec().into_boxed_slice());
+                NamedValue {
+                    name: AbiStr {
+                        ptr: name.as_ptr(),
+                        len: name.len(),
+                    },
+                    value: blob(value, BLOB_OCTETS),
+                }
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice(),
+    );
+    i.lines = named.as_ptr();
+    i.lines_len = named.len();
+    i
+}
+
 /// A host identity buffer over `bytes` and `groups`.
 pub fn identity_buf(bytes: &mut [u8], groups: &mut [Span]) -> IdentityBuf {
     IdentityBuf {
@@ -769,6 +811,40 @@ pub fn verify_ticketless_raw(
     let called = p.call(slot::VERIFY, &mut f);
     match called.outcome {
         Outcome::Ready => Ok((f.out.verdict, f.out.decision, f.out.strip_len)),
+        other => Err(other),
+    }
+}
+
+/// A `verify` of `credential` (none = none lent) and the field `lines` made with NO ticket: the
+/// verdict and the names it named for the transport to strip, or the outcome when it is not READY.
+pub fn verify_ticketless_strips(
+    p: &Plugin<Auth>,
+    credential: Option<&str>,
+    lines: &[(&str, &[u8])],
+) -> Result<(u32, Vec<String>), Outcome> {
+    let (mut bytes, mut groups) = (
+        vec![0_u8; IDENTITY_BUF_BYTES],
+        vec![z::<Span>(); IDENTITY_GROUPS as usize],
+    );
+    let mut strips = vec![z::<StripName>(); FIELDS_MAX as usize];
+    let mut out: IdentifyOut = z();
+    out.head = out_head();
+    let mut i = verify_in_lines(credential, lines, identity_buf(&mut bytes, &mut groups));
+    i.strip = strips.as_mut_ptr();
+    i.strip_cap = FIELDS_MAX;
+    let mut f = Frame::new(i, out);
+    let called = p.call(slot::VERIFY, &mut f);
+    match called.outcome {
+        Outcome::Ready => {
+            let named = strips[..f.out.strip_len as usize]
+                .iter()
+                .map(|s| {
+                    let at = s.name.offset as usize;
+                    String::from_utf8_lossy(&bytes[at..at + s.name.len as usize]).into_owned()
+                })
+                .collect();
+            Ok((f.out.verdict, named))
+        }
         other => Err(other),
     }
 }

@@ -67,8 +67,8 @@ use busbar_plugin_loader::dispatch::{now_ns, out_head, Frame, LoadError};
 use busbar_plugin_loader::sign::{sign, Manifest, SigningKey, TrustPolicy};
 use busbar_plugin_loader::PluginRegistry;
 use support::{
-    bind, bind_as, identity_buf, open, row, verify_in, verify_ticketless, verify_ticketless_raw, z,
-    Arm, Bound, Idp, Issuer, DISCOVERY_PATH, ISSUER, UNUSED_ISSUER,
+    bind, bind_as, identity_buf, open, row, verify_in, verify_ticketless, verify_ticketless_raw,
+    verify_ticketless_strips, z, Arm, Bound, Idp, Issuer, DISCOVERY_PATH, ISSUER, UNUSED_ISSUER,
 };
 
 /// The module's registry name and alias (what an operator's `identity-providers:` names).
@@ -971,4 +971,241 @@ fn an_identity_carries_the_credential_it_was_verified_from() {
         token.as_bytes(),
         "the verified credential rides the identity"
     );
+}
+
+/// One own-lines cell: what it shows, the credential lent (none = none), the field lines lent, and
+/// the answer it starts with.
+type Cell<'a> = (&'a str, Option<&'a str>, Vec<(&'a str, Vec<u8>)>, &'a str);
+
+/// THE BEARER ON THIS MODULE'S OWN LINES (status row 192: busbar's data listener on the http
+/// transport's accept side). There the kernel lends NO candidate credential (THE DESIGN §6
+/// "Auth points and guest lists": no kernel step names an inbound credential line; the line's style
+/// names them), so the module reads its bearer off the lines its Statement names, by the old
+/// chain's extraction byte for byte (`carried_credential` over the default inbound style:
+/// `authorization` in the Bearer scheme, case-insensitive, split on the first space, an empty token
+/// none; then `x-api-key`, then `x-goog-api-key`, raw, a blank value none; a value that is not
+/// visible ASCII none; the first line of a name only). A credential the host DOES lend (the old
+/// chain's candidate, or a DPoP-proven token) is judged first, so both paths judge one token.
+/// Both doors alike. RED before the fix: with nothing lent every cell PASSED unjudged.
+#[test]
+fn a_bearer_on_the_modules_own_lines_is_judged_as_the_old_chain_lent_it() {
+    let _one = support::serial();
+    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let t = tokens(&key);
+    let (valid, forged) = (t.valid.as_str(), t.forged.as_str());
+    let bearer = |token: &str| format!("Bearer {token}").into_bytes();
+    let lib = cdylib();
+    let stated = row().statement;
+    let identity = "verdict 1 subject=Some(\"oidc:conformance-subject\")";
+    let (reject, pass) = ("verdict 2 ", "verdict 3 ");
+    // (what the cell shows, the lent credential, the lines lent, the answer it starts with)
+    let cells: Vec<Cell<'_>> = vec![
+        (
+            "a valid bearer, nothing lent, is accepted",
+            None,
+            vec![("authorization", bearer(valid))],
+            identity,
+        ),
+        (
+            "a forged bearer, nothing lent, is refused",
+            None,
+            vec![("authorization", bearer(forged))],
+            reject,
+        ),
+        (
+            "the lent credential wins over the line (valid lent, forged line)",
+            Some(valid),
+            vec![("authorization", bearer(forged))],
+            identity,
+        ),
+        (
+            "the lent credential wins over the line (forged lent, valid line)",
+            Some(forged),
+            vec![("authorization", bearer(valid))],
+            reject,
+        ),
+        (
+            "the scheme matches case-insensitively (lower)",
+            None,
+            vec![("authorization", format!("bearer {valid}").into_bytes())],
+            identity,
+        ),
+        (
+            "the scheme matches case-insensitively (upper)",
+            None,
+            vec![("authorization", format!("BEARER {valid}").into_bytes())],
+            identity,
+        ),
+        (
+            "the line's name matches case-insensitively",
+            None,
+            vec![("Authorization", bearer(valid))],
+            identity,
+        ),
+        (
+            "an extra space stays in the token (split on the first space, no trim): no JWT",
+            None,
+            vec![("authorization", format!("Bearer  {valid}").into_bytes())],
+            pass,
+        ),
+        (
+            "a tab is no scheme separator",
+            None,
+            vec![("authorization", format!("Bearer\t{valid}").into_bytes())],
+            pass,
+        ),
+        (
+            "an empty token is none",
+            None,
+            vec![("authorization", b"Bearer ".to_vec())],
+            pass,
+        ),
+        (
+            "a scheme with no token is none",
+            None,
+            vec![("authorization", b"Bearer".to_vec())],
+            pass,
+        ),
+        (
+            "a Basic scheme is none",
+            None,
+            vec![("authorization", format!("Basic {valid}").into_bytes())],
+            pass,
+        ),
+        (
+            "a DPoP scheme is none (a proven DPoP token is lent, never read off the line)",
+            None,
+            vec![("authorization", format!("DPoP {valid}").into_bytes())],
+            pass,
+        ),
+        ("no line at all is none", None, Vec::new(), pass),
+        (
+            "x-api-key carries the token raw",
+            None,
+            vec![("x-api-key", valid.as_bytes().to_vec())],
+            identity,
+        ),
+        (
+            "x-goog-api-key carries the token raw",
+            None,
+            vec![("x-goog-api-key", valid.as_bytes().to_vec())],
+            identity,
+        ),
+        (
+            "a non-Bearer authorization falls through to x-api-key",
+            None,
+            vec![
+                ("authorization", b"Basic dXNlcjpwYXNz".to_vec()),
+                ("x-api-key", valid.as_bytes().to_vec()),
+            ],
+            identity,
+        ),
+        (
+            "the Bearer line comes before x-api-key",
+            None,
+            vec![
+                ("x-api-key", valid.as_bytes().to_vec()),
+                ("authorization", bearer(forged)),
+            ],
+            reject,
+        ),
+        (
+            "x-api-key comes before x-goog-api-key",
+            None,
+            vec![
+                ("x-goog-api-key", valid.as_bytes().to_vec()),
+                ("x-api-key", forged.as_bytes().to_vec()),
+            ],
+            reject,
+        ),
+        (
+            "a blank x-api-key is none and masks no later line",
+            None,
+            vec![
+                ("x-api-key", Vec::new()),
+                ("x-goog-api-key", valid.as_bytes().to_vec()),
+            ],
+            identity,
+        ),
+        (
+            "a value that is not visible ASCII is none and masks no later line",
+            None,
+            vec![
+                (
+                    "authorization",
+                    format!("Bearer {forged}\u{e9}").into_bytes(),
+                ),
+                ("x-goog-api-key", valid.as_bytes().to_vec()),
+            ],
+            identity,
+        ),
+        (
+            "only the first line of a name is read",
+            None,
+            vec![
+                ("authorization", b"Basic dXNlcjpwYXNz".to_vec()),
+                ("authorization", bearer(valid)),
+            ],
+            pass,
+        ),
+        (
+            "a line this module does not name carries nothing",
+            None,
+            vec![("x-admin-token", valid.as_bytes().to_vec())],
+            pass,
+        ),
+    ];
+    let mut seen = Vec::new();
+    for arm in [
+        Arm::Linked,
+        Arm::Dropped {
+            lib: &lib,
+            stated: &stated,
+        },
+    ] {
+        let b = bind(&arm, &Idp::new(&key));
+        open(&b.plugin, &config(AUDIENCE), None).expect("opens");
+        let mut answers = Vec::new();
+        for (shows, lent, lines, want) in &cells {
+            let lines: Vec<(&str, &[u8])> = lines.iter().map(|(n, v)| (*n, &v[..])).collect();
+            let got = b.verify_lines(*lent, &lines);
+            assert!(got.starts_with(want), "{shows}: {got}");
+            answers.push(got);
+        }
+        // Every auth called names its credential lines whatever its verdict (THE DESIGN §6): the
+        // three it reads, so the transport strips each.
+        let struck = verify_ticketless_strips(
+            &b.plugin,
+            None,
+            &[("authorization", &b"Basic dXNlcjpwYXNz"[..])],
+        );
+        assert_eq!(
+            struck,
+            Ok((
+                busbar_contract::abi::auth::VERDICT_PASS,
+                vec![
+                    "authorization".to_string(),
+                    "x-api-key".to_string(),
+                    "x-goog-api-key".to_string()
+                ]
+            ))
+        );
+        seen.push(answers);
+    }
+    assert_eq!(seen[0], seen[1], "both doors alike");
+}
+
+/// THE LINES THE STATEMENT NAMES are the ones the module reads (a host lends exactly these): the
+/// old chain's default inbound style, in its order.
+#[test]
+fn the_statement_names_the_three_lines_the_module_reads() {
+    let row = row();
+    let read = rendering::read(&row.statement).expect("reads");
+    let carriers: Vec<String> = read
+        .mark_words
+        .iter()
+        .filter(|(class, _)| *class == busbar_contract::abi::mechanism::door::MARK_WORD_CARRIER)
+        .map(|(_, word)| word.clone())
+        .collect();
+    assert_eq!(carriers, ["authorization", "x-api-key", "x-goog-api-key"]);
 }
