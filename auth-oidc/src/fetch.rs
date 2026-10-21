@@ -29,6 +29,12 @@
 //! What the module reads back keeps 1.5.5's words: [`document`] (a non-2xx GET, the 1 MiB cap, a
 //! body that is not UTF-8) and [`failed`] (a request that never got an answer, the connector's own
 //! text after 1.5.5's prefix).
+//!
+//! A discovery or JWKS GET answered with a redirect is followed as 1.5.5's client followed it
+//! ([`follow`]): at most [`MAX_REDIRECTS`], https only, each hop a fresh exchange on the same need,
+//! so through the host's destination guard again (and, for discovery, held to the need's pinned
+//! target); a hop to a cloud-metadata address, or to a private or loopback one other than the
+//! host first asked, is refused before it is asked for.
 
 use std::fmt::Display;
 use std::task::Poll;
@@ -42,7 +48,8 @@ use busbar_contract::abi::sdk::conn::{ConnFailure, Host};
 use busbar_contract::abi::sdk::door::abi_str;
 use busbar_contract::abi::sdk::exchange::{exchange, Exchange, ExchangeResponse, Request};
 use busbar_contract::abi::sdk::net::{
-    extract_normalized_host, host_is_private_or_loopback, scheme_is,
+    extract_normalized_host, host_is_cloud_metadata, host_is_link_local_v6,
+    host_is_private_or_loopback, scheme_is,
 };
 use busbar_contract::auth::{LoginHop, LoginHttpResponse};
 
@@ -65,6 +72,15 @@ pub const NEED_TOKEN: u32 = 2;
 /// Where the PUBLIC set starts in [`NEEDS`]: its needs are the anchored set's, in the same order,
 /// at this offset.
 pub const PUBLIC: u32 = 3;
+
+/// The most redirects one GET follows: 1.5.5's client's (reqwest's default policy, `limited(10)`):
+/// the tenth is followed, an eleventh is refused.
+pub const MAX_REDIRECTS: u8 = 10;
+
+/// The response head fields a document GET reads: `location`, to follow a redirect.
+const KEEP_LOCATION: &[AbiStr] = &[abi_str("location")];
+/// The response head fields the token exchange reads: none.
+const KEEP_NONE: &[AbiStr] = &[];
 
 /// The setting the discovery need's target comes from (a config path the host reads).
 const ISSUER_PATH: &str = "settings.issuer";
@@ -89,8 +105,8 @@ pub const EGRESS_CLASS: u32 = EGRESS_OPERATOR_INFRASTRUCTURE;
 
 /// One outbound need over the `http` transport (the scheme the http framer claims) in
 /// [`EGRESS_CLASS`], trusting the root `trust_from` names beside the public roots (`ABSENT`: the
-/// public roots only).
-const fn need(target_from: AbiStr, trust_from: AbiStr) -> Need {
+/// public roots only), reading back the response head fields `keep` names.
+const fn need(target_from: AbiStr, trust_from: AbiStr, keep: &'static [AbiStr]) -> Need {
     Need {
         direction: DIRECTION_OUTBOUND,
         egress_class: EGRESS_CLASS,
@@ -99,8 +115,12 @@ const fn need(target_from: AbiStr, trust_from: AbiStr) -> Need {
         target_from,
         trust_from,
         details: Blob::ABSENT,
-        keep_response_headers: std::ptr::null(),
-        keep_response_headers_len: 0,
+        keep_response_headers: if keep.is_empty() {
+            std::ptr::null()
+        } else {
+            keep.as_ptr()
+        },
+        keep_response_headers_len: keep.len(),
         timeout_ms: FETCH_TIMEOUT_MS,
         keep_mode: KEEP_NAMED,
         _reserved: 0,
@@ -112,14 +132,14 @@ const fn need(target_from: AbiStr, trust_from: AbiStr) -> Need {
 /// THE NEEDS, in index order: the ANCHORED set (trusting `ca_cert_pem`), then the PUBLIC set
 /// (from [`PUBLIC`] on, the public roots only); each set is discovery (pinned to the `issuer`
 /// setting's target), the JWKS and the token endpoint (named per request: either may be
-/// discovered).
+/// discovered). The two document needs read back `location`, to follow a redirect.
 pub const NEEDS: &[Need] = &[
-    need(abi_str(ISSUER_PATH), abi_str(CA_CERT_PATH)),
-    need(ABSENT, abi_str(CA_CERT_PATH)),
-    need(ABSENT, abi_str(CA_CERT_PATH)),
-    need(abi_str(ISSUER_PATH), ABSENT),
-    need(ABSENT, ABSENT),
-    need(ABSENT, ABSENT),
+    need(abi_str(ISSUER_PATH), abi_str(CA_CERT_PATH), KEEP_LOCATION),
+    need(ABSENT, abi_str(CA_CERT_PATH), KEEP_LOCATION),
+    need(ABSENT, abi_str(CA_CERT_PATH), KEEP_NONE),
+    need(abi_str(ISSUER_PATH), ABSENT, KEEP_LOCATION),
+    need(ABSENT, ABSENT, KEEP_LOCATION),
+    need(ABSENT, ABSENT, KEEP_NONE),
 ];
 
 /// The need index `need` (an anchored-set index) goes out on: itself for a module that trusts an
@@ -158,8 +178,8 @@ pub trait Fetch {
     /// no ticket, which may not pend, so may neither fetch nor wait.
     fn caller(&self) -> Option<Ticket>;
 
-    /// GET `doc` at `url`: the body of a 2xx answer, or 1.5.5's error text ([`document`],
-    /// [`failed`]).
+    /// GET `doc` at `url`, following its redirects ([`follow`]): the body of the 2xx answer, or
+    /// 1.5.5's error text ([`document`], [`failed`]).
     fn get(&mut self, doc: Doc, url: &str) -> Poll<Result<String, String>>;
 
     /// A request to `url` this op would have to make, or wait on, but cannot: it runs on no ticket
@@ -226,6 +246,98 @@ pub fn capped(url: &str, body: Vec<u8>, cap: usize) -> Result<String, String> {
         return Err(format!("{url} JWKS body exceeds the {cap}-byte cap"));
     }
     String::from_utf8(body).map_err(|_| format!("{url} JWKS body is not UTF-8"))
+}
+
+/// Where a GET answered `reply` at `at` is redirected, as 1.5.5's client read a redirect: a 301,
+/// 302, 303, 307 or 308 whose `location` names a URL, resolved against `at`. `None` for any other
+/// answer, which is judged as the document it is ([`document`]).
+pub fn redirect(at: &str, reply: &ExchangeResponse) -> Option<String> {
+    if !matches!(reply.status, 301 | 302 | 303 | 307 | 308) {
+        return None;
+    }
+    let (_, location) = reply
+        .fields
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(b"location"))?;
+    let location = std::str::from_utf8(location).ok()?;
+    let next = url::Url::parse(at).ok()?.join(location.trim()).ok()?;
+    Some(next.into())
+}
+
+/// Why a redirect from a GET of `asked` to `next` is not followed, if it is not: a URL that is not
+/// https (1.5.5's `https_only` client refused it in the same words), a cloud-metadata or IPv6
+/// link-local host, or a private or loopback host other than the one first asked.
+pub fn refused_hop(asked: &str, next: &str) -> Option<&'static str> {
+    if !scheme_is(next, "https") {
+        return Some("URL scheme is not allowed");
+    }
+    let Some(host) = extract_normalized_host(next) else {
+        return Some("the redirect names no host");
+    };
+    if host_is_cloud_metadata(&host) || host_is_link_local_v6(&host) {
+        return Some("a redirect to a cloud metadata address is not allowed");
+    }
+    let same = extract_normalized_host(asked).is_some_and(|a| a.eq_ignore_ascii_case(&host));
+    if host_is_private_or_loopback(&host) && !same {
+        return Some("a redirect to a private or loopback address is not allowed");
+    }
+    None
+}
+
+/// Where a redirected GET stands across PENDING: the URL asked, the hop in flight, and how many
+/// redirects led to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Redirected {
+    asked: String,
+    at: String,
+    hops: u8,
+}
+
+/// THE GET OF `url`, FOLLOWED (1.5.5's client: reqwest's default redirect policy under
+/// `https_only`): `one` makes a single exchange; a redirect ([`redirect`]) is asked for again at
+/// the URL it names, at most [`MAX_REDIRECTS`] times, each hop vetted first ([`refused_hop`]); the
+/// first answer that is no redirect is judged as the document ([`document`], named by `url`, the
+/// URL asked, as 1.5.5 named it). A hop in flight is parked in `chain` across PENDING and resumed
+/// when the same `url` is asked again.
+///
+/// # Errors
+/// [`document`]'s; `one`'s; a refused hop or an eleventh redirect, after 1.5.5's prefix.
+pub fn follow(
+    url: &str,
+    chain: &mut Option<Redirected>,
+    mut one: impl FnMut(&str) -> Poll<Result<ExchangeResponse, String>>,
+) -> Poll<Result<String, String>> {
+    let (mut at, mut hops) = match chain.take() {
+        Some(r) if r.asked == url => (r.at, r.hops),
+        _ => (url.to_string(), 0),
+    };
+    loop {
+        let reply = match one(&at) {
+            Poll::Pending => {
+                if hops > 0 {
+                    *chain = Some(Redirected {
+                        asked: url.to_string(),
+                        at,
+                        hops,
+                    });
+                }
+                return Poll::Pending;
+            }
+            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+            Poll::Ready(Ok(reply)) => reply,
+        };
+        let Some(next) = redirect(&at, &reply) else {
+            return Poll::Ready(document(url, reply.status, reply.body));
+        };
+        if hops >= MAX_REDIRECTS {
+            return Poll::Ready(Err(failed(url, "too many redirects")));
+        }
+        if let Some(why) = refused_hop(url, &next) {
+            return Poll::Ready(Err(failed(&next, why)));
+        }
+        hops += 1;
+        at = next;
+    }
 }
 
 /// The form `hop` is sent as, as 1.5.5's core sent it, with `secret` filling the field
@@ -304,12 +416,13 @@ pub fn post_request(url: &url::Url, hop: &LoginHop, secret: Option<&str>) -> Req
     }
 }
 
-/// What an op parks of its requests across PENDING: the handles its finished exchanges issued, and
-/// the exchange in flight (with the URL it fetches).
+/// What an op parks of its requests across PENDING: the handles its finished exchanges issued, the
+/// exchange in flight (with the URL it fetches), and the redirects a GET has followed to it.
 #[derive(Debug, Default)]
 pub struct IoState {
     issued: u32,
     current: Option<(String, Exchange)>,
+    redirected: Option<Redirected>,
 }
 
 /// [`Fetch`] over the host's connector, for ONE entry of one op on `ticket`.
@@ -362,7 +475,8 @@ impl<'h> HostIo<'h> {
         // THE SCHEME, as 1.5.5 judged it ([`plaintext_allowed`]): https, or (the token exchange
         // only) plaintext to a private or loopback host. The operator-infrastructure class lets
         // plaintext through to any address, so a public host's https is held HERE, before the host
-        // is asked and before the secret is in any request.
+        // is asked and before the secret is in any request. (The token exchange's HOST is held
+        // to the operator's hosts before its hop is built: `OidcModule::token_exchange`.)
         if parsed.scheme() != "https" && !plaintext_allowed(need, url) {
             return Poll::Ready(Err(failed(url, "URL scheme is not allowed")));
         }
@@ -413,8 +527,11 @@ impl Fetch for HostIo<'_> {
     }
 
     fn get(&mut self, doc: Doc, url: &str) -> Poll<Result<String, String>> {
-        self.run(doc.need(), url, get_request)
-            .map(|r| r.and_then(|reply| document(url, reply.status, reply.body)))
+        let need = doc.need();
+        let mut chain = self.state.redirected.take();
+        let got = follow(url, &mut chain, |at| self.run(need, at, get_request));
+        self.state.redirected = chain;
+        got
     }
 
     fn post(

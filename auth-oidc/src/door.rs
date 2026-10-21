@@ -470,10 +470,15 @@ const ABSENT: Span = Span {
     len: 0,
 };
 
-/// The one line this plugin's credential arrives on, named whatever its verdict.
+/// The credential line this plugin names, whatever its verdict. The credential `verify` judges is
+/// the host's candidate, read from the default inbound style's carriers in 1.5.5's order: the
+/// `authorization` line's Bearer value, then `x-api-key`, then `x-goog-api-key` (1.5.5
+/// `auth/mod.rs`, the chain's credential). A JWT may so arrive on any of the three; this plugin
+/// names `authorization` only, and the other two lines are struck because the default style's
+/// consumed lines carry them.
 const AUTHORIZATION: &str = "authorization";
 
-/// The Statement's carrier marks: the line `verify` reads its bearer from.
+/// The Statement's carrier marks: the credential line this plugin names ([`AUTHORIZATION`]).
 const CARRIERS: &[MarkWord] = &[carrier(AUTHORIZATION)];
 
 /// Write the answer into the host's buffers and answer READY with `verdict`: for `verify` the strip

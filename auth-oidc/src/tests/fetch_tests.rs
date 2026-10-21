@@ -66,10 +66,225 @@ fn a_non_2xx_answer_names_its_status_as_1_5_5_did() {
         document(URL, 599, Vec::new()).unwrap_err(),
         "https://idp.example/jwks returned HTTP 599 <unknown status code>"
     );
+}
+
+/// A scripted far end for [`follow`]: `answers` by URL, every URL asked recorded in order; a URL
+/// in `pend` answers PENDING on its first ask (an exchange whose first read pends).
+struct Far {
+    answers: Vec<(String, ExchangeResponse)>,
+    asked: Vec<String>,
+    pend: Vec<String>,
+}
+
+impl Far {
+    fn new(answers: &[(&str, ExchangeResponse)]) -> Self {
+        Self {
+            answers: answers
+                .iter()
+                .map(|(u, r)| ((*u).to_string(), r.clone()))
+                .collect(),
+            asked: Vec::new(),
+            pend: Vec::new(),
+        }
+    }
+
+    fn one(&mut self, at: &str) -> Poll<Result<ExchangeResponse, String>> {
+        self.asked.push(at.to_string());
+        if let Some(i) = self.pend.iter().position(|u| u == at) {
+            self.pend.remove(i);
+            return Poll::Pending;
+        }
+        Poll::Ready(
+            self.answers
+                .iter()
+                .find(|(u, _)| u == at)
+                .map(|(_, r)| r.clone())
+                .ok_or_else(|| failed(at, "nothing answers here")),
+        )
+    }
+
+    fn get(&mut self, url: &str) -> Result<String, String> {
+        let mut chain = None;
+        loop {
+            if let Poll::Ready(r) = follow(url, &mut chain, |at| self.one(at)) {
+                return r;
+            }
+        }
+    }
+}
+
+fn moved(status: u16, location: &str) -> ExchangeResponse {
+    ExchangeResponse {
+        status,
+        reason: None,
+        fields: vec![(b"location".to_vec(), location.as_bytes().to_vec())],
+        body: Vec::new(),
+    }
+}
+
+fn served(body: &str) -> ExchangeResponse {
+    ExchangeResponse {
+        status: 200,
+        reason: None,
+        fields: Vec::new(),
+        body: body.as_bytes().to_vec(),
+    }
+}
+
+const DISCOVERY: &str = "https://idp.example/tenant/v2.0/.well-known/openid-configuration";
+
+/// A REDIRECTED DISCOVERY IS SERVED, as 1.5.5's client followed it (reqwest's default policy):
+/// a relative `location` is resolved against the URL asked, and the document it leads to is the
+/// answer. This replaces the assertion that pinned a redirected GET as "returned HTTP 302 Found",
+/// which 1.5.5 never answered: it followed the redirect.
+#[test]
+fn a_redirected_discovery_is_followed_to_its_document() {
+    let mut far = Far::new(&[
+        (DISCOVERY, moved(301, "/tenant/v2.0/openid")),
+        (
+            "https://idp.example/tenant/v2.0/openid",
+            served("{\"issuer\":1}"),
+        ),
+    ]);
+    assert_eq!(far.get(DISCOVERY).as_deref(), Ok("{\"issuer\":1}"));
     assert_eq!(
-        document(URL, 302, Vec::new()).unwrap_err(),
-        "https://idp.example/jwks returned HTTP 302 Found"
+        far.asked,
+        vec![DISCOVERY, "https://idp.example/tenant/v2.0/openid"]
     );
+}
+
+/// A REDIRECTED KEY SET IS SERVED, across every redirect status 1.5.5's client followed, to
+/// another https host, and across PENDING: the hop in flight is resumed, not asked from the start.
+#[test]
+fn a_redirected_key_set_is_followed_across_pending() {
+    for status in [301, 302, 303, 307, 308] {
+        let mut far = Far::new(&[
+            (URL, moved(status, "https://keys.idp-cdn.example/jwks")),
+            ("https://keys.idp-cdn.example/jwks", served("{\"keys\":[]}")),
+        ]);
+        far.pend = vec![
+            URL.to_string(),
+            "https://keys.idp-cdn.example/jwks".to_string(),
+        ];
+        assert_eq!(far.get(URL).as_deref(), Ok("{\"keys\":[]}"), "{status}");
+        assert_eq!(
+            far.asked,
+            vec![
+                URL,
+                URL,
+                "https://keys.idp-cdn.example/jwks",
+                "https://keys.idp-cdn.example/jwks"
+            ],
+            "{status}: each request asked once, then re-asked once on its wake"
+        );
+    }
+}
+
+/// AT MOST TEN REDIRECTS (1.5.5's client, `limited(10)`): a chain of ten is served, an eleventh
+/// redirect is refused without being asked for.
+#[test]
+fn the_eleventh_redirect_is_refused() {
+    let hop = |n: usize| format!("https://idp.example/hop/{n}");
+    let chain = |len: usize| {
+        let mut answers: Vec<(String, ExchangeResponse)> = (0..len)
+            .map(|n| (hop(n), moved(302, &hop(n + 1))))
+            .collect();
+        answers.push((hop(len), served("{}")));
+        answers
+    };
+    let ten = chain(10);
+    let refs: Vec<(&str, ExchangeResponse)> =
+        ten.iter().map(|(u, r)| (u.as_str(), r.clone())).collect();
+    assert_eq!(Far::new(&refs).get(&hop(0)).as_deref(), Ok("{}"));
+
+    let eleven = chain(11);
+    let refs: Vec<(&str, ExchangeResponse)> = eleven
+        .iter()
+        .map(|(u, r)| (u.as_str(), r.clone()))
+        .collect();
+    let mut far = Far::new(&refs);
+    assert_eq!(
+        far.get(&hop(0)),
+        Err("request to https://idp.example/hop/0 failed: too many redirects".to_string())
+    );
+    assert_eq!(
+        far.asked.len(),
+        11,
+        "the eleventh redirect's target is never asked"
+    );
+    assert!(!far.asked.contains(&hop(11)));
+}
+
+/// A REDIRECT TO PLAINTEXT IS REFUSED (1.5.5's `https_only` client), before it is asked.
+#[test]
+fn a_redirect_to_http_is_refused() {
+    let mut far = Far::new(&[(URL, moved(302, "http://idp.example/jwks"))]);
+    assert_eq!(
+        far.get(URL),
+        Err("request to http://idp.example/jwks failed: URL scheme is not allowed".to_string())
+    );
+    assert_eq!(far.asked, vec![URL]);
+}
+
+/// A REDIRECT TO A METADATA OR PRIVATE ADDRESS IS REFUSED before it is asked for: a public IdP
+/// cannot bounce the module's GET into the node's own network. A private IdP's redirect to its
+/// own host is followed (it was configured, or discovered, there).
+#[test]
+fn a_redirect_to_a_private_or_metadata_address_is_refused() {
+    for to in [
+        "https://169.254.169.254/latest/meta-data/",
+        "https://metadata.google.internal/computeMetadata/v1/",
+        "https://[fd00:ec2::254]/",
+        "https://[fe80::1]/keys",
+    ] {
+        let mut far = Far::new(&[(URL, moved(302, to))]);
+        let err = far.get(URL).expect_err(to);
+        assert!(err.ends_with("is not allowed"), "{to}: {err}");
+        assert_eq!(far.asked, vec![URL], "{to} is never asked");
+    }
+    for to in [
+        "https://10.0.0.7/keys",
+        "https://127.0.0.1/keys",
+        "https://localhost/keys",
+        "https://[fd00::5]/keys",
+    ] {
+        let mut far = Far::new(&[(URL, moved(307, to))]);
+        assert_eq!(
+            far.get(URL),
+            Err(format!(
+                "request to {to} failed: a redirect to a private or loopback address is not \
+                 allowed"
+            ))
+        );
+        assert_eq!(far.asked, vec![URL], "{to} is never asked");
+    }
+    let private = "https://10.0.0.7/realms/corp/.well-known/openid-configuration";
+    let mut far = Far::new(&[
+        (private, moved(302, "/realms/corp/openid")),
+        ("https://10.0.0.7/realms/corp/openid", served("{}")),
+    ]);
+    assert_eq!(far.get(private).as_deref(), Ok("{}"));
+}
+
+/// A 3xx that is no redirect 1.5.5's client followed (no `location`, or a status it does not
+/// follow) is judged as the document it is: a non-2xx, named as 1.5.5 named it.
+#[test]
+fn a_3xx_with_nowhere_to_go_is_a_non_2xx_answer() {
+    let bare = ExchangeResponse {
+        status: 302,
+        ..ExchangeResponse::default()
+    };
+    let mut far = Far::new(&[(URL, bare)]);
+    assert_eq!(
+        far.get(URL),
+        Err("https://idp.example/jwks returned HTTP 302 Found".to_string())
+    );
+    let mut far = Far::new(&[(URL, moved(304, "https://idp.example/other"))]);
+    assert_eq!(
+        far.get(URL),
+        Err("https://idp.example/jwks returned HTTP 304 Not Modified".to_string())
+    );
+    assert_eq!(far.asked, vec![URL]);
 }
 
 #[test]
@@ -200,6 +415,19 @@ fn the_needs_are_outbound_in_their_class_anchored_then_public() {
         (on(NEED_JWKS, true), on(NEED_JWKS, false)),
         (NEED_JWKS, NEED_JWKS + PUBLIC)
     );
+    // The document needs read back `location` (to follow a redirect); the token need reads none.
+    for anchored in [true, false] {
+        for need in [NEED_DISCOVERY, NEED_JWKS] {
+            let n = &NEEDS[on(need, anchored) as usize];
+            assert_eq!(n.keep_mode, KEEP_NAMED);
+            assert_eq!(n.keep_response_headers_len, 1);
+            assert!(!n.keep_response_headers.is_null());
+        }
+        let token = &NEEDS[on(NEED_TOKEN, anchored) as usize];
+        assert_eq!(token.keep_response_headers_len, 0);
+    }
+    assert_eq!(KEEP_LOCATION.len(), 1);
+    assert_eq!(KEEP_LOCATION[0].len, "location".len());
 }
 
 /// THE CONNECTOR'S SCHEME RULE PER EGRESS CLASS, for a plaintext dial (`secure = false`) that the
