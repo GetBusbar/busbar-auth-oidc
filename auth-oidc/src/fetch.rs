@@ -33,8 +33,7 @@
 //! A discovery or JWKS GET answered with a redirect is followed as 1.5.5's client followed it
 //! ([`follow`]): at most [`MAX_REDIRECTS`], https only, each hop a fresh exchange on the same need,
 //! so through the host's destination guard again (and, for discovery, held to the need's pinned
-//! target); a hop to a cloud-metadata address is refused before it is asked for, and so is a hop
-//! from a public host to a private or loopback one.
+//! target).
 
 use std::fmt::Display;
 use std::task::Poll;
@@ -48,8 +47,7 @@ use busbar_contract::abi::sdk::conn::{ConnFailure, Connector, Host};
 use busbar_contract::abi::sdk::door::abi_str;
 use busbar_contract::abi::sdk::exchange::{exchange, Exchange, ExchangeResponse, Request};
 use busbar_contract::abi::sdk::net::{
-    extract_normalized_host, host_is_cloud_metadata, host_is_link_local_v6,
-    host_is_private_or_loopback, scheme_is,
+    extract_normalized_host, host_is_private_or_loopback, scheme_is,
 };
 use busbar_contract::auth::{LoginHop, LoginHttpResponse};
 
@@ -253,31 +251,16 @@ pub fn redirect(at: &str, reply: &ExchangeResponse) -> Option<String> {
     Some(next.into())
 }
 
-/// Why a redirect from `asked` (the hop that answered it) to `next` is not followed, if it is
-/// not: a URL that is not https (1.5.5's `https_only` client refused it in the same words), a
-/// cloud-metadata or IPv6 link-local host, or a private or loopback host when the host that
-/// redirected is public.
+/// Why a redirect to `next` is not followed, if it is not: a URL that is not https (1.5.5's
+/// `https_only` client refused it in the same words).
 ///
 /// 1.5.5's policy for these GETs was reqwest's default (`redirect::Policy::default()`, ten hops)
 /// under `https_only`, with no address check (busbar-auth-oidc v1.0.6
-/// `auth-oidc/src/reqwest_fetcher.rs`, `ReqwestFetcher::new`): an IdP on a private host (the
-/// on-prem IdP `ca_cert_pem` exists for) was followed to any https host, its own or another
-/// private one, and that stays served. A redirect never moves a GET from a public host into a
-/// private network.
-pub fn refused_hop(asked: &str, next: &str) -> Option<&'static str> {
+/// `auth-oidc/src/reqwest_fetcher.rs`, `ReqwestFetcher::new`): every https target was followed, a
+/// private or loopback one included. The host's destination guard still judges each hop's dial.
+pub fn refused_hop(next: &str) -> Option<&'static str> {
     if !scheme_is(next, "https") {
         return Some("URL scheme is not allowed");
-    }
-    let Some(host) = extract_normalized_host(next) else {
-        return Some("the redirect names no host");
-    };
-    if host_is_cloud_metadata(&host) || host_is_link_local_v6(&host) {
-        return Some("a redirect to a cloud metadata address is not allowed");
-    }
-    let from_private =
-        extract_normalized_host(asked).is_some_and(|a| host_is_private_or_loopback(&a));
-    if host_is_private_or_loopback(&host) && !from_private {
-        return Some("a redirect to a private or loopback address is not allowed");
     }
     None
 }
@@ -330,7 +313,7 @@ pub fn follow(
         if hops >= MAX_REDIRECTS {
             return Poll::Ready(Err(failed(url, "too many redirects")));
         }
-        if let Some(why) = refused_hop(&at, &next) {
+        if let Some(why) = refused_hop(&next) {
             return Poll::Ready(Err(failed(&next, why)));
         }
         hops += 1;
