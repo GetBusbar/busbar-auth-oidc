@@ -423,7 +423,7 @@ pub fn cdylib_path() -> Option<PathBuf> {
 
 /// THE LINKED ROW: the door and the Statement it states.
 pub fn row() -> LinkedRow {
-    LinkedRow::of(busbar_auth_oidc_plugin::door::door).expect("the door states itself")
+    LinkedRow::of_macro(busbar_auth_oidc_plugin::door::MACRO_DOOR).expect("the door states itself")
 }
 
 /// Which door.
@@ -491,28 +491,22 @@ pub fn bind(arm: &Arm<'_>, idp: &Arc<Idp>) -> Bound {
 }
 
 fn blob(bytes: &[u8], fmt: u32) -> Blob {
-    Blob {
-        ptr: bytes.as_ptr(),
-        len: bytes.len(),
-        fmt,
-        flags: 0,
-    }
+    // SAFETY: `bytes` is test-owned and outlives the `in` this view is stated in.
+    unsafe { Blob::from_raw_parts(bytes.as_ptr(), bytes.len(), fmt, 0) }
 }
 
 fn abi_str(s: &str) -> AbiStr {
-    AbiStr {
-        ptr: s.as_ptr(),
-        len: s.len(),
-    }
+    // SAFETY: `s` is test-owned and outlives the `in` this view is stated in.
+    unsafe { AbiStr::from_raw_parts(s.as_ptr(), s.len()) }
 }
 
 /// The plugin memory `s` names, as text (valid until its lease is released).
 fn text(s: AbiStr) -> String {
-    if s.ptr.is_null() {
+    if s.ptr().is_null() {
         return String::new();
     }
     // SAFETY: the door answered `s` READY under a lease the caller has not released yet.
-    String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(s.ptr, s.len) }).into_owned()
+    String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(s.ptr(), s.len()) }).into_owned()
 }
 
 /// The text a FAILED/REFUSED answer carried.
