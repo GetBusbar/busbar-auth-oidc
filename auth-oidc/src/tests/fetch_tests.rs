@@ -820,3 +820,47 @@ fn a_document_send_failure_is_reqwests_error_sending_request() {
         assert_eq!(send_failure(NEED_TOKEN, URL, cause), cause);
     }
 }
+
+/// A REPLY PAST THE SDK'S BOUND is 1.5.5's cap text for the URL asked, with no `request to .. failed:`
+/// prefix (v1.0.6 `read_capped`); the cap is 1.5.5's 1 MiB, enforced here (the SDK's bound is 16 MiB),
+/// so a body between the two is refused by `capped` as 1.5.5 refused it.
+#[test]
+fn a_reply_past_the_bound_is_1_5_5_s_cap_text_unprefixed() {
+    let over = send_failure(
+        NEED_JWKS,
+        URL,
+        busbar_contract::abi::sdk::exchange::REPLY_OVER_BOUND,
+    );
+    assert_eq!(
+        over,
+        "https://idp.example/jwks JWKS body exceeds the 1048576-byte cap"
+    );
+    // follow() passes it through unwrapped.
+    let mut chain = None;
+    let got = follow(URL, &mut chain, |_| Poll::Ready(Err(over.clone())));
+    assert_eq!(got, Poll::Ready(Err(over)));
+    // 2 MiB: under the SDK's bound, over 1.5.5's cap.
+    assert_eq!(
+        capped(URL, vec![b' '; 2 * 1024 * 1024], MAX_JWKS_BYTES).unwrap_err(),
+        "https://idp.example/jwks JWKS body exceeds the 1048576-byte cap"
+    );
+}
+
+/// A HOP IN FLIGHT IS RESUMED PAST THE DEADLINE, never cut (the host enforces the budget it was
+/// sent with): only a NEW hop is judged against the chain's deadline.
+#[test]
+fn only_a_new_hop_is_judged_against_the_deadline() {
+    const MS: u64 = 1_000_000;
+    // The deadline fn itself says "spent" at 12s...
+    assert!(chain_left_ms(0, 12_000 * MS, URL).is_err());
+    // ...but a state holding the exchange for the hop is RESUMED (`get_hop` then skips the clock
+    // check, so the exchange finishes and counts its handles as every ending does). The harness
+    // cannot drive a host clock at this pin, so the predicate `get_hop` branches on is tested.
+    let mut io = HostIo::new(None, Ticket::NONE, IoState::default(), false);
+    io.state_mut_for_test().chain_started_ns = Some(0);
+    let url = url::Url::parse(URL).unwrap();
+    let ex = Exchange::request(get_request(&url, None, 1_000)).unwrap();
+    io.state_mut_for_test().current = Some((URL.to_string(), ex));
+    assert!(io.resumes(URL));
+    assert!(!io.resumes("https://idp.example/other"));
+}

@@ -371,6 +371,7 @@ pub fn follow(
                 }
                 return Poll::Pending;
             }
+            Poll::Ready(Err(e)) if e == over_cap(url) => return Poll::Ready(Err(e)),
             Poll::Ready(Err(e)) => return Poll::Ready(Err(failed(url, e))),
             Poll::Ready(Ok(reply)) => reply,
         };
@@ -538,12 +539,22 @@ pub fn chain_left_ms(began_ns: u64, now_ns: u64, asked: &str) -> Result<u64, Str
     Ok(FETCH_TIMEOUT_MS - spent_ms)
 }
 
+/// 1.5.5's text for a body over the cap, for the URL asked (no `request to .. failed:` prefix).
+pub fn over_cap(asked: &str) -> String {
+    format!("{asked} JWKS body exceeds the {MAX_JWKS_BYTES}-byte cap")
+}
+
 /// What an exchange that failed prints for a request on `need` to `asked`. A document fetch was
 /// 1.5.5's reqwest client, which rendered every send failure (connect, TLS, the connector's
 /// refusal, a timeout) as `error sending request for url (<asked>)` (reqwest 0.12.28 `error.rs`,
 /// `Kind::Request`, its URL set by the blocking client; the connector's own text is what the host
 /// logs). The token exchange was 1.5.5's core, whose text is kept.
 pub fn send_failure(need: u32, asked: &str, cause: &str) -> String {
+    if need != NEED_TOKEN && cause.contains(busbar_contract::abi::sdk::exchange::REPLY_OVER_BOUND) {
+        // The reply passed the SDK's bound (16 MiB), far over 1.5.5's 1 MiB cap: 1.5.5's own cap
+        // text (v1.0.6 `read_capped`), which carried no `request to .. failed:` prefix.
+        return over_cap(asked);
+    }
     if need == NEED_TOKEN {
         cause.to_string()
     } else {
@@ -559,6 +570,13 @@ pub const fn need_for_hop(doc: Doc, hops: u8) -> u32 {
         NEED_JWKS
     } else {
         doc.need()
+    }
+}
+
+#[cfg(test)]
+impl HostIo<'_> {
+    fn state_mut_for_test(&mut self) -> &mut IoState {
+        &mut self.state
     }
 }
 
@@ -584,6 +602,11 @@ impl<'h> HostIo<'h> {
     /// answered without that request is not its verdict, and the host should ask again on a ticket.
     pub fn wanted_io(&self) -> bool {
         self.wanted
+    }
+
+    /// Whether the exchange in flight is the one for `at`.
+    fn resumes(&self, at: &str) -> bool {
+        self.state.current.as_ref().is_some_and(|(u, _)| u == at)
     }
 
     /// What to park across PENDING.
@@ -661,17 +684,19 @@ impl<'h> HostIo<'h> {
     ) -> Poll<Result<ExchangeResponse, String>> {
         let need = need_for_hop(doc, hop.hops);
         let mut left_ms = FETCH_TIMEOUT_MS;
-        if let (Some((connect, _)), false) = (&self.host, self.ticket.is_none()) {
+        // A hop already in flight is RESUMED, never cut: the host enforces the budget the request was
+        // sent with and its timeout comes back through `send_failure` with the same text. The
+        // deadline is judged only before a new hop starts.
+        let resuming = self.resumes(hop.at);
+        if let (Some((connect, _)), false, false) = (&self.host, self.ticket.is_none(), resuming) {
             let mut c = connect(self.ticket, self.state.issued);
             if let Poll::Ready(Ok(now)) = c.clock_now() {
                 let began = *self.state.chain_started_ns.get_or_insert(now.mono_ns);
                 match chain_left_ms(began, now.mono_ns, asked) {
                     Ok(left) => left_ms = left,
                     Err(text) => {
-                        // The deadline ends the chain like any other ending: nothing in flight,
-                        // the handles counted.
-                        self.state.current = None;
-                        self.state.issued = c.issued();
+                        // No hop is in flight here (a new one was about to start), so the chain
+                        // ends with nothing to drop.
                         return Poll::Ready(Err(text));
                     }
                 }

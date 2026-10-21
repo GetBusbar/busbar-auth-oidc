@@ -165,6 +165,8 @@ pub struct Idp {
     /// The needs whose declaration the table refused, as the host's connector refuses them (a
     /// `target_from` or `trust_from` that resolved to nothing): an open on one is refused.
     refused: Mutex<HashSet<u32>>,
+    /// The paths whose open the connector fails (a connect or TLS failure): the per-path knob.
+    failing: Mutex<HashSet<String>>,
     reads: Mutex<HashMap<u64, Reply>>,
     next: AtomicU64,
     pended: AtomicU32,
@@ -182,6 +184,7 @@ impl Idp {
             sent: Mutex::new(Vec::new()),
             declared: Mutex::new(Vec::new()),
             refused: Mutex::new(HashSet::new()),
+            failing: Mutex::new(HashSet::new()),
             reads: Mutex::new(HashMap::new()),
             next: AtomicU64::new(1),
             pended: AtomicU32::new(0),
@@ -205,6 +208,11 @@ impl Idp {
             .lock()
             .unwrap()
             .insert(path.to_string(), (status, body.as_bytes().to_vec()));
+    }
+
+    /// Fail every open of `path` as the connector fails a send (refused).
+    pub fn fail_open(&self, path: &str) {
+        self.failing.lock().unwrap().insert(path.to_string());
     }
 
     /// How long a reply's first read pends before the op's ticket is woken.
@@ -262,6 +270,9 @@ impl Conns for Idp {
             return Err(ConnError::Refused);
         }
         let path = String::from_utf8_lossy(desc.head_target).into_owned();
+        if self.failing.lock().unwrap().contains(&path) {
+            return Err(ConnError::Refused);
+        }
         let id = self.next.fetch_add(1, Ordering::SeqCst);
         self.sent.lock().unwrap().push(Sent {
             conn: id,

@@ -570,6 +570,38 @@ fn red_an_unreachable_issuer_and_a_ticketless_call_fail_verify_in_1_5_5_s_words(
     assert_eq!(seen[0], seen[1], "both doors alike");
 }
 
+/// RED, END TO END: a send the connector fails (connect, TLS, refusal) prints reqwest's `error
+/// sending request for url (<asked>)` after 1.5.5's prefix, whatever the connector said, proving
+/// `run` applies `send_failure`. Both doors alike.
+#[test]
+fn red_a_failed_document_send_prints_reqwests_error_sending_request() {
+    let _one = support::serial();
+    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let token = key.sign(&claims(AUDIENCE));
+    let lib = cdylib();
+    let stated = row().statement;
+    let url = format!("https://idp.conformance.example{DISCOVERY_PATH}");
+    for arm in [
+        Arm::Linked,
+        Arm::Dropped {
+            lib: &lib,
+            stated: &stated,
+        },
+    ] {
+        let idp = Idp::new(&key);
+        idp.fail_open(DISCOVERY_PATH);
+        let b = bind(&arm, &idp);
+        open(&b.plugin, &config(AUDIENCE), None).expect("opens: nothing is fetched at open");
+        assert_eq!(
+            b.verify(Some(&token), None),
+            format!(
+                "Failed OIDC discovery fetch failed ({url}): request to {url} failed: error \
+                 sending request for url ({url}); set jwks_url explicitly"
+            )
+        );
+    }
+}
+
 /// SINGLE-FLIGHT through the real dispatcher (THE DESIGN, auth: "a cold key id pends verify, one
 /// `exchange()` fetches, every waiter wakes"): two cold verifies in flight at once make ONE
 /// discovery request and ONE JWKS request between them, and both identify.
