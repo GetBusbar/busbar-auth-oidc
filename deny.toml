@@ -1,5 +1,5 @@
 # RENDERED by `busbar-release plugin heal` from GetBusbar/busbar-release template/ and busbar's
-# `.github/fleet/deps.toml` at 7263f4e61b7af7fdadb9079394d139547e61d1c0; a hand edit is overwritten by the next sync. CI runs
+# `.github/fleet/deps.toml` at 1b09a4a79a962112c8ef8036e2df50a7221daf5e; a hand edit is overwritten by the next sync. CI runs
 # `cargo deny check` on it (busbar's plugin-ci.yml at the pin). The license allowlist is busbar's own;
 # the one reviewed git source is busbar itself, at the pin.
 [graph]
@@ -133,8 +133,6 @@ deny = [
     { crate = "opentelemetry-proto:>=0.33.0", reason = "busbar resolves opentelemetry-proto to 0.32.0; a plugin may not pull a second version (OWNER 2026-10-02)" },
     { crate = "proc-macro2:<1.0.0", reason = "busbar resolves proc-macro2 to 1.0.106; a plugin may not pull a second version (OWNER 2026-10-02)" },
     { crate = "proc-macro2:>=2.0.0", reason = "busbar resolves proc-macro2 to 1.0.106; a plugin may not pull a second version (OWNER 2026-10-02)" },
-    { crate = "proptest:<1.0.0", reason = "busbar resolves proptest to 1.11.0; a plugin may not pull a second version (OWNER 2026-10-02)" },
-    { crate = "proptest:>=2.0.0", reason = "busbar resolves proptest to 1.11.0; a plugin may not pull a second version (OWNER 2026-10-02)" },
     { crate = "prost:<0.14.0", reason = "busbar resolves prost to 0.14.3; a plugin may not pull a second version (OWNER 2026-10-02)" },
     { crate = "prost:>=0.15.0", reason = "busbar resolves prost to 0.14.3; a plugin may not pull a second version (OWNER 2026-10-02)" },
     { crate = "rcgen:<0.14.0", reason = "busbar resolves rcgen to 0.14.10; a plugin may not pull a second version (OWNER 2026-10-02)" },

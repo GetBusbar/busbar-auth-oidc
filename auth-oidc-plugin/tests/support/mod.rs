@@ -423,8 +423,30 @@ pub fn cdylib_path() -> Option<PathBuf> {
 
 /// THE LINKED ROW: the door and the Statement it states.
 pub fn row() -> LinkedRow {
-    LinkedRow::of(busbar_auth_oidc_plugin::door::door).expect("the door states itself")
+    LinkedRow::of(busbar_auth_oidc::door).expect("the door states itself")
 }
+
+/// The Statement the door states, read back: its name and its needs are read off here, never off
+/// the logic crate (whose only public item is its door).
+pub fn stated() -> busbar_contract::abi::mechanism::rendering::Read {
+    busbar_contract::abi::mechanism::rendering::read(&row().statement)
+        .expect("the Statement reads back")
+}
+
+/// Where the PUBLIC set of needs starts: the first need that trusts the host's roots (no
+/// `trust_from`). The anchored set (trusting `ca_cert_pem`) comes before it, in the same order.
+pub fn public_base() -> u32 {
+    stated()
+        .needs
+        .iter()
+        .position(|n| n.trust_from.is_empty())
+        .expect("the Statement states a public set of needs") as u32
+}
+
+/// A set's JWKS need, as an offset from its discovery need (the one that names its `target_from`
+/// setting). The Statement carries the needs in index order but not which document each serves, so
+/// this offset is the one local constant: discovery, then the JWKS, then the token endpoint.
+pub const JWKS_OFFSET: u32 = 1;
 
 /// Which door.
 pub enum Arm<'a> {
@@ -468,7 +490,10 @@ pub fn bind_as<K: busbar_plugin_loader::dispatch::Kind>(
     let plugin = match arm {
         Arm::Linked => load_linked::<K>(&row(), bind),
         Arm::Dropped { lib, stated } => {
-            load_dropped_bytes::<K>(lib, busbar_auth_oidc_plugin::door::NAME, stated, bind)
+            let name = busbar_contract::abi::mechanism::rendering::read(stated)
+                .expect("the stated Statement reads")
+                .name;
+            load_dropped_bytes::<K>(lib, &name, stated, bind)
         }
         Arm::File(path) => {
             let stated = busbar_plugin_loader::dispatch::rendering_of_library(path)

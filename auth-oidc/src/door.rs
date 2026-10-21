@@ -111,6 +111,14 @@ const FAMILIES: &[MetricFamily] = &[MetricFamily {
 /// The index of the flush-count family in [`FAMILIES`].
 pub const CACHE_FAMILY: u32 = 0;
 
+busbar_contract::statement_extensions!(
+    /// The Statement's extensions: this plugin's whole `declares` document (BUSBAR-1.6.0.md l.246).
+    EXTENSIONS: [(
+        busbar_contract::abi::mechanism::extensions::EXT_DECLARES,
+        include_bytes!("../declares.json")
+    )]
+);
+
 /// This plugin's Statement: its name and alias, its version, the most calls one instance holds in
 /// flight, its one secret reference, its six outbound needs, its one metric family and its auth
 /// tail.
@@ -125,6 +133,7 @@ pub const STATEMENT: Statement = Statement {
     needs_len: NEEDS.len(),
     mark_words: CARRIERS.as_ptr(),
     mark_words_len: CARRIERS.len(),
+    extensions: EXTENSIONS,
     ..with_tail(statement(NAME, env!("CARGO_PKG_VERSION"), 64), &TAIL)
 };
 

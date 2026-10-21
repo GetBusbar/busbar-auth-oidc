@@ -5,7 +5,7 @@
 //! conformance on the auth kind's memory ABI (THE DESIGN 11.4: compiled in or dropped in, one door,
 //! one table), run against the busbar rev this repo pins (`.busbar-ref`).
 //!
-//! The door is held two ways at once: LINKED (`busbar_auth_oidc::door::door`, the row a busbar
+//! The door is held two ways at once: LINKED (`busbar_auth_oidc::door`, the row a busbar
 //! build that compiles the module in registers, `LinkedRow::of`) and DROPPED IN (this crate's built
 //! cdylib, signed first-party into a temp `plugins/` directory under a manifest stating the door's
 //! Statement, found by the loader's scan and admitted against that signed Statement). Each is bound
@@ -39,7 +39,7 @@ mod support;
 // family, the far ends the module's needs reach: `conformance.json`), exact crossings, both folds
 // equal, its RED arms kept.
 busbar_plugin_loader::conformance_suite! {
-    door: busbar_auth_oidc::door::door,
+    door: busbar_auth_oidc::door,
     cdylib: "busbar_auth_oidc_plugin",
     inputs: include_str!("conformance.json"),
 }
@@ -492,7 +492,7 @@ fn the_linked_and_the_dropped_in_oidc_module_are_one_module() {
         support::strays(
             &public.idp.sent(),
             needs,
-            &support::declared_targets(busbar_auth_oidc::fetch::PUBLIC)
+            &support::declared_targets(support::public_base())
         ),
         Vec::<String>::new(),
         "every request rides a public-roots need:\n{}",
@@ -970,5 +970,15 @@ fn an_identity_carries_the_credential_it_was_verified_from() {
         &bytes[held.offset as usize..(held.offset as usize + held.len as usize)],
         token.as_bytes(),
         "the verified credential rides the identity"
+    );
+}
+
+/// The door's Statement carries the whole `declares` document under `EXT_DECLARES`.
+#[test]
+fn the_statement_carries_the_declares_document() {
+    let read = support::stated();
+    assert_eq!(
+        busbar_contract::abi::mechanism::extensions::declares(&read.extensions.bytes),
+        Some(&include_bytes!("../../auth-oidc/declares.json")[..]),
     );
 }

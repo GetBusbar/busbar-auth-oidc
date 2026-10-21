@@ -9,7 +9,7 @@
 //! then resolves those roles to governance grants and admin scope — the module asserts identity
 //! only, never policy.
 //!
-//! This crate is the LOGIC and its door ([`door::door`], on the auth kind's memory ABI): a build that
+//! This crate is the LOGIC and its door (`door`, on the auth kind's memory ABI): a build that
 //! links it registers that door, and the dropped-in `cdylib`, the sibling `busbar-auth-oidc-plugin`
 //! crate, exports the same door as `busbar_plugin_door`.
 //!
@@ -27,7 +27,7 @@
 //! - **group claims are GUIDs**, not names: the operator maps those GUIDs in `auth.role_bindings:`.
 //! - **>200 groups overage**: Entra omits the `groups` claim and instead emits `_claim_names` /
 //!   `_claim_sources` markers pointing at the Graph API. busbar does NOT call Graph and does NOT
-//!   silently degrade: [`OidcVerifier`] REJECTS such a token with a precise error pointing the
+//!   silently degrade: `OidcVerifier` REJECTS such a token with a precise error pointing the
 //!   operator at **app-roles** (`role_claim: roles`), whose count is bounded.
 
 #![forbid(unsafe_code)]
@@ -41,20 +41,23 @@ use std::time::{Duration, Instant};
 
 #[macro_use]
 mod flight;
-pub mod cache;
-pub mod discovery;
-pub mod door;
-pub mod fetch;
-pub mod jwks;
-pub mod jwt;
+mod cache;
+mod discovery;
+mod door;
+mod fetch;
+mod jwks;
+mod jwt;
 mod open;
-pub mod verdicts;
+mod verdicts;
 
-pub use cache::JwksCache;
-pub use discovery::Discovery;
-pub use fetch::Fetch;
-pub use flight::Step;
-pub use open::config;
+use cache::JwksCache;
+use discovery::Discovery;
+use fetch::Fetch;
+use flight::Step;
+use open::config;
+
+/// THE DOOR: this plugin's one public item (BUSBAR-1.6.0.md l.3567, Crate shape).
+pub use door::door;
 
 /// The default role/group claim name — the token claim read into the principal's ROLES when the
 /// operator does not set `role_claim`, and the value the Entra >200-groups overage guard keys on.
@@ -89,7 +92,7 @@ const CLOCK_SANITY_FLOOR_UNIX: i64 = 1_767_225_600; // 2026-01-01T00:00:00Z
 /// the plugin's `open`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct OidcConfig {
+struct OidcConfig {
     /// The token `iss` to require, EXACT match. For Entra:
     /// `https://login.microsoftonline.com/<tenant-id>/v2.0`.
     pub issuer: String,
@@ -157,7 +160,7 @@ fn default_ttl_secs() -> u64 {
 /// The pure token VERIFIER: config-derived policy (issuer/audience/role_claim) plus the current time
 /// source. Separated from the module + JWKS cache so the whole verify path — signature aside — is unit
 /// testable with plain claim maps. Signature verification is [`jwt::verify_signature`].
-pub struct OidcVerifier {
+struct OidcVerifier {
     issuer: String,
     audience: String,
     role_claim: String,
@@ -408,7 +411,7 @@ fn extract_string_list(v: Option<&Value>) -> Vec<String> {
 /// The runtime OIDC auth module: a verifier, the JWKS cache and the issuer's discovery document.
 /// Sans-IO: every request it makes goes through the caller's [`Fetch`], and every answer that may
 /// need one is a [`Step`] (THE DESIGN, auth: "JWKS fetching is sans-IO single-flight").
-pub struct OidcModule {
+struct OidcModule {
     verifier: OidcVerifier,
     /// The verifier for the browser-login `id_token`: the same issuer and role claim, but the
     /// audience is the OAuth `client_id` (OIDC Core 1.0 §3.1.3.7 step 3: the id_token's `aud` MUST
@@ -825,7 +828,7 @@ fn pct(s: &str) -> String {
 /// `redirect_uri`, `scope` (`openid` + configured), `state`, PKCE `code_challenge` +
 /// `code_challenge_method=S256`, and `nonce` when present. Structurally cannot contain a
 /// `client_secret` — the begin path is public and the secret is the CORE's alone.
-pub fn build_authorize_url(
+fn build_authorize_url(
     cfg: &OidcConfig,
     redirect_uri: &str,
     state: &str,
@@ -856,7 +859,7 @@ pub fn build_authorize_url(
 /// `grant_type=authorization_code`, `code`, `redirect_uri`, `code_verifier`, and `client_id`. The
 /// `client_secret` is written as an EMPTY placeholder keyed by `secret_form_field`: the hop names the
 /// KEY, and the secret the host lent at `open` fills the VALUE when it is sent ([`fetch::form`]).
-pub fn build_token_exchange(
+fn build_token_exchange(
     cfg: &OidcConfig,
     code: &str,
     redirect_uri: &str,
@@ -923,7 +926,7 @@ fn is_clock_sane(t: i64) -> bool {
 ///
 /// # Errors
 /// The URL does not parse, or is not https.
-pub fn check_jwks_url(cfg: &OidcConfig) -> Result<(), String> {
+fn check_jwks_url(cfg: &OidcConfig) -> Result<(), String> {
     let Some(url) = &cfg.jwks_url else {
         return Ok(());
     };
