@@ -272,6 +272,11 @@ fn reqwest_says(kind: &str, url: &str) -> String {
 ///   https target: reqwest's default ten-hop policy with no address check, busbar-auth-oidc v1.0.6
 ///   `auth-oidc/src/reqwest_fetcher.rs`). A private IdP is still followed within private addresses.
 ///
+/// THE ADDRESS CHECKS READ THE LITERAL HOST ONLY: nothing is resolved here. A DNS name that
+/// resolves to a private or metadata address is followed, and the host's dial guard catches it at
+/// the connection. So a private IdP reached by DNS name (`keycloak.corp`) counts as public here, and
+/// its redirect to a private IP literal is refused, where 1.5.5 followed it.
+///
 /// The text is the cause only; the report is `request to {url} failed: <text>` ([`failed`]).
 pub fn refused_hop(asked: &str, next: &str, url: &str) -> Option<String> {
     if !scheme_is(next, "https") {
@@ -281,9 +286,9 @@ pub fn refused_hop(asked: &str, next: &str, url: &str) -> Option<String> {
             reqwest_says("builder error", url)
         });
     }
-    let Some(host) = extract_normalized_host(next) else {
-        return Some("the redirect names no host".to_string());
-    };
+    // `next` is a `url::Url` rendering with the https scheme, so it always has a host; an absent
+    // one would match neither refusal below.
+    let host = extract_normalized_host(next).unwrap_or_default();
     if host_is_cloud_metadata(&host) || host_is_link_local_v6(&host) {
         return Some("a redirect to a cloud metadata address is not allowed".to_string());
     }

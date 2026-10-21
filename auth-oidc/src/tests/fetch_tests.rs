@@ -237,7 +237,7 @@ fn a_redirect_to_http_is_refused() {
 /// A PUBLIC-TO-PUBLIC https REDIRECT IS FOLLOWED, as 1.5.5's client followed every https target
 /// (reqwest's default policy under `https_only`: busbar-auth-oidc v1.0.6 `reqwest_fetcher.rs`).
 #[test]
-fn a_redirect_to_any_https_address_is_followed() {
+fn a_public_to_public_https_redirect_is_followed() {
     for to in [
         "https://keys.idp-cdn.example/jwks",
         "https://other.example/realms/x/keys",
@@ -256,23 +256,63 @@ fn a_redirect_to_any_https_address_is_followed() {
 /// busbar-auth-oidc v1.0.6 `reqwest_fetcher.rs`).
 #[test]
 fn a_redirect_to_a_private_or_metadata_address_is_refused() {
+    const METADATA: &str = "a redirect to a cloud metadata address is not allowed";
+    const PRIVATE: &str = "a redirect to a private or loopback address is not allowed";
     for to in [
         "https://169.254.169.254/latest/meta-data/",
         "https://metadata.google.internal/computeMetadata/v1/",
         "https://[fd00:ec2::254]/",
         "https://[fe80::1]/keys",
+        // The same address in the spellings a connecting stack maps to it: IPv4-mapped, NAT64
+        // (well-known), 6to4.
+        "https://[::ffff:169.254.169.254]/",
+        "https://[64:ff9b::a9fe:a9fe]/",
+        "https://[2002:a9fe:a9fe::]/",
     ] {
         let mut far = Far::new(&[(URL, moved(302, to))]);
-        let err = far.get(URL).expect_err(to);
-        assert!(
-            err.starts_with(&format!(
-                "request to {URL} failed: a redirect to a cloud metadata"
-            )),
-            "{to}: {err}"
+        assert_eq!(
+            far.get(URL),
+            Err(format!("request to {URL} failed: {METADATA}")),
+            "{to}"
         );
-        assert!(err.ends_with("is not allowed"), "{to}: {err}");
         assert_eq!(far.asked, vec![URL], "{to} is never asked");
     }
+    // A PRIVATE host redirecting to a metadata address is refused too (the metadata check is
+    // first and holds from private hosts).
+    let private_idp = "https://10.0.0.7/realms/corp/keys";
+    for to in [
+        "https://169.254.169.254/latest/meta-data/",
+        "https://[::ffff:169.254.169.254]/",
+    ] {
+        let mut far = Far::new(&[(private_idp, moved(302, to))]);
+        assert_eq!(
+            far.get(private_idp),
+            Err(format!("request to {private_idp} failed: {METADATA}")),
+            "{to}"
+        );
+    }
+    // PUBLIC to private, in the spellings that map to a private IPv4 target.
+    for to in [
+        "https://[::ffff:10.0.0.7]/keys",
+        "https://[64:ff9b::a00:7]/keys",
+        "https://[2002:a00:7::]/keys",
+        "https://[::ffff:127.0.0.1]/keys",
+    ] {
+        let mut far = Far::new(&[(URL, moved(307, to))]);
+        assert_eq!(
+            far.get(URL),
+            Err(format!("request to {URL} failed: {PRIVATE}")),
+            "{to}"
+        );
+        assert_eq!(far.asked, vec![URL], "{to} is never asked");
+    }
+    // The checks read the LITERAL host: a DNS name that merely resolves private is followed (the
+    // host's dial guard judges the connection).
+    let mut far = Far::new(&[
+        (URL, moved(302, "https://keycloak.corp/keys")),
+        ("https://keycloak.corp/keys", served("{}")),
+    ]);
+    assert_eq!(far.get(URL).as_deref(), Ok("{}"));
     for to in [
         "https://10.0.0.7/keys",
         "https://127.0.0.1/keys",
