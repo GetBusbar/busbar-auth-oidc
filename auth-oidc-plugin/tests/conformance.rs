@@ -1119,7 +1119,7 @@ fn a_bearer_on_the_modules_own_lines_is_judged_as_the_old_chain_lent_it() {
             reject,
         ),
         (
-            "a blank x-api-key is none and masks no later line",
+            "a blank x-api-key is none and masks no line after it",
             None,
             vec![
                 ("x-api-key", Vec::new()),
@@ -1128,7 +1128,7 @@ fn a_bearer_on_the_modules_own_lines_is_judged_as_the_old_chain_lent_it() {
             identity,
         ),
         (
-            "a value that is not visible ASCII is none and masks no later line",
+            "a value that is not visible ASCII is none and masks no line after it",
             None,
             vec![
                 (

@@ -74,7 +74,7 @@ fn the_lines_are_read_in_the_old_chains_order() {
 }
 
 #[test]
-fn a_blank_or_unreadable_value_presents_nothing_and_masks_no_later_line() {
+fn a_blank_or_unreadable_value_presents_nothing_and_masks_no_line_after_it() {
     assert_eq!(of(&[("x-api-key", ""), ("x-goog-api-key", "g")]), Some("g"));
     assert_eq!(of(&[("x-api-key", "")]), None);
     assert_eq!(

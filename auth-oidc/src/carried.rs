@@ -15,7 +15,7 @@
 //! * `authorization` is read in the Bearer scheme ([`bearer`]): another scheme (Basic, DPoP, a
 //!   SigV4 signature) presents nothing there;
 //! * `x-api-key` and `x-goog-api-key` are taken raw, a blank value presenting nothing, so a blank
-//!   line never masks a token on a later one.
+//!   line never masks a token on a line after it.
 
 /// The Bearer line (RFC 6750 s2.1).
 pub const AUTHORIZATION: &str = "authorization";
