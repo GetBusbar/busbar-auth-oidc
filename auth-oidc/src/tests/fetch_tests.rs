@@ -234,21 +234,54 @@ fn a_redirect_to_http_is_refused() {
     assert_eq!(far.asked, vec![URL]);
 }
 
-/// EVERY HTTPS REDIRECT TARGET IS FOLLOWED, as 1.5.5's client followed it (reqwest's default
-/// policy under `https_only`, no address check: busbar-auth-oidc v1.0.6 `reqwest_fetcher.rs`): a
-/// public host may redirect to a private or loopback one. The host's destination guard judges the
-/// dial of each hop.
+/// A PUBLIC-TO-PUBLIC https REDIRECT IS FOLLOWED, as 1.5.5's client followed every https target
+/// (reqwest's default policy under `https_only`: busbar-auth-oidc v1.0.6 `reqwest_fetcher.rs`).
 #[test]
 fn a_redirect_to_any_https_address_is_followed() {
+    for to in [
+        "https://keys.idp-cdn.example/jwks",
+        "https://other.example/realms/x/keys",
+        "https://203.0.113.9/keys",
+    ] {
+        let mut far = Far::new(&[(URL, moved(307, to)), (to, served("{}"))]);
+        assert_eq!(far.get(URL).as_deref(), Ok("{}"), "{to}");
+        assert_eq!(far.asked, vec![URL, to]);
+    }
+}
+
+/// A REDIRECT TO A METADATA ADDRESS IS REFUSED (owner-approved 2026-10-21), and a redirect from a PUBLIC host to a private or
+/// loopback one is refused, before either is asked for: a public IdP cannot bounce the module's
+/// GET into the node's own network. A private IdP is followed within private addresses, its own
+/// host or another, as 1.5.5's client followed it (reqwest's default policy, no address check:
+/// busbar-auth-oidc v1.0.6 `reqwest_fetcher.rs`).
+#[test]
+fn a_redirect_to_a_private_or_metadata_address_is_refused() {
+    for to in [
+        "https://169.254.169.254/latest/meta-data/",
+        "https://metadata.google.internal/computeMetadata/v1/",
+        "https://[fd00:ec2::254]/",
+        "https://[fe80::1]/keys",
+    ] {
+        let mut far = Far::new(&[(URL, moved(302, to))]);
+        let err = far.get(URL).expect_err(to);
+        assert!(err.ends_with("is not allowed"), "{to}: {err}");
+        assert_eq!(far.asked, vec![URL], "{to} is never asked");
+    }
     for to in [
         "https://10.0.0.7/keys",
         "https://127.0.0.1/keys",
         "https://localhost/keys",
         "https://[fd00::5]/keys",
     ] {
-        let mut far = Far::new(&[(URL, moved(307, to)), (to, served("{}"))]);
-        assert_eq!(far.get(URL).as_deref(), Ok("{}"), "{to}");
-        assert_eq!(far.asked, vec![URL, to]);
+        let mut far = Far::new(&[(URL, moved(307, to))]);
+        assert_eq!(
+            far.get(URL),
+            Err(format!(
+                "request to {to} failed: a redirect to a private or loopback address is not \
+                 allowed"
+            ))
+        );
+        assert_eq!(far.asked, vec![URL], "{to} is never asked");
     }
     let private = "https://10.0.0.7/realms/corp/.well-known/openid-configuration";
     let mut far = Far::new(&[
@@ -256,6 +289,29 @@ fn a_redirect_to_any_https_address_is_followed() {
         ("https://10.0.0.7/realms/corp/openid", served("{}")),
     ]);
     assert_eq!(far.get(private).as_deref(), Ok("{}"));
+    let mut far = Far::new(&[
+        (private, moved(307, "https://192.168.4.2/keys")),
+        ("https://192.168.4.2/keys", served("{}")),
+    ]);
+    assert_eq!(far.get(private).as_deref(), Ok("{}"));
+    // Public to private is refused at whichever hop it comes: a private IdP sent out to a public
+    // host is not let back into the private network by it.
+    let mut far = Far::new(&[
+        (private, moved(302, "https://cdn.idp.example/jwks")),
+        (
+            "https://cdn.idp.example/jwks",
+            moved(302, "https://10.0.0.8/jwks"),
+        ),
+    ]);
+    assert_eq!(
+        far.get(private),
+        Err(
+            "request to https://10.0.0.8/jwks failed: a redirect to a private or loopback \
+             address is not allowed"
+                .to_string()
+        )
+    );
+    assert_eq!(far.asked, vec![private, "https://cdn.idp.example/jwks"]);
 }
 
 /// A REDIRECT TO A SCHEME THAT IS NEITHER http NOR https is reqwest's builder error, naming the

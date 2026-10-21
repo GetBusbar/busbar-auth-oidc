@@ -33,7 +33,8 @@
 //! A discovery or JWKS GET answered with a redirect is followed as 1.5.5's client followed it
 //! ([`follow`]): at most [`MAX_REDIRECTS`], https only, each hop a fresh exchange on the same need,
 //! so through the host's destination guard again (and, for discovery, held to the need's pinned
-//! target).
+//! target); a hop to a cloud-metadata address is refused before it is asked for, and so is a hop
+//! from a public host to a private or loopback one (owner-approved 2026-10-21).
 
 use std::fmt::Display;
 use std::task::Poll;
@@ -47,7 +48,8 @@ use busbar_contract::abi::sdk::conn::{ConnFailure, Connector, Host};
 use busbar_contract::abi::sdk::door::abi_str;
 use busbar_contract::abi::sdk::exchange::{exchange, Exchange, ExchangeResponse, Request};
 use busbar_contract::abi::sdk::net::{
-    extract_normalized_host, host_is_private_or_loopback, scheme_is,
+    extract_normalized_host, host_is_cloud_metadata, host_is_link_local_v6,
+    host_is_private_or_loopback, scheme_is,
 };
 use busbar_contract::auth::{LoginHop, LoginHttpResponse};
 
@@ -258,24 +260,45 @@ fn reqwest_says(kind: &str, url: &str) -> String {
     format!("{kind} for url ({url})")
 }
 
-/// Why a redirect to `next` is not followed, if it is not: a URL that is not https. 1.5.5's
-/// `https_only` client refused it with reqwest's own text (`redirect.rs`
-/// `TowerRedirectPolicy::redirect`): `error following redirect for url (<next>)` for an `http`
-/// target, `builder error for url (<next>)` for any other scheme.
-///
-/// 1.5.5's policy for these GETs was reqwest's default (`redirect::Policy::default()`, ten hops)
-/// under `https_only`, with no address check (busbar-auth-oidc v1.0.6
-/// `auth-oidc/src/reqwest_fetcher.rs`, `ReqwestFetcher::new`): every https target was followed, a
-/// private or loopback one included. The host's destination guard still judges each hop's dial.
-pub fn refused_hop(next: &str) -> Option<String> {
-    if scheme_is(next, "https") {
-        return None;
+/// Why a redirect from `asked` (the hop that answered it) to `next` is not followed, if it is not,
+/// as its text and the URL the report names (`request to {url} failed: ..`): the URL asked for
+/// reqwest's own refusals (1.5.5's `{url}` was the URL asked), `next` for the address refusals.
+/// - a URL that is not https: 1.5.5's `https_only` client refused it with reqwest's own text
+///   (`redirect.rs` `TowerRedirectPolicy::redirect`): `error following redirect for url (<next>)` for
+///   an `http` target, `builder error for url (<next>)` for any other scheme;
+/// - a cloud-metadata or IPv6 link-local host, and a private or loopback host when the host that
+///   redirected is public (owner-approved 2026-10-21, narrower than 1.5.5, which followed every
+///   https target: reqwest's default ten-hop policy with no address check, busbar-auth-oidc v1.0.6
+///   `auth-oidc/src/reqwest_fetcher.rs`). A private IdP is still followed within private addresses.
+pub fn refused_hop<'a>(asked: &str, next: &'a str, url: &'a str) -> Option<(&'a str, String)> {
+    if !scheme_is(next, "https") {
+        return Some((
+            url,
+            if scheme_is(next, "http") {
+                reqwest_says("error following redirect", next)
+            } else {
+                reqwest_says("builder error", next)
+            },
+        ));
     }
-    Some(if scheme_is(next, "http") {
-        reqwest_says("error following redirect", next)
-    } else {
-        reqwest_says("builder error", next)
-    })
+    let Some(host) = extract_normalized_host(next) else {
+        return Some((next, "the redirect names no host".to_string()));
+    };
+    if host_is_cloud_metadata(&host) || host_is_link_local_v6(&host) {
+        return Some((
+            next,
+            "a redirect to a cloud metadata address is not allowed".to_string(),
+        ));
+    }
+    let from_private =
+        extract_normalized_host(asked).is_some_and(|a| host_is_private_or_loopback(&a));
+    if host_is_private_or_loopback(&host) && !from_private {
+        return Some((
+            next,
+            "a redirect to a private or loopback address is not allowed".to_string(),
+        ));
+    }
+    None
 }
 
 /// Where a redirected GET stands across PENDING: the URL asked, the hop in flight, and how many
@@ -331,8 +354,8 @@ pub fn follow(
                 reqwest_says("error following redirect", &at),
             )));
         }
-        if let Some(why) = refused_hop(&next) {
-            return Poll::Ready(Err(failed(url, why)));
+        if let Some((named, why)) = refused_hop(&at, &next, url) {
+            return Poll::Ready(Err(failed(named, why)));
         }
         hops += 1;
         at = next;
