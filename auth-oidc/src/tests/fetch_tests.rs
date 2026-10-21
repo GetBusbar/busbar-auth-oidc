@@ -780,3 +780,43 @@ fn the_io_debug_prints_no_exchange_state() {
     let io = HostIo::new(None, Ticket::NONE, state, false);
     assert!(!format!("{io:?}").contains("hunter2"));
 }
+
+/// THE CHAIN'S ONE DEADLINE: 10s from the first request. Under it the rest is left; exactly at it
+/// and over it nothing is, and the error is reqwest's timed-out request naming the URL asked.
+#[test]
+fn the_chain_deadline_is_one_ten_second_budget() {
+    const MS: u64 = 1_000_000;
+    assert_eq!(chain_left_ms(5 * MS, 5 * MS, URL), Ok(FETCH_TIMEOUT_MS));
+    assert_eq!(chain_left_ms(0, 9_999 * MS, URL), Ok(1));
+    let spent = Err("error sending request for url (https://idp.example/jwks)".to_string());
+    assert_eq!(chain_left_ms(0, 10_000 * MS, URL), spent);
+    assert_eq!(chain_left_ms(0, 25_000 * MS, URL), spent);
+    // A clock that reads earlier than the start leaves the whole budget.
+    assert_eq!(chain_left_ms(9 * MS, 3 * MS, URL), Ok(FETCH_TIMEOUT_MS));
+}
+
+/// EVERY SEND FAILURE OF A DOCUMENT GET prints reqwest's `error sending request for url (<asked>)`,
+/// whatever the connector said (the harness cannot drive a connector failure at this pin, so the
+/// mapping `run` applies is tested directly); the token exchange keeps its own text.
+#[test]
+fn a_document_send_failure_is_reqwests_error_sending_request() {
+    for cause in [
+        "the connector failed the call",
+        "refused: the destination is not allowed",
+        "tls: certificate verify failed",
+        "timeout: deadline has elapsed",
+    ] {
+        for need in [
+            NEED_DISCOVERY,
+            NEED_JWKS,
+            PUBLIC + NEED_DISCOVERY,
+            PUBLIC + NEED_JWKS,
+        ] {
+            assert_eq!(
+                send_failure(need, URL, cause),
+                "error sending request for url (https://idp.example/jwks)"
+            );
+        }
+        assert_eq!(send_failure(NEED_TOKEN, URL, cause), cause);
+    }
+}

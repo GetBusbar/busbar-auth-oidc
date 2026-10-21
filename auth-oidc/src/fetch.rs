@@ -524,6 +524,33 @@ impl std::fmt::Debug for HostIo<'_> {
     }
 }
 
+/// What is left of a GET chain's one 10s deadline at `now_ns` on the host's monotonic clock, the
+/// chain having begun at `began_ns`, in milliseconds; or, with none left (spent exactly or more),
+/// reqwest's timed-out request, its URL the one `asked`.
+///
+/// # Errors
+/// The deadline is spent.
+pub fn chain_left_ms(began_ns: u64, now_ns: u64, asked: &str) -> Result<u64, String> {
+    let spent_ms = now_ns.saturating_sub(began_ns) / 1_000_000;
+    if spent_ms >= FETCH_TIMEOUT_MS {
+        return Err(reqwest_says("error sending request", asked));
+    }
+    Ok(FETCH_TIMEOUT_MS - spent_ms)
+}
+
+/// What an exchange that failed prints for a request on `need` to `asked`. A document fetch was
+/// 1.5.5's reqwest client, which rendered every send failure (connect, TLS, the connector's
+/// refusal, a timeout) as `error sending request for url (<asked>)` (reqwest 0.12.28 `error.rs`,
+/// `Kind::Request`, its URL set by the blocking client; the connector's own text is what the host
+/// logs). The token exchange was 1.5.5's core, whose text is kept.
+pub fn send_failure(need: u32, asked: &str, cause: &str) -> String {
+    if need == NEED_TOKEN {
+        cause.to_string()
+    } else {
+        reqwest_says("error sending request", asked)
+    }
+}
+
 /// The need hop number `hops` of a GET for `doc` goes out on: the document's own need for the first
 /// hop; the untargeted JWKS need for every redirect hop (a redirect may leave the issuer's host,
 /// which the discovery need, pinned to the issuer's target, would refuse).
@@ -571,6 +598,7 @@ impl<'h> HostIo<'h> {
         &mut self,
         need: u32,
         url: &str,
+        asked: &str,
         request: impl FnOnce(&url::Url) -> Request,
     ) -> Poll<Result<ExchangeResponse, String>> {
         let parsed = match url::Url::parse(url) {
@@ -615,7 +643,7 @@ impl<'h> HostIo<'h> {
             }
             Poll::Ready(r) => {
                 self.state.issued = c.issued();
-                Poll::Ready(r.map_err(|e| e.to_string()))
+                Poll::Ready(r.map_err(|e| send_failure(need, asked, &e.to_string())))
             }
         }
     }
@@ -637,15 +665,19 @@ impl<'h> HostIo<'h> {
             let mut c = connect(self.ticket, self.state.issued);
             if let Poll::Ready(Ok(now)) = c.clock_now() {
                 let began = *self.state.chain_started_ns.get_or_insert(now.mono_ns);
-                let spent_ms = now.mono_ns.saturating_sub(began) / 1_000_000;
-                if spent_ms >= FETCH_TIMEOUT_MS {
-                    // reqwest's timed-out request, its URL the one asked.
-                    return Poll::Ready(Err(reqwest_says("error sending request", asked)));
+                match chain_left_ms(began, now.mono_ns, asked) {
+                    Ok(left) => left_ms = left,
+                    Err(text) => {
+                        // The deadline ends the chain like any other ending: nothing in flight,
+                        // the handles counted.
+                        self.state.current = None;
+                        self.state.issued = c.issued();
+                        return Poll::Ready(Err(text));
+                    }
                 }
-                left_ms = FETCH_TIMEOUT_MS - spent_ms;
             }
         }
-        self.run(need, hop.at, |u| get_request(u, hop.from, left_ms))
+        self.run(need, hop.at, asked, |u| get_request(u, hop.from, left_ms))
     }
 }
 
@@ -683,7 +715,7 @@ impl Fetch for HostIo<'_> {
         secret: Option<&str>,
     ) -> Poll<Result<LoginHttpResponse, String>> {
         let url = hop.url.as_str();
-        self.run(NEED_TOKEN, url, |u| post_request(u, hop, secret))
+        self.run(NEED_TOKEN, url, url, |u| post_request(u, hop, secret))
             .map(|r| {
                 r.map_err(|e| failed(url, e)).and_then(|reply| {
                     Ok(LoginHttpResponse {
