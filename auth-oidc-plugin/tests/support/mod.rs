@@ -85,6 +85,14 @@ pub struct Clock;
 /// fetch (it arms its backstop timer by it).
 static CLOCK_READS: AtomicU32 = AtomicU32::new(0);
 
+/// Nanoseconds the host clock has been moved on by a test (see [`Idp::skew_clock_on_reply`]).
+static CLOCK_SKEW_NS: AtomicU64 = AtomicU64::new(0);
+
+/// Put the host clock back.
+pub fn reset_clock_skew() {
+    CLOCK_SKEW_NS.store(0, Ordering::SeqCst);
+}
+
 /// The host clock reads so far (every test that binds holds [`serial`], so they are its own).
 pub fn clock_reads() -> u32 {
     CLOCK_READS.load(Ordering::SeqCst)
@@ -95,7 +103,7 @@ impl busbar_contract::services::double::ServicesDouble for Clock {
         CLOCK_READS.fetch_add(1, Ordering::SeqCst);
         Reading {
             wall_ns: 0,
-            mono_ns: now_ns(),
+            mono_ns: now_ns() + CLOCK_SKEW_NS.load(Ordering::SeqCst),
         }
     }
 }
@@ -171,6 +179,8 @@ pub struct Idp {
     next: AtomicU64,
     pended: AtomicU32,
     delay: Mutex<Duration>,
+    /// How far each reply's wake moves the host clock on (zero: not at all).
+    skew: Mutex<Duration>,
 }
 
 impl Idp {
@@ -189,6 +199,7 @@ impl Idp {
             next: AtomicU64::new(1),
             pended: AtomicU32::new(0),
             delay: Mutex::new(Duration::from_millis(5)),
+            skew: Mutex::new(Duration::ZERO),
         });
         let doc = serde_json::json!({
             "issuer": ISSUER,
@@ -213,6 +224,12 @@ impl Idp {
     /// Fail every open of `path` as the connector fails a send (refused).
     pub fn fail_open(&self, path: &str) {
         self.failing.lock().unwrap().insert(path.to_string());
+    }
+
+    /// Move the host clock on by `by` as each reply's wake fires, so a request in flight finds its
+    /// time budget spent when it resumes.
+    pub fn skew_clock_on_reply(&self, by: Duration) {
+        *self.skew.lock().unwrap() = by;
     }
 
     /// How long a reply's first read pends before the op's ticket is woken.
@@ -332,8 +349,10 @@ impl Conns for Idp {
                     .clone()
                     .expect("the table is armed");
                 let delay = *self.delay.lock().unwrap();
+                let skew = *self.skew.lock().unwrap();
                 std::thread::spawn(move || {
                     std::thread::sleep(delay);
+                    CLOCK_SKEW_NS.fetch_add(skew.as_nanos() as u64, Ordering::SeqCst);
                     wake(caller, ticket);
                 });
                 Err(ConnError::Pending)

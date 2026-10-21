@@ -602,6 +602,46 @@ fn red_a_failed_document_send_prints_reqwests_error_sending_request() {
     }
 }
 
+/// RED, END TO END: an exchange in flight when the 10 s budget runs out is RESUMED, not dropped. The
+/// discovery reply wakes the op with the host clock 11 s on; the op finishes the discovery exchange
+/// (its handles counted), and the JWKS request that follows in the same op goes out fresh and is
+/// answered, so the verify identifies. With the in-flight hop cut at the deadline (the exchange
+/// dropped, its handles uncounted) the verify fails with `error sending request` instead. Both doors.
+#[test]
+fn red_an_exchange_in_flight_past_the_budget_is_resumed_not_dropped() {
+    let _one = support::serial();
+    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let token = key.sign(&claims(AUDIENCE));
+    let lib = cdylib();
+    let stated = row().statement;
+    for arm in [
+        Arm::Linked,
+        Arm::Dropped {
+            lib: &lib,
+            stated: &stated,
+        },
+    ] {
+        support::reset_clock_skew();
+        let idp = Idp::new(&key);
+        idp.skew_clock_on_reply(Duration::from_secs(11));
+        let b = bind(&arm, &idp);
+        open(&b.plugin, &config(AUDIENCE), None).expect("opens");
+        let verdict = b.verify(Some(&token), None);
+        support::reset_clock_skew();
+        assert!(verdict.starts_with("verdict 1 "), "{verdict}");
+        assert_eq!(
+            idp.sent_to(DISCOVERY_PATH).len(),
+            1,
+            "one discovery request"
+        );
+        assert_eq!(
+            idp.sent_to("/keys").len(),
+            1,
+            "one JWKS request, sent fresh"
+        );
+    }
+}
+
 /// SINGLE-FLIGHT through the real dispatcher (THE DESIGN, auth: "a cold key id pends verify, one
 /// `exchange()` fetches, every waiter wakes"): two cold verifies in flight at once make ONE
 /// discovery request and ONE JWKS request between them, and both identify.
