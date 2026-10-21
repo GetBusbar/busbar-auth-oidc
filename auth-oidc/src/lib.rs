@@ -54,7 +54,6 @@ use cache::JwksCache;
 use discovery::Discovery;
 use fetch::Fetch;
 use flight::Step;
-use open::config;
 
 /// THE DOOR: this plugin's one public item (BUSBAR-1.6.0.md l.3567, Crate shape).
 pub use door::door;

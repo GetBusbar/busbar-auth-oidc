@@ -490,9 +490,7 @@ pub fn bind_as<K: busbar_plugin_loader::dispatch::Kind>(
     let plugin = match arm {
         Arm::Linked => load_linked::<K>(&row(), bind),
         Arm::Dropped { lib, stated } => {
-            let name = busbar_contract::abi::mechanism::rendering::read(stated)
-                .expect("the stated Statement reads")
-                .name;
+            let name = self::stated().name;
             load_dropped_bytes::<K>(lib, &name, stated, bind)
         }
         Arm::File(path) => {
