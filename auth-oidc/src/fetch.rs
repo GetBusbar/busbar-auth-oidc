@@ -251,18 +251,31 @@ pub fn redirect(at: &str, reply: &ExchangeResponse) -> Option<String> {
     Some(next.into())
 }
 
-/// Why a redirect to `next` is not followed, if it is not: a URL that is not https (1.5.5's
-/// `https_only` client refused it in the same words).
+/// What `reqwest` 0.12.28 (1.5.5's lockfile; `error.rs` `Display`) prints for an error of `kind`
+/// about `url`: the kind's words, then ` for url (<url>)`.
+fn reqwest_says(kind: &str, url: &str) -> String {
+    let url = url::Url::parse(url).map_or_else(|_| url.to_string(), String::from);
+    format!("{kind} for url ({url})")
+}
+
+/// Why a redirect to `next` is not followed, if it is not: a URL that is not https. 1.5.5's
+/// `https_only` client refused it with reqwest's own text (`redirect.rs`
+/// `TowerRedirectPolicy::redirect`): `error following redirect for url (<next>)` for an `http`
+/// target, `builder error for url (<next>)` for any other scheme.
 ///
 /// 1.5.5's policy for these GETs was reqwest's default (`redirect::Policy::default()`, ten hops)
 /// under `https_only`, with no address check (busbar-auth-oidc v1.0.6
 /// `auth-oidc/src/reqwest_fetcher.rs`, `ReqwestFetcher::new`): every https target was followed, a
 /// private or loopback one included. The host's destination guard still judges each hop's dial.
-pub fn refused_hop(next: &str) -> Option<&'static str> {
-    if !scheme_is(next, "https") {
-        return Some("URL scheme is not allowed");
+pub fn refused_hop(next: &str) -> Option<String> {
+    if scheme_is(next, "https") {
+        return None;
     }
-    None
+    Some(if scheme_is(next, "http") {
+        reqwest_says("error following redirect", next)
+    } else {
+        reqwest_says("builder error", next)
+    })
 }
 
 /// Where a redirected GET stands across PENDING: the URL asked, the hop in flight, and how many
@@ -311,10 +324,15 @@ pub fn follow(
             return Poll::Ready(document(url, reply.status, reply.body));
         };
         if hops >= MAX_REDIRECTS {
-            return Poll::Ready(Err(failed(url, "too many redirects")));
+            // reqwest's `TooManyRedirects`, wrapped as a redirect error naming the hop that
+            // answered the eleventh redirect.
+            return Poll::Ready(Err(failed(
+                url,
+                reqwest_says("error following redirect", &at),
+            )));
         }
         if let Some(why) = refused_hop(&next) {
-            return Poll::Ready(Err(failed(&next, why)));
+            return Poll::Ready(Err(failed(url, why)));
         }
         hops += 1;
         at = next;
@@ -479,7 +497,16 @@ impl<'h> HostIo<'h> {
         // is asked and before the secret is in any request. (The token exchange's HOST is held
         // to the operator's hosts before its hop is built: `OidcModule::token_exchange`.)
         if parsed.scheme() != "https" && !plaintext_allowed(need, url) {
-            return Poll::Ready(Err(failed(url, "URL scheme is not allowed")));
+            // The token exchange's refusal is 1.5.5's core (`vet_hop_url`); a document fetch was
+            // 1.5.5's `https_only` client, whose refusal is reqwest's own text.
+            return Poll::Ready(Err(failed(
+                url,
+                if need == NEED_TOKEN {
+                    "URL scheme is not allowed".to_string()
+                } else {
+                    reqwest_says("builder error", parsed.as_str())
+                },
+            )));
         }
         let Some((connect, _)) = &self.host else {
             return Poll::Ready(Err(failed(url, ConnFailure::Unarmed)));

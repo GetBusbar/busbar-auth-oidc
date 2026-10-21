@@ -205,7 +205,11 @@ fn the_eleventh_redirect_is_refused() {
     let mut far = Far::new(&refs);
     assert_eq!(
         far.get(&hop(0)),
-        Err("request to https://idp.example/hop/0 failed: too many redirects".to_string())
+        Err(
+            "request to https://idp.example/hop/0 failed: error following redirect for url \
+             (https://idp.example/hop/10)"
+                .to_string()
+        )
     );
     assert_eq!(
         far.asked.len(),
@@ -221,7 +225,11 @@ fn a_redirect_to_http_is_refused() {
     let mut far = Far::new(&[(URL, moved(302, "http://idp.example/jwks"))]);
     assert_eq!(
         far.get(URL),
-        Err("request to http://idp.example/jwks failed: URL scheme is not allowed".to_string())
+        Err(
+            "request to https://idp.example/jwks failed: error following redirect for url \
+             (http://idp.example/jwks)"
+                .to_string()
+        )
     );
     assert_eq!(far.asked, vec![URL]);
 }
@@ -248,6 +256,21 @@ fn a_redirect_to_any_https_address_is_followed() {
         ("https://10.0.0.7/realms/corp/openid", served("{}")),
     ]);
     assert_eq!(far.get(private).as_deref(), Ok("{}"));
+}
+
+/// A REDIRECT TO A SCHEME THAT IS NEITHER http NOR https is reqwest's builder error, naming the
+/// target (reqwest 0.12.28 `redirect.rs`: `url_bad_scheme` before the https-only check).
+#[test]
+fn a_redirect_to_another_scheme_is_reqwests_builder_error() {
+    let mut far = Far::new(&[(URL, moved(302, "ftp://idp.example/jwks"))]);
+    assert_eq!(
+        far.get(URL),
+        Err(
+            "request to https://idp.example/jwks failed: builder error for url \
+             (ftp://idp.example/jwks)"
+                .to_string()
+        )
+    );
 }
 
 /// A 3xx that is no redirect 1.5.5's client followed (no `location`, or a status it does not
@@ -349,7 +372,9 @@ fn every_request_is_https_only_and_needs_the_host_connector() {
     assert_eq!(
         io.get(Doc::Jwks, "http://idp.example/jwks"),
         Poll::Ready(Err(
-            "request to http://idp.example/jwks failed: URL scheme is not allowed".to_string()
+            "request to http://idp.example/jwks failed: builder error for url \
+             (http://idp.example/jwks)"
+                .to_string()
         ))
     );
     assert_eq!(
@@ -561,7 +586,7 @@ fn documents_stay_https_only_whatever_the_host() {
         assert_eq!(
             io.get(doc, url),
             Poll::Ready(Err(format!(
-                "request to {url} failed: URL scheme is not allowed"
+                "request to {url} failed: builder error for url ({url})"
             ))),
         );
         assert!(!plaintext_allowed(doc.need(), url), "{url}");
