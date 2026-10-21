@@ -175,7 +175,7 @@ dependencies = [
 [[package]]
 name = "busbar-plugin-loader"
 version = "1.5.0"
-source = "git+https://github.com/GetBusbar/busbar?rev=7263f4e61b7af7fdadb9079394d139547e61d1c0#7263f4e61b7af7fdadb9079394d139547e61d1c0"
+source = "git+https://github.com/GetBusbar/busbar?rev=08d4d7c501ccb9f734a8d088c242addb2e5fb444#08d4d7c501ccb9f734a8d088c242addb2e5fb444"
 dependencies = [
  "busbar-contract",
  "ed25519-dalek",
