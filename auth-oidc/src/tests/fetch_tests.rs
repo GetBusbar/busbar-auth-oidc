@@ -207,7 +207,7 @@ fn the_eleventh_redirect_is_refused() {
         far.get(&hop(0)),
         Err(
             "request to https://idp.example/hop/0 failed: error following redirect for url \
-             (https://idp.example/hop/10)"
+             (https://idp.example/hop/0)"
                 .to_string()
         )
     );
@@ -227,7 +227,7 @@ fn a_redirect_to_http_is_refused() {
         far.get(URL),
         Err(
             "request to https://idp.example/jwks failed: error following redirect for url \
-             (http://idp.example/jwks)"
+             (https://idp.example/jwks)"
                 .to_string()
         )
     );
@@ -369,7 +369,7 @@ fn a_redirect_to_another_scheme_is_reqwests_builder_error() {
         far.get(URL),
         Err(
             "request to https://idp.example/jwks failed: builder error for url \
-             (ftp://idp.example/jwks)"
+             (https://idp.example/jwks)"
                 .to_string()
         )
     );
@@ -475,7 +475,7 @@ fn every_request_is_https_only_and_needs_the_host_connector() {
         io.get(Doc::Jwks, "http://idp.example/jwks"),
         Poll::Ready(Err(
             "request to http://idp.example/jwks failed: builder error for url \
-             (http://idp.example/jwks)"
+             (https://idp.example/jwks)"
                 .to_string()
         ))
     );

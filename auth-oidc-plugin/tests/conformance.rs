@@ -973,9 +973,9 @@ fn a_waiter_is_woken_by_the_fetch_it_waits_on_not_a_polling_timer() {
     assert_eq!(idp.sent_to("/keys").len(), 1);
     let waited = support::clock_reads() - reads;
     assert!(
-        (1..=4).contains(&waited),
-        "the waiter armed its backstop once per wait (discovery, JWKS), not a timer every 25 ms: \
-         {waited} clock reads"
+        (1..=12).contains(&waited),
+        "the waiter armed its backstop once per wait (discovery, JWKS) and each request entry read \
+         the chain deadline's clock, not a timer every 25 ms: {waited} clock reads"
     );
 }
 

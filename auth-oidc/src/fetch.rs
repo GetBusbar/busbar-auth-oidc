@@ -499,6 +499,9 @@ impl std::fmt::Debug for IoState {
     }
 }
 
+/// The host handle's two closures: its connector for an entry, and its wake.
+type Armed<'h> = (Connect<'h>, Box<dyn Fn(Ticket) + 'h>);
+
 /// The connector for one entry on a ticket, its handles counting on from the second argument.
 type Connect<'h> = Box<dyn Fn(Ticket, u32) -> Connector<'h> + 'h>;
 
@@ -506,7 +509,7 @@ type Connect<'h> = Box<dyn Fn(Ticket, u32) -> Connector<'h> + 'h>;
 /// the call's own host borrow (never the host's `'static` install handle), so no field names a
 /// `Host`.
 pub struct HostIo<'h> {
-    host: Option<(Connect<'h>, Box<dyn Fn(Ticket) + 'h>)>,
+    host: Option<Armed<'h>>,
     ticket: Ticket,
     state: IoState,
     anchored: bool,
