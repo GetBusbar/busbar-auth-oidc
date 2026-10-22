@@ -137,11 +137,13 @@ impl VerdictCache {
     }
 
     /// How many entries are held.
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.lock().entries.len()
     }
 
     /// Whether none is.
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }

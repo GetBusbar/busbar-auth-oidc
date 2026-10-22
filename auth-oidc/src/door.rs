@@ -69,10 +69,11 @@ pub const NAME: &str = "busbar-auth-oidc";
 
 /// The auth tail: it verifies and it logs in through a redirect to the IdP; its verdicts may be
 /// cached (1.5.5's `cacheable`).
-const TAIL: AuthTail = AuthTail {
-    caps: CAP_INBOUND | CAP_LOGIN,
-    login_kind: LOGIN_KIND_REDIRECT,
-    ..verify_tail(FACT_CACHEABLE, AuthPoints::HEAD)
+const TAIL: AuthTail = {
+    let mut t = verify_tail(FACT_CACHEABLE, AuthPoints::HEAD);
+    t.caps = CAP_INBOUND | CAP_LOGIN;
+    t.login_kind = LOGIN_KIND_REDIRECT;
+    t
 };
 
 /// The settings key whose value is the confidential-client secret's reference: the kernel
@@ -84,49 +85,48 @@ const REWRITES: &[Rewrite] = &[Rewrite {
     class: REWRITE_ALIAS,
     _reserved: 0,
     from: abi_str("oidc"),
-    to: AbiStr {
-        ptr: std::ptr::null(),
-        len: 0,
-    },
+    to: AbiStr::ABSENT,
 }];
 
-const ABSENT_STR: AbiStr = AbiStr {
-    ptr: std::ptr::null(),
-    len: 0,
-};
+const ABSENT_STR: AbiStr = AbiStr::ABSENT;
 
 /// The metric families `refresh`'s envelope indexes into: the verdict cache's flush count
 /// (`abi::auth`: "an auth plugin that caches verdicts declares a counter family of this name (no
 /// labels) ... the host sums it ... into the admin cache flush's `{"flushed": N}`").
-const FAMILIES: &[MetricFamily] = &[MetricFamily {
-    name: abi_str(METRIC_CACHE_FLUSHED),
-    help: abi_str("inbound verdict cache entries dropped by refresh"),
-    unit: ABSENT_STR,
-    label_keys: std::ptr::null(),
-    label_keys_len: 0,
-    kind: FAMILY_COUNTER,
-    _reserved: [0; 7],
-}];
+const FAMILIES: &[MetricFamily] = &[MetricFamily::new(
+    abi_str(METRIC_CACHE_FLUSHED),
+    abi_str("inbound verdict cache entries dropped by refresh"),
+    ABSENT_STR,
+    FAMILY_COUNTER,
+)];
 
 /// The index of the flush-count family in [`FAMILIES`].
 pub const CACHE_FAMILY: u32 = 0;
 
+busbar_contract::statement_extensions!(
+    /// The Statement's extensions: this plugin's whole `declares` document (BUSBAR-1.6.0.md l.246).
+    EXTENSIONS: [(
+        busbar_contract::abi::mechanism::extensions::EXT_DECLARES,
+        include_bytes!("../declares.json")
+    )]
+);
+
 /// This plugin's Statement: its name and alias, its version, the most calls one instance holds in
 /// flight, its one secret reference, its six outbound needs, its one metric family and its auth
 /// tail.
-pub const STATEMENT: Statement = Statement {
-    families: FAMILIES.as_ptr(),
-    families_len: FAMILIES.len(),
-    secret_refs: SECRET_REFS.as_ptr(),
-    secret_refs_len: SECRET_REFS.len(),
-    rewrites: REWRITES.as_ptr(),
-    rewrites_len: REWRITES.len(),
-    needs: NEEDS.as_ptr(),
-    needs_len: NEEDS.len(),
-    mark_words: CARRIERS.as_ptr(),
-    mark_words_len: CARRIERS.len(),
-    ..with_tail(statement(NAME, env!("CARGO_PKG_VERSION"), 64), &TAIL)
-};
+pub const STATEMENT: Statement = with_tail(
+    {
+        let mut s = statement(NAME, env!("CARGO_PKG_VERSION"), 64)
+            .with_families(FAMILIES)
+            .with_secret_refs(SECRET_REFS)
+            .with_rewrites(REWRITES)
+            .with_needs(NEEDS)
+            .with_mark_words(CARRIERS);
+        s.extensions = EXTENSIONS;
+        s
+    },
+    &TAIL,
+);
 
 /// The most short answers kept for their re-call at once.
 const REACHED_MAX: usize = 1024;
@@ -270,16 +270,22 @@ impl Oidc {
     /// The tick's refresh ahead of the TTL on `opened`, over `host`'s connector on the driver
     /// ticket `ticket`, from `state`: PENDING (parked for `drive`) while its fetch is in flight,
     /// READY when it is done or nothing is due.
-    fn refresh_ahead(
+    fn refresh_ahead<O: AbiOut>(
         &self,
         host: Option<&Host>,
         ticket: Ticket,
         opened: Arc<Opened>,
         state: IoState,
+        out: &mut Out<'_, O>,
     ) -> Outcome {
         let mut io = HostIo::new(host, ticket, state, opened.module.anchored());
         match opened.module.refresh_ahead(Instant::now(), &mut io) {
             Step::Pending => {
+                // Woken at the fetch's 10s deadline, so a body that stalls dead is given up by
+                // the next `drive` rather than at the next tick.
+                if let Some(at) = io.deadline_ns() {
+                    out.wake_at(at);
+                }
                 let state = io.into_state();
                 *self.driving.lock().unwrap_or_else(PoisonError::into_inner) =
                     Some((opened, state));
@@ -361,7 +367,14 @@ impl Life for Oidc {
         _generation: u64,
     ) -> Result<Refreshed, Refusal> {
         let now = self.now();
-        let same_secret = now.secret.as_deref().map(String::as_bytes) == lent_secret(secrets);
+        let same_secret = match (
+            now.secret.as_deref().map(String::as_bytes),
+            lent_secret(secrets),
+        ) {
+            (Some(a), Some(b)) => busbar_contract::constant_time_eq(a, b),
+            (None, None) => true,
+            _ => false,
+        };
         let reopened = if now.settings == settings && same_secret {
             None
         } else {
@@ -439,6 +452,13 @@ fn pend<O: AbiOut>(
             }
         }
     }
+    // The op's own request in flight is bounded by its 10s deadline: wake at it, so a body that
+    // stalls dead (no wake of its own) is driven once more and given up.
+    if !wait {
+        if let Some(at) = io.deadline_ns() {
+            out.wake_at(at);
+        }
+    }
     parked.io = io.into_state();
     instance.park(parked);
     Outcome::Pending
@@ -446,14 +466,14 @@ fn pend<O: AbiOut>(
 
 /// A blob's bytes as text; `None` when absent or not UTF-8.
 fn blob_text(b: Lent<'_, Blob>) -> Option<&str> {
-    (b.fmt != BLOB_ABSENT && !b.ptr.is_null())
+    (!b.is_absent())
         .then(|| std::str::from_utf8(b.bytes()).ok())
         .flatten()
 }
 
 /// A string's text; `None` when absent or not UTF-8.
 fn str_text(s: Lent<'_, AbiStr>) -> Option<&str> {
-    (!s.ptr.is_null()).then(|| s.as_str().ok()).flatten()
+    (!s.is_absent()).then(|| s.as_str().ok()).flatten()
 }
 
 const ABSENT: Span = Span {
@@ -461,10 +481,15 @@ const ABSENT: Span = Span {
     len: 0,
 };
 
-/// The one line this plugin's credential arrives on, named whatever its verdict.
+/// The credential line this plugin names, whatever its verdict. The credential `verify` judges is
+/// the host's candidate, read from the default inbound style's carriers in 1.5.5's order: the
+/// `authorization` line's Bearer value, then `x-api-key`, then `x-goog-api-key` (1.5.5
+/// `auth/mod.rs`, the chain's credential). A JWT may so arrive on any of the three; this plugin
+/// names `authorization` only, and the other two lines are struck because the default style's
+/// consumed lines carry them.
 const AUTHORIZATION: &str = "authorization";
 
-/// The Statement's carrier marks: the line `verify` reads its bearer from.
+/// The Statement's carrier marks: the credential line this plugin names ([`AUTHORIZATION`]).
 const CARRIERS: &[MarkWord] = &[carrier(AUTHORIZATION)];
 
 /// Write the answer into the host's buffers and answer READY with `verdict`: for `verify` the strip
@@ -571,8 +596,8 @@ impl SafeSlot for Verify {
         let Some(h) = instance.get() else {
             return Outcome::Fault;
         };
-        let c = input.field(|i| &i.credential);
-        let credential = (c.fmt != BLOB_ABSENT && !c.ptr.is_null()).then(|| c.bytes());
+        let c = input.credential();
+        let credential = (!c.is_absent()).then(|| c.bytes());
         let token = match credential.map(std::str::from_utf8) {
             // Bytes that are not text are no JWT: not this module's credential, answered as one (as
             // 1.5.5 passed a header that did not read as text): PASS, the chain continues, and the
@@ -583,7 +608,7 @@ impl SafeSlot for Verify {
                     None,
                     None,
                     Some((input.strip(), DECISION_CONTINUE)),
-                    input.field(|i| &i.out_buf),
+                    input.out_buf(),
                     &mut out,
                     VERDICT_PASS,
                 );
@@ -627,7 +652,7 @@ impl SafeSlot for Verify {
             p,
             token.map(str::as_bytes),
             Some((input.strip(), decision)),
-            input.field(|i| &i.out_buf),
+            input.out_buf(),
             &mut out,
             verdict,
         )
@@ -651,9 +676,9 @@ impl SafeSlot for Begin {
         };
         let field = |s: Lent<'_, AbiStr>| s.as_str().map(str::to_string);
         let (Ok(redirect_uri), Ok(state), Ok(code_challenge)) = (
-            field(input.field(|i| &i.redirect_uri)),
-            field(input.field(|i| &i.state)),
-            field(input.field(|i| &i.code_challenge)),
+            field(input.redirect_uri()),
+            field(input.state()),
+            field(input.code_challenge()),
         ) else {
             return out.fail(Refusal::failed("oidc: a begin_login field is not UTF-8"));
         };
@@ -663,7 +688,7 @@ impl SafeSlot for Begin {
             redirect_uri,
             state,
             code_challenge,
-            nonce: str_text(input.field(|i| &i.nonce)).map(str::to_string),
+            nonce: str_text(input.nonce()).map(str::to_string),
             scopes: Vec::new(),
         };
         let (mut io, parked) = resume(&instance, h);
@@ -701,8 +726,8 @@ impl SafeSlot for Complete {
             return Outcome::Fault;
         };
         let oidc = h.life();
-        let state = input.field(|i| &i.state).bytes();
-        let code = blob_text(input.field(|i| &i.code));
+        let state = input.state().bytes();
+        let code = blob_text(input.code());
         let code_bytes = code.map_or(&[][..], str::as_bytes);
         let mut reached = oidc.reached.lock().unwrap_or_else(PoisonError::into_inner);
         let kept = reached
@@ -715,9 +740,9 @@ impl SafeSlot for Complete {
                 let (mut io, mut parked) = resume(&instance, h);
                 let login = oidc.now().login(
                     code,
-                    str_text(input.field(|i| &i.redirect_uri)),
-                    blob_text(input.field(|i| &i.code_verifier)),
-                    str_text(input.field(|i| &i.nonce)).unwrap_or(""),
+                    str_text(input.redirect_uri()),
+                    blob_text(input.code_verifier()),
+                    str_text(input.nonce()).unwrap_or(""),
                     &mut parked.answer,
                     &mut io,
                 );
@@ -745,7 +770,7 @@ impl SafeSlot for Complete {
             Some(&principal),
             None,
             None,
-            input.field(|i| &i.out_buf),
+            input.out_buf(),
             &mut out,
             LOGIN_IDENTITY,
         );
@@ -790,14 +815,14 @@ impl SafeSlot for Tick {
         let oidc = h.life();
         let opened = oidc.now();
         let period = u64::try_from(opened.module.tick_period().as_nanos()).unwrap_or(u64::MAX);
-        out.set(|o| &o.next_tick_ns, input.now_ns.saturating_add(period));
+        out.set(|o| &o.next_tick_ns, input.now_ns().saturating_add(period));
         let ticket = instance.ticket();
         if ticket.is_none() {
             return Outcome::Ready;
         }
         // A tick starts its driver ticket's cycle: whatever the last one left in flight is over.
         *oidc.driving.lock().unwrap_or_else(PoisonError::into_inner) = None;
-        oidc.refresh_ahead(h.host(), ticket, opened, IoState::default())
+        oidc.refresh_ahead(h.host(), ticket, opened, IoState::default(), &mut out)
     }
 }
 
@@ -811,7 +836,7 @@ impl SafeSlot for Drive {
     fn call(
         instance: Instance<'_, Held<Oidc>>,
         _: Lent<'_, DriveIn>,
-        _: Out<'_, OutHead>,
+        mut out: Out<'_, OutHead>,
     ) -> Outcome {
         let Some(h) = instance.get() else {
             return Outcome::Fault;
@@ -823,7 +848,9 @@ impl SafeSlot for Drive {
             .unwrap_or_else(PoisonError::into_inner)
             .take();
         match parked {
-            Some((opened, state)) => oidc.refresh_ahead(h.host(), instance.ticket(), opened, state),
+            Some((opened, state)) => {
+                oidc.refresh_ahead(h.host(), instance.ticket(), opened, state, &mut out)
+            }
             None => Outcome::Ready,
         }
     }

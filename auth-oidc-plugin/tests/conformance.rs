@@ -5,8 +5,8 @@
 //! conformance on the auth kind's memory ABI (THE DESIGN 11.4: compiled in or dropped in, one door,
 //! one table), run against the busbar rev this repo pins (`.busbar-ref`).
 //!
-//! The door is held two ways at once: LINKED (`busbar_auth_oidc::door::door`, the row a busbar
-//! build that compiles the module in registers, `LinkedRow::of`) and DROPPED IN (this crate's built
+//! The door is held two ways at once: LINKED (`busbar_auth_oidc::door`, the row a busbar
+//! build that compiles the module in registers, `LinkedRow::of_loaded`) and DROPPED IN (this crate's built
 //! cdylib, signed first-party into a temp `plugins/` directory under a manifest stating the door's
 //! Statement, found by the loader's scan and admitted against that signed Statement). Each is bound
 //! to a real dispatcher serving the host's clock and to a connection table that PLAYS THE IdP
@@ -39,7 +39,7 @@ mod support;
 // family, the far ends the module's needs reach: `conformance.json`), exact crossings, both folds
 // equal, its RED arms kept.
 busbar_plugin_loader::conformance_suite! {
-    door: busbar_auth_oidc::door::door,
+    loaded: support::loaded(),
     cdylib: "busbar_auth_oidc_plugin",
     inputs: include_str!("conformance.json"),
 }
@@ -492,7 +492,7 @@ fn the_linked_and_the_dropped_in_oidc_module_are_one_module() {
         support::strays(
             &public.idp.sent(),
             needs,
-            &support::declared_targets(busbar_auth_oidc::fetch::PUBLIC)
+            &support::declared_targets(support::public_base())
         ),
         Vec::<String>::new(),
         "every request rides a public-roots need:\n{}",
@@ -568,6 +568,242 @@ fn red_an_unreachable_issuer_and_a_ticketless_call_fail_verify_in_1_5_5_s_words(
         seen.push((ticketless, refused));
     }
     assert_eq!(seen[0], seen[1], "both doors alike");
+}
+
+/// RED, END TO END: a send the connector fails (connect, TLS, refusal) prints reqwest's `error
+/// sending request for url (<asked>)` after 1.5.5's prefix, whatever the connector said, proving
+/// `run` applies `send_failure`. Both doors alike.
+#[test]
+fn red_a_failed_document_send_prints_reqwests_error_sending_request() {
+    let _one = support::serial();
+    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let token = key.sign(&claims(AUDIENCE));
+    let lib = cdylib();
+    let stated = row().statement;
+    let url = format!("https://idp.conformance.example{DISCOVERY_PATH}");
+    for arm in [
+        Arm::Linked,
+        Arm::Dropped {
+            lib: &lib,
+            stated: &stated,
+        },
+    ] {
+        let idp = Idp::new(&key);
+        idp.fail_open(DISCOVERY_PATH);
+        let b = bind(&arm, &idp);
+        open(&b.plugin, &config(AUDIENCE), None).expect("opens: nothing is fetched at open");
+        assert_eq!(
+            b.verify(Some(&token), None),
+            format!(
+                "Failed OIDC discovery fetch failed ({url}): request to {url} failed: error \
+                 sending request for url ({url}); set jwks_url explicitly"
+            )
+        );
+    }
+}
+
+/// RED, END TO END: an exchange in flight when the 10 s budget runs out is RESUMED, not dropped. The
+/// discovery reply wakes the op with the host clock 11 s on; the op finishes the discovery exchange
+/// (its handles counted), and the JWKS request that follows in the same op goes out fresh and is
+/// answered, so the verify identifies. With the in-flight hop cut at the deadline (the exchange
+/// dropped, its handles uncounted) the verify fails with `error sending request` instead. Both doors.
+#[test]
+fn red_an_exchange_in_flight_past_the_budget_is_resumed_not_dropped() {
+    let _one = support::serial();
+    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let token = key.sign(&claims(AUDIENCE));
+    let lib = cdylib();
+    let stated = row().statement;
+    for arm in [
+        Arm::Linked,
+        Arm::Dropped {
+            lib: &lib,
+            stated: &stated,
+        },
+    ] {
+        let _skew = support::SkewGuard;
+        let idp = Idp::new(&key);
+        idp.skew_clock_on_reply(Duration::from_secs(11));
+        let b = bind(&arm, &idp);
+        open(&b.plugin, &config(AUDIENCE), None).expect("opens");
+        let verdict = b.verify(Some(&token), None);
+        assert!(verdict.starts_with("verdict 1 "), "{verdict}");
+        assert_eq!(
+            idp.sent_to(DISCOVERY_PATH).len(),
+            1,
+            "one discovery request"
+        );
+        assert_eq!(
+            idp.sent_to("/keys").len(),
+            1,
+            "one JWKS request, sent fresh"
+        );
+    }
+}
+
+/// RED, END TO END: the host's timeout ends at the first piece of the answer, so a body that
+/// trickles past the 10 s budget is bounded by the plugin. The head arrives in budget, the body's
+/// wake finds the clock 11 s on and the read still pending: the exchange is given up with the
+/// timed-out request text, its stream closed on the host. (1.5.5 printed `reading {url} response
+/// body failed: ..` for a mid-body stall: a KNOWN DIFFERENCE, the SDK cannot tell head from body.)
+/// Both doors.
+#[test]
+fn red_a_body_trickling_past_the_budget_is_given_up_and_closed() {
+    let _one = support::serial();
+    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let token = key.sign(&claims(AUDIENCE));
+    let lib = cdylib();
+    let stated = row().statement;
+    let url = format!("https://idp.conformance.example{DISCOVERY_PATH}");
+    for arm in [
+        Arm::Linked,
+        Arm::Dropped {
+            lib: &lib,
+            stated: &stated,
+        },
+    ] {
+        let _skew = support::SkewGuard;
+        let idp = Idp::new(&key);
+        idp.trickle_body(Duration::from_secs(11));
+        let b = bind(&arm, &idp);
+        open(&b.plugin, &config(AUDIENCE), None).expect("opens");
+        assert_eq!(
+            b.verify(Some(&token), None),
+            format!(
+                "Failed OIDC discovery fetch failed ({url}): request to {url} failed: error \
+                 sending request for url ({url}); set jwks_url explicitly"
+            )
+        );
+        let first = idp.sent_to(DISCOVERY_PATH);
+        assert_eq!(first.len(), 1);
+        assert!(
+            idp.closed().contains(&first[0].conn),
+            "the abandoned stream is closed on the host"
+        );
+    }
+}
+
+/// RED, END TO END, ONE OP: an abandoned exchange's handles are COUNTED, so the op's next request
+/// goes out fresh. `jwks_min_refetch_secs` is 0 and the warm key set is stale: the Refresh GET's
+/// body trickles past the budget and is given up (settle keeps the stale keys), the token's kid
+/// misses, and the Rotation refetch, a second GET in the same op, is answered with the rotated key
+/// set and identifies. Were the close not counted, that second establish would replay the close's
+/// kept answer and the verify would fail. Both doors.
+#[test]
+fn red_an_abandoned_refresh_counts_its_handles_so_the_rotation_refetch_goes_out_fresh() {
+    let _one = support::serial();
+    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let rotated = Issuer::start(UNUSED_ISSUER, "rotated-kid");
+    let warm = key.sign(&claims(AUDIENCE));
+    let new_kid = rotated.sign(&claims(AUDIENCE));
+    let lib = cdylib();
+    let stated = row().statement;
+    for arm in [
+        Arm::Linked,
+        Arm::Dropped {
+            lib: &lib,
+            stated: &stated,
+        },
+    ] {
+        let _skew = support::SkewGuard;
+        let idp = Idp::new(&key);
+        let b = bind(&arm, &idp);
+        let mut cfg: serde_json::Value = serde_json::from_str(&config(AUDIENCE)).unwrap();
+        cfg["jwks_ttl_secs"] = serde_json::json!(1);
+        cfg["jwks_min_refetch_secs"] = serde_json::json!(0);
+        open(&b.plugin, &cfg.to_string(), None).expect("opens");
+        assert!(b.verify(Some(&warm), None).starts_with("verdict 1 "));
+        // The IdP rotates its key; the warm set goes stale; the Refresh GET trickles once.
+        idp.answer("/keys", 200, rotated.jwks());
+        std::thread::sleep(Duration::from_millis(1300));
+        idp.trickle_path("/keys", 1, Duration::from_secs(11));
+        let verdict = b.verify(Some(&new_kid), None);
+        assert!(verdict.starts_with("verdict 1 "), "{verdict}");
+        let keys = idp.sent_to("/keys");
+        assert_eq!(
+            keys.len(),
+            3,
+            "warm, the abandoned refresh, the rotation refetch"
+        );
+        assert!(
+            idp.closed().contains(&keys[1].conn),
+            "the abandoned stream is closed"
+        );
+    }
+}
+
+/// RED, END TO END: a body that stalls DEAD after the head (nothing wakes the read) is still given
+/// up at the 10 s deadline, because the op arms a wake at it. Both doors; it takes the 10 s.
+#[test]
+fn red_a_body_that_stalls_dead_times_out_at_ten_seconds() {
+    let _one = support::serial();
+    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let token = key.sign(&claims(AUDIENCE));
+    let lib = cdylib();
+    let stated = row().statement;
+    let url = format!("https://idp.conformance.example{DISCOVERY_PATH}");
+    for arm in [
+        Arm::Linked,
+        Arm::Dropped {
+            lib: &lib,
+            stated: &stated,
+        },
+    ] {
+        let idp = Idp::new(&key);
+        idp.stall_body(DISCOVERY_PATH);
+        let b = bind(&arm, &idp);
+        open(&b.plugin, &config(AUDIENCE), None).expect("opens");
+        let began = std::time::Instant::now();
+        assert_eq!(
+            b.verify(Some(&token), None),
+            format!(
+                "Failed OIDC discovery fetch failed ({url}): request to {url} failed: error \
+                 sending request for url ({url}); set jwks_url explicitly"
+            )
+        );
+        assert!(
+            began.elapsed() >= Duration::from_secs(9),
+            "{:?}",
+            began.elapsed()
+        );
+    }
+}
+
+/// RED, END TO END: a token endpoint that stalls dead after its head is cut at the exchange's own
+/// 10 s (1.5.5's hop client `.timeout(10s)`) and the login answers `LOGIN_OUTAGE` (the host's 502
+/// "Couldn't reach your provider"), not the 60 s deadline's 401. Both doors; it takes the 10 s.
+#[test]
+fn red_a_token_endpoint_that_stalls_is_an_outage_after_ten_seconds() {
+    let _one = support::serial();
+    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let lib = cdylib();
+    let stated = row().statement;
+    for arm in [
+        Arm::Linked,
+        Arm::Dropped {
+            lib: &lib,
+            stated: &stated,
+        },
+    ] {
+        let idp = Idp::new(&key);
+        idp.stall_body("/token");
+        let b = bind(&arm, &idp);
+        let mut cfg: serde_json::Value = serde_json::from_str(&config(AUDIENCE)).unwrap();
+        cfg["token_endpoint"] = serde_json::json!(support::TOKEN_URL);
+        open(&b.plugin, &cfg.to_string(), Some(CLIENT_SECRET)).expect("opens");
+        let began = std::time::Instant::now();
+        let answer = b.complete("code-1", ("st", NONCE), REDIRECT, "the-verifier", None);
+        assert_eq!(answer.trim_end(), format!("verdict {LOGIN_OUTAGE}"));
+        assert!(
+            began.elapsed() >= Duration::from_secs(9),
+            "{:?}",
+            began.elapsed()
+        );
+        assert!(
+            began.elapsed() < Duration::from_secs(30),
+            "before the 60 s login deadline"
+        );
+    }
 }
 
 /// SINGLE-FLIGHT through the real dispatcher (THE DESIGN, auth: "a cold key id pends verify, one
@@ -737,9 +973,9 @@ fn a_waiter_is_woken_by_the_fetch_it_waits_on_not_a_polling_timer() {
     assert_eq!(idp.sent_to("/keys").len(), 1);
     let waited = support::clock_reads() - reads;
     assert!(
-        (1..=4).contains(&waited),
-        "the waiter armed its backstop once per wait (discovery, JWKS), not a timer every 25 ms: \
-         {waited} clock reads"
+        (1..=12).contains(&waited),
+        "the waiter armed its backstop once per wait (discovery, JWKS) and each request entry read \
+         the chain deadline's clock, not a timer every 25 ms: {waited} clock reads"
     );
 }
 
@@ -970,5 +1206,15 @@ fn an_identity_carries_the_credential_it_was_verified_from() {
         &bytes[held.offset as usize..(held.offset as usize + held.len as usize)],
         token.as_bytes(),
         "the verified credential rides the identity"
+    );
+}
+
+/// The door's Statement carries the whole `declares` document under `EXT_DECLARES`.
+#[test]
+fn the_statement_carries_the_declares_document() {
+    let read = support::stated();
+    assert_eq!(
+        busbar_contract::abi::mechanism::extensions::declares(&read.extensions.bytes),
+        Some(&include_bytes!("../../auth-oidc/declares.json")[..]),
     );
 }

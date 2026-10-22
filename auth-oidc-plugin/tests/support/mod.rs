@@ -41,8 +41,8 @@ use busbar_contract::transport::ConnFacts;
 use busbar_plugin_loader::dispatch::kinds::auth::Auth;
 use busbar_plugin_loader::dispatch::{
     in_head, load_dropped, load_dropped_bytes, load_linked, now_ns, out_head, Bind, ConnTable,
-    DispatchConfig, Dispatcher, Done, Frame, InFrame, LinkedRow, LoadError, NoSink, OutFrame,
-    Plugin, NO_BLOB,
+    DispatchConfig, Dispatcher, Done, Frame, InFrame, LinkedRow, LoadError, LoadedDoor, NoSink,
+    OutFrame, Plugin, NO_BLOB,
 };
 
 mod issuer;
@@ -85,6 +85,23 @@ pub struct Clock;
 /// fetch (it arms its backstop timer by it).
 static CLOCK_READS: AtomicU32 = AtomicU32::new(0);
 
+/// Nanoseconds the host clock has been moved on by a test (see [`Idp::skew_clock_on_reply`]).
+static CLOCK_SKEW_NS: AtomicU64 = AtomicU64::new(0);
+
+/// Put the host clock back.
+pub fn reset_clock_skew() {
+    CLOCK_SKEW_NS.store(0, Ordering::SeqCst);
+}
+
+/// Puts the host clock back when dropped, so a failing test cannot leave it moved on.
+pub struct SkewGuard;
+
+impl Drop for SkewGuard {
+    fn drop(&mut self) {
+        reset_clock_skew();
+    }
+}
+
 /// The host clock reads so far (every test that binds holds [`serial`], so they are its own).
 pub fn clock_reads() -> u32 {
     CLOCK_READS.load(Ordering::SeqCst)
@@ -95,7 +112,7 @@ impl busbar_contract::services::double::ServicesDouble for Clock {
         CLOCK_READS.fetch_add(1, Ordering::SeqCst);
         Reading {
             wall_ns: 0,
-            mono_ns: now_ns(),
+            mono_ns: now_ns() + CLOCK_SKEW_NS.load(Ordering::SeqCst),
         }
     }
 }
@@ -146,6 +163,10 @@ pub fn strays(sent: &[Sent], needs: u32, allowed: &[(u32, String)]) -> Vec<Strin
 
 /// One reply being read: how far, and what.
 struct Reply {
+    /// This reply's body trickles past the budget (see [`Idp::trickle_body`]).
+    trickle: bool,
+    /// This reply's body stalls dead after the head (see [`Idp::stall_body`]).
+    stall: bool,
     step: u8,
     at: usize,
     status: u32,
@@ -165,10 +186,21 @@ pub struct Idp {
     /// The needs whose declaration the table refused, as the host's connector refuses them (a
     /// `target_from` or `trust_from` that resolved to nothing): an open on one is refused.
     refused: Mutex<HashSet<u32>>,
+    /// The paths whose open the connector fails (a connect or TLS failure): the per-path knob.
+    failing: Mutex<HashSet<String>>,
     reads: Mutex<HashMap<u64, Reply>>,
     next: AtomicU64,
     pended: AtomicU32,
     delay: Mutex<Duration>,
+    /// How far each reply's wake moves the host clock on (zero: not at all).
+    skew: Mutex<Duration>,
+    /// After the head, the body's first read pends, the clock moves on by the skew as its wake
+    /// fires, and every read after that pends for good (a body that trickles past the budget).
+    trickle: Mutex<(Option<String>, u32)>,
+    /// The path whose reply body stalls dead after the head, with no wake of its own.
+    stall: Mutex<Option<String>>,
+    /// The connections the plugin closed, in order.
+    closed: Mutex<Vec<u64>>,
 }
 
 impl Idp {
@@ -182,10 +214,15 @@ impl Idp {
             sent: Mutex::new(Vec::new()),
             declared: Mutex::new(Vec::new()),
             refused: Mutex::new(HashSet::new()),
+            failing: Mutex::new(HashSet::new()),
             reads: Mutex::new(HashMap::new()),
             next: AtomicU64::new(1),
             pended: AtomicU32::new(0),
             delay: Mutex::new(Duration::from_millis(5)),
+            skew: Mutex::new(Duration::ZERO),
+            trickle: Mutex::new((None, 0)),
+            stall: Mutex::new(None),
+            closed: Mutex::new(Vec::new()),
         });
         let doc = serde_json::json!({
             "issuer": ISSUER,
@@ -205,6 +242,40 @@ impl Idp {
             .lock()
             .unwrap()
             .insert(path.to_string(), (status, body.as_bytes().to_vec()));
+    }
+
+    /// Fail every open of `path` as the connector fails a send (refused).
+    pub fn fail_open(&self, path: &str) {
+        self.failing.lock().unwrap().insert(path.to_string());
+    }
+
+    /// Move the host clock on by `by` as each reply's wake fires, so a request in flight finds its
+    /// time budget spent when it resumes.
+    pub fn skew_clock_on_reply(&self, by: Duration) {
+        *self.skew.lock().unwrap() = by;
+    }
+
+    /// Make every reply's body trickle (see the field), moving the clock on by `skew`.
+    pub fn trickle_body(&self, skew: Duration) {
+        *self.trickle.lock().unwrap() = (None, u32::MAX);
+        *self.skew.lock().unwrap() = skew;
+    }
+
+    /// Make the next `times` replies to `path` trickle, moving the clock on by `skew` as the body's
+    /// wake fires.
+    pub fn trickle_path(&self, path: &str, times: u32, skew: Duration) {
+        *self.trickle.lock().unwrap() = (Some(path.to_string()), times);
+        *self.skew.lock().unwrap() = skew;
+    }
+
+    /// Stall every reply to `path` dead after its head: the body read pends and nothing wakes it.
+    pub fn stall_body(&self, path: &str) {
+        *self.stall.lock().unwrap() = Some(path.to_string());
+    }
+
+    /// The connections closed so far.
+    pub fn closed(&self) -> Vec<u64> {
+        self.closed.lock().unwrap().clone()
     }
 
     /// How long a reply's first read pends before the op's ticket is woken.
@@ -262,6 +333,18 @@ impl Conns for Idp {
             return Err(ConnError::Refused);
         }
         let path = String::from_utf8_lossy(desc.head_target).into_owned();
+        if self.failing.lock().unwrap().contains(&path) {
+            return Err(ConnError::Refused);
+        }
+        let trickle = {
+            let mut t = self.trickle.lock().unwrap();
+            let hit = t.1 > 0 && t.0.as_ref().is_none_or(|p| *p == path);
+            if hit {
+                t.1 -= 1;
+            }
+            hit
+        };
+        let stall = self.stall.lock().unwrap().as_ref() == Some(&path);
         let id = self.next.fetch_add(1, Ordering::SeqCst);
         self.sent.lock().unwrap().push(Sent {
             conn: id,
@@ -281,6 +364,8 @@ impl Conns for Idp {
         self.reads.lock().unwrap().insert(
             id,
             Reply {
+                trickle,
+                stall,
                 step: 0,
                 at: 0,
                 status,
@@ -321,8 +406,14 @@ impl Conns for Idp {
                     .clone()
                     .expect("the table is armed");
                 let delay = *self.delay.lock().unwrap();
+                let skew = if r.trickle {
+                    Duration::ZERO
+                } else {
+                    *self.skew.lock().unwrap()
+                };
                 std::thread::spawn(move || {
                     std::thread::sleep(delay);
+                    CLOCK_SKEW_NS.fetch_add(skew.as_nanos() as u64, Ordering::SeqCst);
                     wake(caller, ticket);
                 });
                 Err(ConnError::Pending)
@@ -337,6 +428,31 @@ impl Conns for Idp {
                     ..piece(PieceKind::Fields, 0)
                 })
             }
+            2 if r.stall => {
+                // The head came in budget; the body never does and nothing wakes the read.
+                r.step = 9;
+                Err(ConnError::Pending)
+            }
+            2 if r.trickle => {
+                // The head came in budget; the body does not: pend, move the clock past the
+                // budget as the wake fires, and pend on every read after.
+                r.step = 9;
+                let wake = self
+                    .wake
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .expect("the table is armed");
+                let delay = *self.delay.lock().unwrap();
+                let skew = *self.skew.lock().unwrap();
+                std::thread::spawn(move || {
+                    std::thread::sleep(delay);
+                    CLOCK_SKEW_NS.fetch_add(skew.as_nanos() as u64, Ordering::SeqCst);
+                    wake(caller, ticket);
+                });
+                Err(ConnError::Pending)
+            }
+            9 => Err(ConnError::Pending),
             _ if r.at < r.body.len() => {
                 let n = (r.body.len() - r.at).min(buf.len());
                 buf[..n].copy_from_slice(&r.body[r.at..r.at + n]);
@@ -354,6 +470,7 @@ impl Conns for Idp {
     }
     fn close(&self, _: InstanceId, conn: ConnId) -> Result<(), ConnError> {
         self.reads.lock().unwrap().remove(&conn.0);
+        self.closed.lock().unwrap().push(conn.0);
         Ok(())
     }
 }
@@ -421,10 +538,40 @@ pub fn cdylib_path() -> Option<PathBuf> {
         .map(|(_, p)| p)
 }
 
+/// This crate's own bare `door`, as the loader takes a door it did not read from a library.
+#[allow(unused_unsafe)]
+pub fn loaded() -> LoadedDoor {
+    // SAFETY: `door` is this crate's own `plugin_door!` entry: it answers the `'static`, fully
+    // initialised door the SDK laid out.
+    unsafe { LoadedDoor::from_raw(busbar_auth_oidc::door) }
+}
+
 /// THE LINKED ROW: the door and the Statement it states.
 pub fn row() -> LinkedRow {
-    LinkedRow::of(busbar_auth_oidc_plugin::door::door).expect("the door states itself")
+    LinkedRow::of_loaded(loaded()).expect("the door states itself")
 }
+
+/// The Statement the door states, read back: its name and its needs are read off here, never off
+/// the logic crate (whose only public item is its door).
+pub fn stated() -> busbar_contract::abi::mechanism::rendering::Read {
+    busbar_contract::abi::mechanism::rendering::read(&row().statement)
+        .expect("the Statement reads back")
+}
+
+/// Where the PUBLIC set of needs starts: the first need that trusts the host's roots (no
+/// `trust_from`). The anchored set (trusting `ca_cert_pem`) comes before it, in the same order.
+pub fn public_base() -> u32 {
+    stated()
+        .needs
+        .iter()
+        .position(|n| n.trust_from.is_empty())
+        .expect("the Statement states a public set of needs") as u32
+}
+
+/// A set's JWKS need, as an offset from its discovery need (the one that names its `target_from`
+/// setting). The Statement carries the needs in index order but not which document each serves, so
+/// this offset is the one local constant: discovery, then the JWKS, then the token endpoint.
+pub const JWKS_OFFSET: u32 = 1;
 
 /// Which door.
 pub enum Arm<'a> {
@@ -468,7 +615,8 @@ pub fn bind_as<K: busbar_plugin_loader::dispatch::Kind>(
     let plugin = match arm {
         Arm::Linked => load_linked::<K>(&row(), bind),
         Arm::Dropped { lib, stated } => {
-            load_dropped_bytes::<K>(lib, busbar_auth_oidc_plugin::door::NAME, stated, bind)
+            let name = self::stated().name;
+            load_dropped_bytes::<K>(lib, &name, stated, bind)
         }
         Arm::File(path) => {
             let stated = busbar_plugin_loader::dispatch::rendering_of_library(path)
@@ -491,28 +639,22 @@ pub fn bind(arm: &Arm<'_>, idp: &Arc<Idp>) -> Bound {
 }
 
 fn blob(bytes: &[u8], fmt: u32) -> Blob {
-    Blob {
-        ptr: bytes.as_ptr(),
-        len: bytes.len(),
-        fmt,
-        flags: 0,
-    }
+    // SAFETY: `bytes` is test-owned and outlives the `in` this view is stated in.
+    unsafe { Blob::from_raw_parts(bytes.as_ptr(), bytes.len(), fmt, 0) }
 }
 
 fn abi_str(s: &str) -> AbiStr {
-    AbiStr {
-        ptr: s.as_ptr(),
-        len: s.len(),
-    }
+    // SAFETY: `s` is test-owned and outlives the `in` this view is stated in.
+    unsafe { AbiStr::from_raw_parts(s.as_ptr(), s.len()) }
 }
 
 /// The plugin memory `s` names, as text (valid until its lease is released).
 fn text(s: AbiStr) -> String {
-    if s.ptr.is_null() {
+    if s.ptr().is_null() {
         return String::new();
     }
     // SAFETY: the door answered `s` READY under a lease the caller has not released yet.
-    String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(s.ptr, s.len) }).into_owned()
+    String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(s.ptr(), s.len()) }).into_owned()
 }
 
 /// The text a FAILED/REFUSED answer carried.

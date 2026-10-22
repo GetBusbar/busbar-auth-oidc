@@ -9,7 +9,7 @@
 //! then resolves those roles to governance grants and admin scope — the module asserts identity
 //! only, never policy.
 //!
-//! This crate is the LOGIC and its door ([`door::door`], on the auth kind's memory ABI): a build that
+//! This crate is the LOGIC and its door (`door`, on the auth kind's memory ABI): a build that
 //! links it registers that door, and the dropped-in `cdylib`, the sibling `busbar-auth-oidc-plugin`
 //! crate, exports the same door as `busbar_plugin_door`.
 //!
@@ -27,34 +27,38 @@
 //! - **group claims are GUIDs**, not names: the operator maps those GUIDs in `auth.role_bindings:`.
 //! - **>200 groups overage**: Entra omits the `groups` claim and instead emits `_claim_names` /
 //!   `_claim_sources` markers pointing at the Graph API. busbar does NOT call Graph and does NOT
-//!   silently degrade: [`OidcVerifier`] REJECTS such a token with a precise error pointing the
+//!   silently degrade: `OidcVerifier` REJECTS such a token with a precise error pointing the
 //!   operator at **app-roles** (`role_claim: roles`), whose count is bounded.
 
 #![forbid(unsafe_code)]
 
+use busbar_contract::abi::sdk::net::extract_normalized_host;
 use busbar_contract::auth::{
     AuthVerdict, BeginLogin, LoginHop, LoginHttpResponse, LoginOutcome, Principal,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 #[macro_use]
 mod flight;
-pub mod cache;
-pub mod discovery;
-pub mod door;
-pub mod fetch;
-pub mod jwks;
-pub mod jwt;
+mod cache;
+mod discovery;
+mod door;
+mod fetch;
+mod jwks;
+mod jwt;
 mod open;
-pub mod verdicts;
+mod verdicts;
 
-pub use cache::JwksCache;
-pub use discovery::Discovery;
-pub use fetch::Fetch;
-pub use flight::Step;
-pub use open::config;
+use cache::JwksCache;
+use discovery::Discovery;
+use fetch::Fetch;
+use flight::Step;
+
+/// THE DOOR: this plugin's one public item (BUSBAR-1.6.0.md l.3567, Crate shape).
+pub use door::door;
 
 /// The default role/group claim name — the token claim read into the principal's ROLES when the
 /// operator does not set `role_claim`, and the value the Entra >200-groups overage guard keys on.
@@ -87,9 +91,9 @@ const CLOCK_SANITY_FLOOR_UNIX: i64 = 1_767_225_600; // 2026-01-01T00:00:00Z
 
 /// The operator's `identity-providers:` settings for this module, deserialized from the JSON the engine passes to
 /// the plugin's `open`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct OidcConfig {
+struct OidcConfig {
     /// The token `iss` to require, EXACT match. For Entra:
     /// `https://login.microsoftonline.com/<tenant-id>/v2.0`.
     pub issuer: String,
@@ -157,7 +161,7 @@ fn default_ttl_secs() -> u64 {
 /// The pure token VERIFIER: config-derived policy (issuer/audience/role_claim) plus the current time
 /// source. Separated from the module + JWKS cache so the whole verify path — signature aside — is unit
 /// testable with plain claim maps. Signature verification is [`jwt::verify_signature`].
-pub struct OidcVerifier {
+struct OidcVerifier {
     issuer: String,
     audience: String,
     role_claim: String,
@@ -408,7 +412,7 @@ fn extract_string_list(v: Option<&Value>) -> Vec<String> {
 /// The runtime OIDC auth module: a verifier, the JWKS cache and the issuer's discovery document.
 /// Sans-IO: every request it makes goes through the caller's [`Fetch`], and every answer that may
 /// need one is a [`Step`] (THE DESIGN, auth: "JWKS fetching is sans-IO single-flight").
-pub struct OidcModule {
+struct OidcModule {
     verifier: OidcVerifier,
     /// The verifier for the browser-login `id_token`: the same issuer and role claim, but the
     /// audience is the OAuth `client_id` (OIDC Core 1.0 §3.1.3.7 step 3: the id_token's `aud` MUST
@@ -423,6 +427,9 @@ pub struct OidcModule {
     /// The config, retained so the browser-login path can read the client-id, scopes, and the
     /// authorize/token endpoints, and the JWKS url when it is configured.
     cfg: OidcConfig,
+    /// The hosts the token exchange may go to ([`operator_hosts`]): derived from the operator's
+    /// settings, never from anything an IdP answers.
+    token_hosts: HashSet<String>,
 }
 
 impl OidcModule {
@@ -444,6 +451,7 @@ impl OidcModule {
             discovery: Discovery::new(Duration::from_secs(cfg.jwks_min_refetch_secs)),
             verdicts: verdicts::VerdictCache::default(),
             cfg: cfg.clone(),
+            token_hosts: operator_hosts(cfg),
         }
     }
 
@@ -569,9 +577,10 @@ impl OidcModule {
     /// fetch was a `Reject`, which the host renders as the declined sign-in), with 1.5.5's warn
     /// naming why.
     ///
-    /// NOTE (committed ABI): OIDC `nonce` is minted by the CORE at begin and is NOT carried back on
-    /// the callback, so nonce binding is the core's to enforce; this reuses the existing
-    /// signature+claims path (iss/aud/exp) that the verify module already trusts.
+    /// The nonce is bound before this runs: the core mints it at `begin_login`, the callback
+    /// carries it back on `complete_login`, and the door holds the token endpoint's answer to it
+    /// ([`nonce_binds`]) before any `id_token` is verified here. This reuses the signature+claims
+    /// path (iss/aud/exp) that the verify module already trusts.
     ///
     /// # Errors
     /// None today: every failure is a `Reject`. The `Result` is the sans-IO step's shape.
@@ -725,8 +734,18 @@ impl OidcModule {
     /// `None` (fail closed) for a callback lacking any of the three, or with no `token_endpoint`
     /// configured or discovered.
     ///
+    /// THE HOP'S HOST (1.5.5 `auth/token.rs` `vet_hop_url`, "PRIMARY control: the host must be one
+    /// the operator configured for this method"): the exchange carries the lent client secret, so
+    /// an endpoint whose host is not in [`operator_hosts`] (the issuer's host, or the host of a URL
+    /// the operator's settings name) is refused here, before any hop exists, so no request is made
+    /// and the secret never leaves the process. Configured or discovered, the endpoint is held to
+    /// the same set: a discovery document cannot name a third host (THE DESIGN: a guard core
+    /// applied to the plugin's hops becomes the plugin's own logic, never weaker than 1.5.5's).
+    /// The door answers the refusal as an outage, 1.5.5's 502 "Couldn't reach your provider".
+    ///
     /// # Errors
-    /// The endpoint had to be discovered, and discovery failed.
+    /// The endpoint had to be discovered, and discovery failed; or the endpoint's host is not one
+    /// the operator configured.
     pub fn token_exchange(
         &self,
         code: Option<&str>,
@@ -743,6 +762,12 @@ impl OidcModule {
         let Some(endpoint) = step_ok!(self.token_endpoint(now, io)) else {
             return Step::Ready(Ok(None));
         };
+        if !host_in(&self.token_hosts, &endpoint) {
+            return Step::Ready(Err(fetch::failed(
+                &endpoint,
+                "the token endpoint's host is neither the issuer's nor one the operator configured",
+            )));
+        }
         let mut cfg = self.cfg.clone();
         cfg.token_endpoint = Some(endpoint);
         Step::Ready(Ok(Some(build_token_exchange(
@@ -752,6 +777,41 @@ impl OidcModule {
             code_verifier,
         ))))
     }
+}
+
+/// THE OPERATOR'S HOSTS, as 1.5.5's `collect_allowed_hosts` (`auth/token.rs`) derived them from a
+/// login method's settings: the issuer's host, plus the host of every absolute `http(s)` URL any
+/// setting holds (a string, or one inside a list), each lower-cased. Read from the settings the
+/// module was opened with, never from a discovery document.
+fn operator_hosts(cfg: &OidcConfig) -> HashSet<String> {
+    fn walk(v: &Value, hosts: &mut HashSet<String>) {
+        match v {
+            Value::String(s) if s.starts_with("http://") || s.starts_with("https://") => {
+                add(s, hosts);
+            }
+            Value::Array(a) => a.iter().for_each(|x| walk(x, hosts)),
+            Value::Object(o) => o.values().for_each(|x| walk(x, hosts)),
+            _ => {}
+        }
+    }
+    fn add(url: &str, hosts: &mut HashSet<String>) {
+        if let Some(h) = extract_normalized_host(url) {
+            hosts.insert(h.to_ascii_lowercase());
+        }
+    }
+    let mut hosts = HashSet::new();
+    add(&cfg.issuer, &mut hosts);
+    // The settings are exactly the config's fields (`deny_unknown_fields`), so the config read
+    // back as JSON holds every string the operator wrote.
+    if let Ok(settings) = serde_json::to_value(cfg) {
+        walk(&settings, &mut hosts);
+    }
+    hosts
+}
+
+/// Whether `url`'s host is in `hosts` ([`operator_hosts`]), read by the host reader 1.5.5 used.
+fn host_in(hosts: &HashSet<String>, url: &str) -> bool {
+    extract_normalized_host(url).is_some_and(|h| hosts.contains(&h.to_ascii_lowercase()))
 }
 
 /// THE NONCE BINDING (1.5.5's core check, now the plugin's): `true` when the token endpoint's `body`
@@ -824,8 +884,9 @@ fn pct(s: &str) -> String {
 /// Build the OAuth **authorization-code** authorize URL: `response_type=code`, `client_id`,
 /// `redirect_uri`, `scope` (`openid` + configured), `state`, PKCE `code_challenge` +
 /// `code_challenge_method=S256`, and `nonce` when present. Structurally cannot contain a
-/// `client_secret` — the begin path is public and the secret is the CORE's alone.
-pub fn build_authorize_url(
+/// `client_secret`: the begin path is public, and the secret the host lent at `open` is held by
+/// the door and placed only in the token exchange's form when that is sent ([`fetch::form`]).
+fn build_authorize_url(
     cfg: &OidcConfig,
     redirect_uri: &str,
     state: &str,
@@ -856,7 +917,7 @@ pub fn build_authorize_url(
 /// `grant_type=authorization_code`, `code`, `redirect_uri`, `code_verifier`, and `client_id`. The
 /// `client_secret` is written as an EMPTY placeholder keyed by `secret_form_field`: the hop names the
 /// KEY, and the secret the host lent at `open` fills the VALUE when it is sent ([`fetch::form`]).
-pub fn build_token_exchange(
+fn build_token_exchange(
     cfg: &OidcConfig,
     code: &str,
     redirect_uri: &str,
@@ -877,7 +938,8 @@ pub fn build_token_exchange(
         ],
         secret_form_field: Some("client_secret".to_string()),
         // This module has no extra hop headers to add (e.g. no userinfo Authorization header on the
-        // token-exchange hop); the core's own headers (Content-Type, etc.) are added on its side.
+        // token-exchange hop); the request's own content-type and accept are set when it is built
+        // (`fetch::post_request`).
         headers: Vec::new(),
     }
 }
@@ -923,7 +985,7 @@ fn is_clock_sane(t: i64) -> bool {
 ///
 /// # Errors
 /// The URL does not parse, or is not https.
-pub fn check_jwks_url(cfg: &OidcConfig) -> Result<(), String> {
+fn check_jwks_url(cfg: &OidcConfig) -> Result<(), String> {
     let Some(url) = &cfg.jwks_url else {
         return Ok(());
     };

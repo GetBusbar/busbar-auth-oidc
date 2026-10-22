@@ -203,3 +203,116 @@ fn a_failed_login_discovery_fails_begin_login_with_its_cause() {
     );
     assert_eq!(idp.calls(), 1);
 }
+
+/// The callback's exchange of `m`, its token endpoint to be discovered from `doc`: the hop, or the
+/// refusal, and how many requests the IdP saw.
+fn exchange_against(
+    m: &OidcModule,
+    doc: &serde_json::Value,
+) -> (Result<Option<String>, String>, usize) {
+    let idp = Idp::new(doc.to_string());
+    let hop = ready(m.token_exchange(
+        Some("code"),
+        Some("https://busbar.test/auth/token"),
+        Some("verifier"),
+        Instant::now(),
+        &mut idp.at_once(Some(ME)),
+    ));
+    (hop.map(|h| h.map(|h| h.url)), idp.calls())
+}
+
+/// THE TOKEN EXCHANGE'S HOST IS THE OPERATOR'S (1.5.5 `auth/token.rs` `vet_hop_url`, "PRIMARY
+/// control: the host must be one the operator configured for this method"): an issuer whose
+/// discovery document names a token endpoint on a THIRD host (Google's shape: issuer
+/// `accounts.google.com`, token endpoint `oauth2.googleapis.com`) is refused before any hop is
+/// built: the IdP sees the discovery GET and nothing else, so the code and the lent client secret
+/// are never sent. RED before the plugin carried the check: the hop was built and posted.
+#[test]
+fn a_discovered_token_endpoint_off_the_issuers_host_is_refused_with_nothing_sent() {
+    let m = module(
+        r#"{"issuer":"https://accounts.google.com","audience":"cid.apps.googleusercontent.com",
+            "jwks_url":"https://www.googleapis.com/oauth2/v3/certs"}"#,
+    )
+    .expect("opens");
+    let doc = serde_json::json!({
+        "issuer": "https://accounts.google.com",
+        "authorization_endpoint": "https://accounts.google.com/o/oauth2/v2/auth",
+        "token_endpoint": "https://oauth2.googleapis.com/token",
+    });
+    let (hop, calls) = exchange_against(&m, &doc);
+    assert_eq!(
+        hop,
+        Err(
+            "request to https://oauth2.googleapis.com/token failed: the token endpoint's host is \
+             neither the issuer's nor one the operator configured"
+                .to_string()
+        )
+    );
+    assert_eq!(
+        calls, 1,
+        "the discovery GET only: no token exchange is made"
+    );
+}
+
+/// A host the OPERATOR named is allowed, configured or discovered: the token endpoint set on that
+/// host, or any absolute URL in the settings naming it (1.5.5 collected every one).
+#[test]
+fn a_token_endpoint_on_a_host_the_operator_configured_is_allowed() {
+    let doc = serde_json::json!({
+        "issuer": "https://accounts.google.com",
+        "token_endpoint": "https://oauth2.googleapis.com/token",
+    });
+    // Configured outright.
+    let m = module(
+        r#"{"issuer":"https://accounts.google.com","audience":"cid",
+            "jwks_url":"https://www.googleapis.com/oauth2/v3/certs",
+            "token_endpoint":"https://oauth2.googleapis.com/token"}"#,
+    )
+    .expect("opens");
+    assert_eq!(
+        exchange_against(&m, &doc),
+        (
+            Ok(Some("https://oauth2.googleapis.com/token".to_string())),
+            0
+        )
+    );
+    // Discovered, on a host another setting names (here a scope URL, Host case-blind).
+    let m = module(
+        r#"{"issuer":"https://accounts.google.com","audience":"cid",
+            "jwks_url":"https://www.googleapis.com/oauth2/v3/certs",
+            "scopes":["https://OAuth2.googleapis.com/auth/userinfo.email"]}"#,
+    )
+    .expect("opens");
+    assert_eq!(
+        exchange_against(&m, &doc),
+        (
+            Ok(Some("https://oauth2.googleapis.com/token".to_string())),
+            1
+        )
+    );
+}
+
+/// The ISSUER'S OWN HOST is allowed: a discovered token endpoint beside the issuer is exchanged
+/// with (Entra's shape).
+#[test]
+fn a_discovered_token_endpoint_on_the_issuers_host_is_allowed() {
+    let issuer = "https://login.microsoftonline.com/tenant-guid/v2.0";
+    let m = module(&format!(
+        r#"{{"issuer":"{issuer}","audience":"api://busbar-client",
+            "jwks_url":"https://login.microsoftonline.com/tenant-guid/discovery/v2.0/keys"}}"#
+    ))
+    .expect("opens");
+    let doc = serde_json::json!({
+        "issuer": issuer,
+        "token_endpoint": "https://login.microsoftonline.com/tenant-guid/oauth2/v2.0/token",
+    });
+    assert_eq!(
+        exchange_against(&m, &doc),
+        (
+            Ok(Some(
+                "https://login.microsoftonline.com/tenant-guid/oauth2/v2.0/token".to_string()
+            )),
+            1
+        )
+    );
+}

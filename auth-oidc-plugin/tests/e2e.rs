@@ -110,8 +110,8 @@ fn load_and_exercise_auth_oidc_plugin_success() {
     assert_eq!(
         support::strays(
             &sent,
-            2 * busbar_auth_oidc::fetch::PUBLIC,
-            &support::declared_targets(busbar_auth_oidc::fetch::PUBLIC)
+            2 * support::public_base(),
+            &support::declared_targets(support::public_base())
         ),
         Vec::<String>::new()
     );
@@ -119,7 +119,7 @@ fn load_and_exercise_auth_oidc_plugin_success() {
     assert_eq!(
         (sent[0].need, sent[0].target.as_str(), sent[0].path.as_str()),
         (
-            busbar_auth_oidc::fetch::NEED_JWKS + busbar_auth_oidc::fetch::PUBLIC,
+            support::JWKS_OFFSET + support::public_base(),
             support::JWKS_URL,
             "/keys"
         )

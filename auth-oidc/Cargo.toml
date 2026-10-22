@@ -35,10 +35,14 @@ zeroize = { workspace = true }
 [dev-dependencies]
 # The contract's test kit (`busbar_contract::testkit::WarnCapture`) for the cache's warning tests: it
 # is compiled only under the dev-only `test-seal` feature, which no non-dev edge enables.
-busbar-contract = { workspace = true, features = ["test-seal"] }
+busbar-contract = { workspace = true, features = ["test-seal", "services-double"] }
 # ring's ECDSA keygen/signing lets the tests mint real ES256 tokens + a matching JWKS fixture with no
 # network — the full signature path is exercised in-process.
 ring = { workspace = true, features = ["std"] }
+# The live Entra example drives the plugin through its door the way the loader does: busbar's real
+# loader and the shared host-services test double (the `services-double` feature above); an example,
+# never the shipped image.
+busbar-plugin-loader = { workspace = true }
 # The live Entra example (examples/entra_live_check.rs) drives the module's sans-IO fetches with a
 # real blocking HTTPS client: an example, never the shipped image.
 reqwest = { workspace = true, features = ["blocking"] }
