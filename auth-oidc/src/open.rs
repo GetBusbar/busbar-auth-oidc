@@ -31,7 +31,7 @@ pub fn config(cfg: &str) -> Result<OidcConfig, String> {
         return Err("oidc plugin requires config (issuer, audience); none provided".to_string());
     }
     let cfg: OidcConfig =
-        serde_json::from_str(cfg).map_err(|e| format!("invalid oidc plugin config: {e}"))?;
+        serde_json::from_str(cfg).map_err(crate::json_err("invalid oidc plugin config"))?;
     for (key, value) in [("issuer", &cfg.issuer), ("audience", &cfg.audience)] {
         if value.trim().is_empty() {
             return Err(format!(

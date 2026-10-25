@@ -945,6 +945,31 @@ fn is_clock_sane(t: i64) -> bool {
     t >= CLOCK_SANITY_FLOOR_UNIX
 }
 
+/// The `map_err` for a `serde_json` decode whose INPUT may carry a value that must not be echoed: the
+/// settings, or a bearer's JWT header/claims. `serde_json::Error`'s own `Display` is withheld: a
+/// data error quotes the offending value (`invalid type: string "<the value>"`), and these messages
+/// reach `--validate` output and logs. What survives is `what` failed, the CLASS of failure and
+/// WHERE. The decoder texts kept verbatim name a KEY, never a value: a missing field (spelled from
+/// the type's schema) and an unknown field (the key, and the schema's expected keys).
+pub(crate) fn json_err(what: &'static str) -> impl FnOnce(serde_json::Error) -> String {
+    move |e: serde_json::Error| {
+        if e.is_data() {
+            let text = e.to_string();
+            if text.starts_with("missing field `") || text.starts_with("unknown field `") {
+                return format!("{what}: {text}");
+            }
+        }
+        let class = match e.classify() {
+            serde_json::error::Category::Io => "the input could not be read",
+            serde_json::error::Category::Syntax => "it is not well-formed JSON",
+            serde_json::error::Category::Data => "a field is missing or has the wrong type",
+            serde_json::error::Category::Eof => "it ends before the JSON does",
+        };
+        let (line, column) = (e.line(), e.column());
+        format!("{what}: {class} (line {line}, column {column}; the decoder's text is withheld)")
+    }
+}
+
 /// The configured `jwks_url`, checked: it must be an `https` URL. Every request is https-only, so
 /// any other value would load cleanly and then reject every token at first use; it is refused at
 /// `open` instead, with an error naming the field. Absent is fine: discovery names it.
