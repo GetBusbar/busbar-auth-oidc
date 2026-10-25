@@ -29,6 +29,9 @@
 //! Bounding the rotation path alone is not enough: because `fetched_at` advances only on success, an
 //! unreachable IdP would leave the set permanently TTL-stale and every single request would issue its
 //! own fresh GET — an unbounded fetch storm against the provider.
+//! The one exception: a caller with nothing to serve may take over a flight abandoned past
+//! [`crate::flight::FLIGHT_MAX`] (its op was cancelled before it settled), which made no attempt
+//! the window can stand for; that is bounded at one fetch per `FLIGHT_MAX`.
 
 use crate::fetch::{Doc, Fetch};
 use crate::flight::{Flight, Step};
