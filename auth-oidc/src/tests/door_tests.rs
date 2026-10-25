@@ -195,3 +195,27 @@ fn a_ticket_kept_again_does_not_evict() {
     assert_eq!(map.len(), 2);
     assert!(map.contains_key(&ticket(1)));
 }
+
+/// A blank `issuer` or `audience` is REFUSED at `validate` and at `open`, FAILED and naming the
+/// key: an empty issuer/audience would load and then match no token (or a token claiming an empty
+/// one), so it is refused rather than opened.
+#[test]
+fn a_blank_issuer_or_audience_is_refused_naming_the_key() {
+    for (key, blank) in [("issuer", ""), ("issuer", "  "), ("audience", ""), ("audience", " \t")] {
+        let mut cfg = serde_json::json!({
+            "issuer": ISSUER,
+            "audience": AUDIENCE,
+            "jwks_url": "https://jwks.test/keys",
+        });
+        cfg[key] = serde_json::Value::from(blank);
+        let cfg = cfg.to_string();
+        let refused = <Oidc as Life>::validate(cfg.as_bytes()).expect_err("validate refuses");
+        assert_eq!(refused.outcome(), Outcome::Failed);
+        let text = refused.text().unwrap_or_default();
+        assert!(text.contains(key), "validate names `{key}`: {text}");
+        let refused = Oidc::open(cfg.as_bytes(), &lent(b""), 1).expect_err("open refuses");
+        assert_eq!(refused.outcome(), Outcome::Failed);
+        let text = refused.text().unwrap_or_default();
+        assert!(text.contains(key), "open names `{key}`: {text}");
+    }
+}
