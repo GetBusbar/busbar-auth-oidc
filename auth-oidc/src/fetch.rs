@@ -47,6 +47,7 @@ use busbar_contract::abi::sdk::net::{
     extract_normalized_host, host_is_private_or_loopback, scheme_is,
 };
 use busbar_contract::auth::{LoginHop, LoginHttpResponse};
+use zeroize::Zeroizing;
 
 /// Upper bound on a JWKS / discovery document, and on a token endpoint's answer. A real JWKS is a
 /// handful of keys — a few KiB; even a tenant rotating aggressively stays well under this. The bound
@@ -243,8 +244,9 @@ pub fn capped(url: &str, body: Vec<u8>, cap: usize) -> Result<String, String> {
 /// The form `hop` is sent as, as 1.5.5's core sent it, with `secret` filling the field
 /// `hop.secret_form_field` names. With no secret lent, that field is dropped rather than sent empty
 /// (a public client sends none).
-pub fn form(hop: &LoginHop, secret: Option<&str>) -> Vec<(String, String)> {
-    let mut form = hop.form.clone();
+/// The pairs are wiped on drop: they carry the code, the code_verifier and the lent secret.
+pub fn form(hop: &LoginHop, secret: Option<&str>) -> Zeroizing<Vec<(String, String)>> {
+    let mut form = Zeroizing::new(hop.form.clone());
     if let Some(field) = hop.secret_form_field.as_deref() {
         match secret {
             Some(secret) => match form.iter_mut().find(|(k, _)| k == field) {
@@ -255,6 +257,56 @@ pub fn form(hop: &LoginHop, secret: Option<&str>) -> Vec<(String, String)> {
         }
     }
     form
+}
+
+/// Whether `b` is written as itself in an `application/x-www-form-urlencoded` value (the WHATWG
+/// byte serializer the `url` crate writes with: ASCII alphanumerics and `*-._`).
+const fn form_kept(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'*' | b'-' | b'.' | b'_')
+}
+
+/// How many bytes `v` takes form-encoded.
+fn form_len(v: &str) -> usize {
+    v.bytes()
+        .map(|b| if form_kept(b) || b == b' ' { 1 } else { 3 })
+        .sum()
+}
+
+/// THE TOKEN REQUEST BODY: `pairs` as `name=value&...`, byte for byte what the `url` crate's form
+/// serializer wrote for them (space as `+`, every byte but ASCII alphanumerics and `*-._` as an
+/// upper-case `%XX`), built in ONE buffer sized to the exact length first, so no growth frees a
+/// partial copy of the client secret, code or code_verifier the form carries; wiped on drop.
+pub fn form_body(pairs: &[(String, String)]) -> Zeroizing<String> {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let len = pairs
+        .iter()
+        .map(|(n, v)| form_len(n) + 1 + form_len(v))
+        .sum::<usize>()
+        + pairs.len().saturating_sub(1);
+    let mut out = Zeroizing::new(String::with_capacity(len));
+    for (i, (name, value)) in pairs.iter().enumerate() {
+        if i > 0 {
+            out.push('&');
+        }
+        for (j, part) in [name, value].into_iter().enumerate() {
+            if j == 1 {
+                out.push('=');
+            }
+            for b in part.bytes() {
+                if form_kept(b) {
+                    out.push(char::from(b));
+                } else if b == b' ' {
+                    out.push('+');
+                } else {
+                    out.push('%');
+                    out.push(char::from(HEX[usize::from(b >> 4)]));
+                    out.push(char::from(HEX[usize::from(b & 0x0f)]));
+                }
+            }
+        }
+    }
+    debug_assert_eq!(out.len(), len, "the body is sized once");
+    out
 }
 
 /// The path and query a request to `url` names.
@@ -281,18 +333,13 @@ pub fn get_request(url: &url::Url) -> Request {
 /// can carry), the form url-encoded as 1.5.5's client encoded it, then the hop's own fields.
 pub fn post_request(url: &url::Url, hop: &LoginHop, secret: Option<&str>) -> Request {
     let method = http::Method::from_bytes(hop.method.as_bytes()).unwrap_or(http::Method::POST);
-    // The form holds the lent client secret: its pairs are wiped once the body is encoded. The
-    // encoded body itself rides the SDK's `exchange::Request`, whose `body` the plugin cannot
-    // wipe; wiping it on drop is the contract SDK's (asked of the contract PR, busbar
-    // lane-kernel-head-defaults).
-    let mut pairs = form(hop, secret);
-    let body = url::form_urlencoded::Serializer::new(String::new())
-        .extend_pairs(pairs.iter())
-        .finish();
-    for (name, value) in &mut pairs {
-        zeroize::Zeroize::zeroize(name);
-        zeroize::Zeroize::zeroize(value);
-    }
+    // The form holds the lent client secret, the code and the code_verifier: its pairs are wiped
+    // when they drop, once the body is encoded. The body is encoded into one exact-size wiped
+    // buffer, and that buffer itself (no copy) moves into the SDK's `exchange::Request`, whose
+    // holder wipes it.
+    let pairs = form(hop, secret);
+    let mut body = form_body(&pairs);
+    drop(pairs);
     // 1.5.5's order: the form's content-type, then the client's `accept` (the oracle's
     // `egress.auth|login-hop|oidc` cell holds the wire bytes).
     let mut fields = vec![
@@ -311,7 +358,7 @@ pub fn post_request(url: &url::Url, hop: &LoginHop, secret: Option<&str>) -> Req
         method: method.as_str().as_bytes().to_vec(),
         target: head_target(url),
         fields,
-        body: body.into_bytes(),
+        body: std::mem::take(&mut *body).into_bytes(),
         timeout_ms: FETCH_TIMEOUT_MS,
     }
 }

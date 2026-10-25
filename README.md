@@ -84,8 +84,8 @@ the first request.
 
 | Setting | Required | Default | Notes |
 |---|---|---|---|
-| `issuer` | yes | — | The IdP's OIDC issuer URL. Checked against the JWT's `iss` claim. |
-| `audience` | yes | — | The expected `aud` claim (busbar's registered client/resource identifier at the IdP). |
+| `issuer` | yes | — | The IdP's OIDC issuer URL. Checked against the JWT's `iss` claim. A blank value is refused at load. |
+| `audience` | yes | — | The expected `aud` claim (busbar's registered client/resource identifier at the IdP). A blank value is refused at load. |
 | `jwks_url` | no | discovered from `issuer` | The IdP's JWKS endpoint. Must be an `https` URL (anything else is refused at load). When omitted, resolved once at boot via OIDC discovery (`<issuer>/.well-known/openid-configuration`); a discovery failure refuses the boot. |
 | `role_claim` | no | `groups` | The claim mapped onto the resulting `Principal`'s roles; set `roles` to use Entra app-roles instead. |
 | `jwks_min_refetch_secs` | no | `60` | JWKS refetch rate-limit (seconds) — the bound on how often a kid-rotation refetch can occur. |
