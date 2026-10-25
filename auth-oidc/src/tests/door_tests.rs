@@ -120,6 +120,20 @@ fn validate_refuses_a_plaintext_jwks_url_as_open_does() {
     assert!(<Oidc as Life>::validate(&settings()).is_ok());
 }
 
+/// `validate` accepts a loopback http `jwks_url` as `open` does: a config `--validate` passes is
+/// one boot opens, and a loopback key set over http (1.5.5 booted it) opens with a warning.
+#[test]
+fn validate_accepts_a_loopback_http_jwks_url_as_open_does() {
+    let loopback = serde_json::json!({
+        "issuer": ISSUER,
+        "audience": AUDIENCE,
+        "jwks_url": "http://127.0.0.1:8080/jwks",
+    })
+    .to_string();
+    assert!(<Oidc as Life>::validate(loopback.as_bytes()).is_ok());
+    assert!(Oidc::open(loopback.as_bytes(), &lent(b""), 1).is_ok());
+}
+
 /// A nonce mismatch answers the security-check verdict AND says so in the plugin's log, with no
 /// nonce value in it.
 #[test]
