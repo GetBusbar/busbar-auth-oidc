@@ -271,3 +271,30 @@ fn a_failed_login_discovery_fails_begin_login_with_its_cause() {
     );
     assert_eq!(idp.calls(), 1);
 }
+
+/// A mistyped settings value is refused WITHOUT echoing the value: serde's own text quotes it
+/// (`invalid type: string "..."`), and this error reaches `--validate` output and logs. The key a
+/// missing or unknown field names is kept (it comes from the schema or is a key, not a value).
+#[test]
+fn a_mistyped_settings_value_is_refused_without_echoing_it() {
+    let err = expect_err(module(
+        r#"{"issuer":"https://i.test","audience":"a","jwks_ttl_secs":"Zq7distinctiveValue"}"#,
+    ));
+    assert!(err.contains("invalid oidc plugin config"), "got: {err}");
+    assert!(
+        !err.contains("Zq7distinctiveValue"),
+        "the value is echoed: {err}"
+    );
+    assert!(err.contains("line 1"), "where it failed is kept: {err}");
+
+    let err = expect_err(module(r#"{"audience":"a"}"#));
+    assert!(
+        err.contains("missing field `issuer`"),
+        "the missing key is named: {err}"
+    );
+    let err = expect_err(module(r#"{"issuer":"i","audience":"a","isuer":"x"}"#));
+    assert!(
+        err.contains("unknown field `isuer`"),
+        "the unknown key is named: {err}"
+    );
+}

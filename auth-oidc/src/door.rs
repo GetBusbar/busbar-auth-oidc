@@ -239,9 +239,23 @@ enum Login {
 /// An identity `complete_login` reached but could not fit into the host's buffer, kept for the
 /// host's one re-call on the same ticket (the code redeems once): served only to the same callback.
 struct Reached {
+    /// When it was kept: at the cap the oldest goes ([`keep`]).
+    at: Instant,
     state: Vec<u8>,
     code: Zeroizing<Vec<u8>>,
     principal: Principal,
+}
+
+/// Keep `r` for `ticket`'s re-call, at most `max` at once: at the cap the OLDEST entry goes, never
+/// the rest (an in-flight short answer awaiting its re-call must survive).
+fn keep(map: &mut HashMap<Ticket, Reached>, max: usize, ticket: Ticket, r: Reached) {
+    if map.len() >= max && !map.contains_key(&ticket) {
+        let oldest = map.iter().min_by_key(|(_, k)| k.at).map(|(t, _)| *t);
+        if let Some(oldest) = oldest {
+            map.remove(&oldest);
+        }
+    }
+    map.insert(ticket, r);
 }
 
 /// THE INSTANCE: the opened module (replaced whole by a `refresh` with new settings) and the
@@ -755,12 +769,12 @@ impl SafeSlot for Complete {
         );
         if answered == Outcome::Failed {
             let mut reached = oidc.reached.lock().unwrap_or_else(PoisonError::into_inner);
-            if reached.len() >= REACHED_MAX {
-                reached.clear();
-            }
-            reached.insert(
+            keep(
+                &mut reached,
+                REACHED_MAX,
                 instance.ticket(),
                 Reached {
+                    at: Instant::now(),
                     state: state.to_vec(),
                     code: Zeroizing::new(code_bytes.to_vec()),
                     principal,
