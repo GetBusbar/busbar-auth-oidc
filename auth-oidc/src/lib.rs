@@ -752,7 +752,7 @@ impl OidcModule {
         code_verifier: Option<&str>,
         now: Instant,
         io: &mut dyn Fetch,
-    ) -> Step<Result<Option<LoginHop>, String>> {
+    ) -> Step<Result<Option<TokenHop>, String>> {
         let (Some(code), Some(redirect_uri), Some(code_verifier)) =
             (code, redirect_uri, code_verifier)
         else {
@@ -773,14 +773,34 @@ impl OidcModule {
         };
         let mut cfg = self.cfg.clone();
         cfg.token_endpoint = Some(endpoint);
-        Step::Ready(Ok(Some(build_token_exchange(
+        Step::Ready(Ok(Some(TokenHop(build_token_exchange(
             &cfg,
             code,
             redirect_uri,
             code_verifier,
-        ))))
+        )))))
     }
 }
+
+/// The token-exchange hop the plugin builds and sends, its form values (the code and the
+/// code_verifier) wiped when it drops. [`LoginHop`] is the contract's type, plain `String`s with no
+/// wipe of their own, so this holder wipes the copies the plugin made into it.
+pub struct TokenHop(LoginHop);
+
+impl std::ops::Deref for TokenHop {
+    type Target = LoginHop;
+    fn deref(&self) -> &LoginHop {
+        &self.0
+    }
+}
+
+impl Drop for TokenHop {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.0.form);
+    }
+}
+
+impl zeroize::ZeroizeOnDrop for TokenHop {}
 
 /// THE NONCE BINDING (1.5.5's core check, now the plugin's): `true` when the token endpoint's `body`
 /// carries no `id_token`, or carries one whose (unverified) payload names `nonce` as its `nonce`
