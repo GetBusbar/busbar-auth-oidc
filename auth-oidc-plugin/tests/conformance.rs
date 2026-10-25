@@ -648,6 +648,65 @@ fn cold_verifies(staggered: bool) {
     assert_eq!(idp.sent_to("/keys").len(), 1, "{seen}");
 }
 
+/// THE BODY CAP IS ENFORCED WHILE READING: a discovery reply far past the 1 MiB cap is refused in
+/// 1.5.5's words, and the plugin stopped reading at the cap rather than buffering the SDK's
+/// 16 MiB reply ceiling first (1.5.5 read at most cap + 1 bytes).
+#[test]
+fn red_an_oversized_reply_is_cut_off_at_the_cap_not_buffered_whole() {
+    let _one = support::serial();
+    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let token = key.sign(&claims(AUDIENCE));
+    let idp = Idp::new(&key);
+    let huge = "x".repeat(4 * 1024 * 1024);
+    idp.answer(DISCOVERY_PATH, 200, &huge);
+    let b = bind(&Arm::Linked, &idp);
+    open(&b.plugin, &config(AUDIENCE), None).expect("opens");
+
+    let refused = b.verify(Some(&token), None);
+    let url = format!("https://idp.conformance.example{DISCOVERY_PATH}");
+    assert_eq!(
+        refused,
+        format!(
+            "Failed OIDC discovery fetch failed ({url}): {url} JWKS body exceeds the 1048576-byte \
+             cap; set jwks_url explicitly"
+        )
+    );
+    assert!(
+        idp.served() < 2 * 1024 * 1024,
+        "the plugin read {} bytes of a reply capped at 1 MiB",
+        idp.served()
+    );
+}
+
+/// THE STATUS IS JUDGED BEFORE THE BODY, as 1.5.5 judged it: a non-2xx discovery reply with a body
+/// far past the cap is refused naming its status, and is still cut off at the cap while reading.
+#[test]
+fn red_an_oversized_error_reply_names_its_status_and_is_cut_off_at_the_cap() {
+    let _one = support::serial();
+    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let token = key.sign(&claims(AUDIENCE));
+    let idp = Idp::new(&key);
+    let huge = "x".repeat(4 * 1024 * 1024);
+    idp.answer(DISCOVERY_PATH, 500, &huge);
+    let b = bind(&Arm::Linked, &idp);
+    open(&b.plugin, &config(AUDIENCE), None).expect("opens");
+
+    let refused = b.verify(Some(&token), None);
+    let url = format!("https://idp.conformance.example{DISCOVERY_PATH}");
+    assert_eq!(
+        refused,
+        format!(
+            "Failed OIDC discovery fetch failed ({url}): {url} returned HTTP 500 Internal Server \
+             Error; set jwks_url explicitly"
+        )
+    );
+    assert!(
+        idp.served() < 2 * 1024 * 1024,
+        "the plugin read {} bytes of a reply capped at 1 MiB",
+        idp.served()
+    );
+}
+
 /// THE LOGIN WHOSE KEY SET CANNOT BE HAD, through the real dispatcher (ARCHITECT ruling: 1.5.5's
 /// answer). The token endpoint answers an identity token, but the key set's URL is to be
 /// discovered and the issuer's discovery answers 503: the door answers `LOGIN_BAD_CREDENTIAL`
