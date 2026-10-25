@@ -315,6 +315,14 @@ fn install_oidc_plugin_via_admin_api_and_authenticate() {
         return;
     };
     if std::env::var_os("BUSBAR_CHECKOUT").is_none() {
+        if std::env::var_os("CI").is_some() {
+            // Same rule as `plugin_path`: under CI this coverage must never silently vanish.
+            panic!(
+                "BUSBAR_CHECKOUT is unset under CI: plugin-ci's busbar_checkout must provide a \
+                 busbar checkout at .busbar-ref so the admin-API install e2e runs instead of passing \
+                 while checking nothing."
+            );
+        }
         // The live install leg boots the REAL busbar binary, built from a busbar checkout at
         // `.busbar-ref`; ci.yml's `e2e` job provides one and sets BUSBAR_CHECKOUT. Loud, never silent.
         eprintln!(

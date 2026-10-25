@@ -2007,3 +2007,26 @@ fn an_id_token_binds_only_to_the_logins_nonce() {
     ));
     assert!(!nonce_binds(&body("garbage".to_string()), "n-1"));
 }
+
+/// The constant-time fold zips, so it truncates to the shorter side: only the length check stops a
+/// prefix nonce from binding. A shorter, a longer and an empty claim must all fail to bind.
+#[test]
+fn an_id_token_nonce_of_a_different_length_does_not_bind() {
+    let token = |nonce: &str| {
+        let part = |v: &serde_json::Value| URL_SAFE_NO_PAD.encode(serde_json::to_vec(v).unwrap());
+        format!(
+            "{}.{}.sig",
+            part(&serde_json::json!({ "alg": "ES256" })),
+            part(&serde_json::json!({ "nonce": nonce }))
+        )
+    };
+    let body = |nonce: &str| serde_json::json!({ "id_token": token(nonce) }).to_string();
+    // The claim is a strict prefix of the login's nonce.
+    assert!(!nonce_binds(&body("n-1"), "n-1-and-more"));
+    // The login's nonce is a strict prefix of the claim.
+    assert!(!nonce_binds(&body("n-1-and-more"), "n-1"));
+    // An empty claim against a non-empty nonce.
+    assert!(!nonce_binds(&body(""), "n-1"));
+    // The same nonce still binds.
+    assert!(nonce_binds(&body("n-1"), "n-1"));
+}
