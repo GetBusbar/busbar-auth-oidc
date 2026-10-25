@@ -148,3 +148,86 @@ fn a_nonce_mismatch_is_logged() {
     );
     assert!(!logged.contains("SECRET"), "a nonce leaked: {logged:?}");
 }
+
+fn ticket(n: u32) -> Ticket {
+    Ticket {
+        slot: n,
+        generation: 1,
+    }
+}
+
+fn kept_for(n: u32, at: Instant) -> Reached {
+    Reached {
+        at,
+        state: format!("s{n}").into_bytes(),
+        code: Zeroizing::new(format!("c{n}").into_bytes()),
+        principal: Principal::from_id(format!("u{n}")),
+    }
+}
+
+/// A full short-answer map makes room by dropping its OLDEST entry only: every other identity a
+/// short buffer reached still waits for its re-call (clearing the map would refuse them all).
+#[test]
+fn a_full_reached_map_evicts_only_the_oldest() {
+    let t0 = Instant::now();
+    let at = |n: u32| t0 + std::time::Duration::from_millis(u64::from(n));
+    let mut map = HashMap::new();
+    let max = u32::try_from(REACHED_MAX).expect("fits");
+    for n in 1..=max {
+        keep(&mut map, REACHED_MAX, ticket(n), kept_for(n, at(n)));
+    }
+    keep(
+        &mut map,
+        REACHED_MAX,
+        ticket(max + 1),
+        kept_for(max + 1, at(max + 1)),
+    );
+    assert_eq!(map.len(), REACHED_MAX);
+    assert!(!map.contains_key(&ticket(1)), "the oldest is evicted");
+    let earlier = map
+        .get(&ticket(2))
+        .expect("an earlier ticket's re-call is still served");
+    assert_eq!(earlier.principal.id, "u2");
+    assert!(map.contains_key(&ticket(max + 1)));
+}
+
+/// A ticket kept again replaces its own entry and evicts no other.
+#[test]
+fn a_ticket_kept_again_does_not_evict() {
+    let t0 = Instant::now();
+    let mut map = HashMap::new();
+    keep(&mut map, 2, ticket(1), kept_for(1, t0));
+    keep(&mut map, 2, ticket(2), kept_for(2, t0));
+    keep(&mut map, 2, ticket(2), kept_for(2, t0));
+    assert_eq!(map.len(), 2);
+    assert!(map.contains_key(&ticket(1)));
+}
+
+/// A blank `issuer` or `audience` is REFUSED at `validate` and at `open`, FAILED and naming the
+/// key: an empty issuer/audience would load and then match no token (or a token claiming an empty
+/// one), so it is refused rather than opened.
+#[test]
+fn a_blank_issuer_or_audience_is_refused_naming_the_key() {
+    for (key, blank) in [
+        ("issuer", ""),
+        ("issuer", "  "),
+        ("audience", ""),
+        ("audience", " \t"),
+    ] {
+        let mut cfg = serde_json::json!({
+            "issuer": ISSUER,
+            "audience": AUDIENCE,
+            "jwks_url": "https://jwks.test/keys",
+        });
+        cfg[key] = serde_json::Value::from(blank);
+        let cfg = cfg.to_string();
+        let refused = <Oidc as Life>::validate(cfg.as_bytes()).expect_err("validate refuses");
+        assert_eq!(refused.outcome(), Outcome::Failed);
+        let text = refused.text().unwrap_or_default();
+        assert!(text.contains(key), "validate names `{key}`: {text}");
+        let refused = Oidc::open(cfg.as_bytes(), &lent(b""), 1).expect_err("open refuses");
+        assert_eq!(refused.outcome(), Outcome::Failed);
+        let text = refused.text().unwrap_or_default();
+        assert!(text.contains(key), "open names `{key}`: {text}");
+    }
+}

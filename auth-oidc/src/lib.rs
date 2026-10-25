@@ -588,12 +588,22 @@ impl OidcModule {
         io: &mut dyn Fetch,
     ) -> Step<Result<LoginOutcome, String>> {
         // A non-2xx token-endpoint response (e.g. invalid_grant) never carries a usable id_token.
+        // A 4xx refuses the user's code (an end-user decline: info); a 5xx is the IdP failing (the
+        // operator's to see: warn). Both are a declined login.
         if !(200..300).contains(&resp.status) {
-            tracing::warn!(
-                module = "oidc",
-                status = resp.status,
-                "OIDC token endpoint answered a non-2xx status; login declined"
-            );
+            if resp.status >= 500 {
+                tracing::warn!(
+                    module = "oidc",
+                    status = resp.status,
+                    "OIDC token endpoint answered a non-2xx status; login declined"
+                );
+            } else {
+                tracing::info!(
+                    module = "oidc",
+                    status = resp.status,
+                    "OIDC token endpoint answered a non-2xx status; login declined"
+                );
+            }
             return Step::Ready(Ok(LoginOutcome::Reject));
         }
         let body = match serde_json::from_str::<Value>(&resp.body) {
@@ -752,7 +762,7 @@ impl OidcModule {
         code_verifier: Option<&str>,
         now: Instant,
         io: &mut dyn Fetch,
-    ) -> Step<Result<Option<LoginHop>, String>> {
+    ) -> Step<Result<Option<TokenHop>, String>> {
         let (Some(code), Some(redirect_uri), Some(code_verifier)) =
             (code, redirect_uri, code_verifier)
         else {
@@ -764,7 +774,8 @@ impl OidcModule {
             .into_iter()
             .filter_map(|(name, missing)| missing.then_some(name))
             .collect();
-            tracing::warn!(module = "oidc", absent = %absent.join(", "), "OIDC callback lacks fields the token exchange needs; login declined");
+            // The user's callback, not the operator's config: an end-user decline (info).
+            tracing::info!(module = "oidc", absent = %absent.join(", "), "OIDC callback lacks fields the token exchange needs; login declined");
             return Step::Ready(Ok(None));
         };
         let Some(endpoint) = step_ok!(self.token_endpoint(now, io)) else {
@@ -773,14 +784,34 @@ impl OidcModule {
         };
         let mut cfg = self.cfg.clone();
         cfg.token_endpoint = Some(endpoint);
-        Step::Ready(Ok(Some(build_token_exchange(
+        Step::Ready(Ok(Some(TokenHop(build_token_exchange(
             &cfg,
             code,
             redirect_uri,
             code_verifier,
-        ))))
+        )))))
     }
 }
+
+/// The token-exchange hop the plugin builds and sends, its form values (the code and the
+/// code_verifier) wiped when it drops. [`LoginHop`] is the contract's type, plain `String`s with no
+/// wipe of their own, so this holder wipes the copies the plugin made into it.
+pub struct TokenHop(LoginHop);
+
+impl std::ops::Deref for TokenHop {
+    type Target = LoginHop;
+    fn deref(&self) -> &LoginHop {
+        &self.0
+    }
+}
+
+impl Drop for TokenHop {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.0.form);
+    }
+}
+
+impl zeroize::ZeroizeOnDrop for TokenHop {}
 
 /// THE NONCE BINDING (1.5.5's core check, now the plugin's): `true` when the token endpoint's `body`
 /// carries no `id_token`, or carries one whose (unverified) payload names `nonce` as its `nonce`
@@ -943,6 +974,31 @@ fn clock_or_fail_closed(t: i64) -> i64 {
 /// injected boundary value from a test.
 fn is_clock_sane(t: i64) -> bool {
     t >= CLOCK_SANITY_FLOOR_UNIX
+}
+
+/// The `map_err` for a `serde_json` decode whose INPUT may carry a value that must not be echoed: the
+/// settings, or a bearer's JWT header/claims. `serde_json::Error`'s own `Display` is withheld: a
+/// data error quotes the offending value (`invalid type: string "<the value>"`), and these messages
+/// reach `--validate` output and logs. What survives is `what` failed, the CLASS of failure and
+/// WHERE. The decoder texts kept verbatim name a KEY, never a value: a missing field (spelled from
+/// the type's schema) and an unknown field (the key, and the schema's expected keys).
+pub(crate) fn json_err(what: &'static str) -> impl FnOnce(serde_json::Error) -> String {
+    move |e: serde_json::Error| {
+        if e.is_data() {
+            let text = e.to_string();
+            if text.starts_with("missing field `") || text.starts_with("unknown field `") {
+                return format!("{what}: {text}");
+            }
+        }
+        let class = match e.classify() {
+            serde_json::error::Category::Io => "the input could not be read",
+            serde_json::error::Category::Syntax => "it is not well-formed JSON",
+            serde_json::error::Category::Data => "a field is missing or has the wrong type",
+            serde_json::error::Category::Eof => "it ends before the JSON does",
+        };
+        let (line, column) = (e.line(), e.column());
+        format!("{what}: {class} (line {line}, column {column}; the decoder's text is withheld)")
+    }
 }
 
 /// The configured `jwks_url`, checked: it must be an `https` URL. Every request is https-only, so

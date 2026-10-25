@@ -129,7 +129,7 @@ impl Module {
         ))
         .expect("no discovery")
         {
-            Some(hop) => LoginOutcome::Exchange(hop),
+            Some(hop) => LoginOutcome::Exchange(LoginHop::clone(&hop)),
             None => LoginOutcome::Reject,
         }
     }
@@ -2024,7 +2024,7 @@ fn a_refused_token_response_is_logged_with_its_reason() {
             status,
             body: body.to_string(),
         };
-        let cap = busbar_contract::testkit::WarnCapture::default();
+        let cap = busbar_contract::testkit::WarnCapture::capturing_debug();
         let outcome = tracing::subscriber::with_default(cap.clone(), || {
             ready(m.identity_from_token_response(
                 &response,
@@ -2050,7 +2050,7 @@ fn a_refused_token_exchange_is_logged_with_its_reason() {
     c.token_endpoint = Some("https://idp.test/token".to_string());
     let idp = Idp::new(String::new());
     let run = |m: &OidcModule, code: Option<&str>| {
-        let cap = busbar_contract::testkit::WarnCapture::default();
+        let cap = busbar_contract::testkit::WarnCapture::capturing_debug();
         let out = tracing::subscriber::with_default(cap.clone(), || {
             ready(m.token_exchange(
                 code,
@@ -2124,4 +2124,62 @@ fn an_id_token_nonce_of_a_different_length_does_not_bind() {
     assert!(!nonce_binds(&body(""), "n-1"));
     // The same nonce still binds.
     assert!(nonce_binds(&body("n-1"), "n-1"));
+}
+
+/// END-USER DECLINES LOG AT INFO, operator-actionable conditions at WARN (the fleet's levels, as
+/// busbar-auth-github logs them): the IdP refusing the user's code (a 4xx such as invalid_grant)
+/// and a callback lacking its code are the user's, so they are recorded below warn; an IdP 5xx is
+/// the operator's and stays at warn.
+#[test]
+fn an_end_user_decline_logs_at_info_and_an_idp_failure_at_warn() {
+    let mut c = cfg("groups");
+    c.token_endpoint = Some("https://idp.test/token".to_string());
+    let m = OidcModule::new(&c);
+    let idp = Idp::new(String::new());
+    let refused = |status: u16| {
+        let response = LoginHttpResponse {
+            status,
+            body: r#"{"error":"invalid_grant"}"#.to_string(),
+        };
+        let (warn, all) = (
+            busbar_contract::testkit::WarnCapture::default(),
+            busbar_contract::testkit::WarnCapture::capturing_debug(),
+        );
+        for cap in [&warn, &all] {
+            tracing::subscriber::with_default(cap.clone(), || {
+                ready(m.identity_from_token_response(
+                    &response,
+                    1_700_000_000,
+                    Instant::now(),
+                    &mut idp.at_once(Some(ME)),
+                ))
+            })
+            .expect("a verdict");
+        }
+        (warn.contains("non-2xx"), all.contains("non-2xx"))
+    };
+    assert_eq!(refused(400), (false, true), "a 4xx is the user's: info");
+    assert_eq!(refused(503), (true, true), "a 5xx is the IdP's: warn");
+
+    let (warn, all) = (
+        busbar_contract::testkit::WarnCapture::default(),
+        busbar_contract::testkit::WarnCapture::capturing_debug(),
+    );
+    for cap in [&warn, &all] {
+        tracing::subscriber::with_default(cap.clone(), || {
+            ready(m.token_exchange(
+                None,
+                Some("https://busbar.test/cb"),
+                Some("v"),
+                Instant::now(),
+                &mut idp.at_once(Some(ME)),
+            ))
+        })
+        .expect("no discovery");
+    }
+    assert!(
+        !warn.contains("lacks fields"),
+        "a bare callback is the user's: info"
+    );
+    assert!(all.contains("lacks fields"), "and it is still recorded");
 }
