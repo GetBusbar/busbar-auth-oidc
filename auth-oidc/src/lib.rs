@@ -588,12 +588,22 @@ impl OidcModule {
         io: &mut dyn Fetch,
     ) -> Step<Result<LoginOutcome, String>> {
         // A non-2xx token-endpoint response (e.g. invalid_grant) never carries a usable id_token.
+        // A 4xx refuses the user's code (an end-user decline: info); a 5xx is the IdP failing (the
+        // operator's to see: warn). Both are a declined login.
         if !(200..300).contains(&resp.status) {
-            tracing::warn!(
-                module = "oidc",
-                status = resp.status,
-                "OIDC token endpoint answered a non-2xx status; login declined"
-            );
+            if resp.status >= 500 {
+                tracing::warn!(
+                    module = "oidc",
+                    status = resp.status,
+                    "OIDC token endpoint answered a non-2xx status; login declined"
+                );
+            } else {
+                tracing::info!(
+                    module = "oidc",
+                    status = resp.status,
+                    "OIDC token endpoint answered a non-2xx status; login declined"
+                );
+            }
             return Step::Ready(Ok(LoginOutcome::Reject));
         }
         let body = match serde_json::from_str::<Value>(&resp.body) {
@@ -764,7 +774,8 @@ impl OidcModule {
             .into_iter()
             .filter_map(|(name, missing)| missing.then_some(name))
             .collect();
-            tracing::warn!(module = "oidc", absent = %absent.join(", "), "OIDC callback lacks fields the token exchange needs; login declined");
+            // The user's callback, not the operator's config: an end-user decline (info).
+            tracing::info!(module = "oidc", absent = %absent.join(", "), "OIDC callback lacks fields the token exchange needs; login declined");
             return Step::Ready(Ok(None));
         };
         let Some(endpoint) = step_ok!(self.token_endpoint(now, io)) else {
