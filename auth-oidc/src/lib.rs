@@ -183,6 +183,11 @@ impl OidcVerifier {
     /// overage marker (REJECT, never call Graph), and reads `role_claim` into the principal's groups.
     /// `now_unix` is the current UNIX time in seconds.
     pub fn validate_claims(&self, claims: &Value, now_unix: i64) -> Result<Principal, String> {
+        // `now_unix()`'s broken-clock sentinel: refused outright, so an `exp` that saturates cannot
+        // pass it, and the refusal names the clock rather than the token.
+        if now_unix == i64::MAX {
+            return Err("the host clock is unreadable or reads before 2026-01-01 (the clock sanity floor), so every token is treated as expired; fix the host clock".to_string());
+        }
         // iss — exact match. A wrong issuer is a different tenant / a token minted elsewhere.
         match claims.get("iss").and_then(Value::as_str) {
             Some(iss) if iss == self.issuer => {}
@@ -584,12 +589,25 @@ impl OidcModule {
     ) -> Step<Result<LoginOutcome, String>> {
         // A non-2xx token-endpoint response (e.g. invalid_grant) never carries a usable id_token.
         if !(200..300).contains(&resp.status) {
+            tracing::warn!(
+                module = "oidc",
+                status = resp.status,
+                "OIDC token endpoint answered a non-2xx status; login declined"
+            );
             return Step::Ready(Ok(LoginOutcome::Reject));
         }
-        let Ok(body) = serde_json::from_str::<Value>(&resp.body) else {
-            return Step::Ready(Ok(LoginOutcome::Reject));
+        let body = match serde_json::from_str::<Value>(&resp.body) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(module = "oidc", error = %e, "OIDC token endpoint response is not JSON; login declined");
+                return Step::Ready(Ok(LoginOutcome::Reject));
+            }
         };
         let Some(id_token) = body.get("id_token").and_then(Value::as_str) else {
+            tracing::warn!(
+                module = "oidc",
+                "OIDC token endpoint response carries no id_token; login declined"
+            );
             return Step::Ready(Ok(LoginOutcome::Reject));
         };
         let verdict = match step!(self.verify_with(
@@ -738,9 +756,19 @@ impl OidcModule {
         let (Some(code), Some(redirect_uri), Some(code_verifier)) =
             (code, redirect_uri, code_verifier)
         else {
+            let absent: Vec<&str> = [
+                ("code", code.is_none()),
+                ("redirect_uri", redirect_uri.is_none()),
+                ("code_verifier", code_verifier.is_none()),
+            ]
+            .into_iter()
+            .filter_map(|(name, missing)| missing.then_some(name))
+            .collect();
+            tracing::warn!(module = "oidc", absent = %absent.join(", "), "OIDC callback lacks fields the token exchange needs; login declined");
             return Step::Ready(Ok(None));
         };
         let Some(endpoint) = step_ok!(self.token_endpoint(now, io)) else {
+            tracing::warn!(module = "oidc", "no token_endpoint is configured and the discovery document names none; login declined");
             return Step::Ready(Ok(None));
         };
         let mut cfg = self.cfg.clone();
@@ -885,7 +913,7 @@ pub fn build_token_exchange(
 /// Current UNIX time in seconds. Fails CLOSED on a clock this module cannot trust: `validate_claims`'s
 /// `exp` check is `exp + skew >= now_unix`, so a `now_unix` that reads too LOW makes every token
 /// appear unexpired (fail OPEN) — the exact failure this guards against. Two cases, both mapped to
-/// `i64::MAX` (which fails `exp`/`nbf` checks for any realistic token):
+/// `i64::MAX` (which `validate_claims` refuses outright, naming the clock):
 ///   - `SystemTime::now()` returns `Err` (host clock strictly before the UNIX epoch) — rare.
 ///   - The clock IS readable but below [`CLOCK_SANITY_FLOOR_UNIX`] — the realistic broken-clock case
 ///     (a dead RTC booting a host at the epoch, or an NTP/RTC fault landing in 1970-2000), which

@@ -168,6 +168,8 @@ pub struct Idp {
     reads: Mutex<HashMap<u64, Reply>>,
     next: AtomicU64,
     pended: AtomicU32,
+    /// Reply body bytes handed to the plugin so far, over every request.
+    served: AtomicU64,
     delay: Mutex<Duration>,
 }
 
@@ -185,6 +187,7 @@ impl Idp {
             reads: Mutex::new(HashMap::new()),
             next: AtomicU64::new(1),
             pended: AtomicU32::new(0),
+            served: AtomicU64::new(0),
             delay: Mutex::new(Duration::from_millis(5)),
         });
         let doc = serde_json::json!({
@@ -230,6 +233,11 @@ impl Idp {
     /// How many reads answered PENDING.
     pub fn pended(&self) -> u32 {
         self.pended.load(Ordering::SeqCst)
+    }
+
+    /// How many reply body bytes the plugin has read from this IdP.
+    pub fn served(&self) -> u64 {
+        self.served.load(Ordering::SeqCst)
     }
 
     /// Every need the loader declared, as it declared it, sorted.
@@ -341,6 +349,7 @@ impl Conns for Idp {
                 let n = (r.body.len() - r.at).min(buf.len());
                 buf[..n].copy_from_slice(&r.body[r.at..r.at + n]);
                 r.at += n;
+                self.served.fetch_add(n as u64, Ordering::SeqCst);
                 Ok(piece(PieceKind::Body, n))
             }
             _ => Ok(piece(PieceKind::Completion, 0)),

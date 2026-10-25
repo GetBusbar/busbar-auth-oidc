@@ -208,6 +208,10 @@ impl Opened {
             return Step::Ready(Login::Bad);
         };
         if !crate::nonce_binds(&response.body, nonce) {
+            tracing::warn!(
+                module = "oidc",
+                "the IdP's id_token does not carry this login's nonce; login refused"
+            );
             return Step::Ready(Login::SecurityCheck);
         }
         Step::Ready(
