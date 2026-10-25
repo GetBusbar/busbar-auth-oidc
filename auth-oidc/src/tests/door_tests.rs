@@ -176,10 +176,17 @@ fn a_full_reached_map_evicts_only_the_oldest() {
     for n in 1..=max {
         keep(&mut map, REACHED_MAX, ticket(n), kept_for(n, at(n)));
     }
-    keep(&mut map, REACHED_MAX, ticket(max + 1), kept_for(max + 1, at(max + 1)));
+    keep(
+        &mut map,
+        REACHED_MAX,
+        ticket(max + 1),
+        kept_for(max + 1, at(max + 1)),
+    );
     assert_eq!(map.len(), REACHED_MAX);
     assert!(!map.contains_key(&ticket(1)), "the oldest is evicted");
-    let earlier = map.get(&ticket(2)).expect("an earlier ticket's re-call is still served");
+    let earlier = map
+        .get(&ticket(2))
+        .expect("an earlier ticket's re-call is still served");
     assert_eq!(earlier.principal.id, "u2");
     assert!(map.contains_key(&ticket(max + 1)));
 }
@@ -201,7 +208,12 @@ fn a_ticket_kept_again_does_not_evict() {
 /// one), so it is refused rather than opened.
 #[test]
 fn a_blank_issuer_or_audience_is_refused_naming_the_key() {
-    for (key, blank) in [("issuer", ""), ("issuer", "  "), ("audience", ""), ("audience", " \t")] {
+    for (key, blank) in [
+        ("issuer", ""),
+        ("issuer", "  "),
+        ("audience", ""),
+        ("audience", " \t"),
+    ] {
         let mut cfg = serde_json::json!({
             "issuer": ISSUER,
             "audience": AUDIENCE,

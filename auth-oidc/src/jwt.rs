@@ -63,7 +63,7 @@ pub fn split(token: &str) -> Result<Parts<'_>, String> {
         .decode(h)
         .map_err(|_| "malformed JWT: header is not base64url".to_string())?;
     let header: Header =
-        serde_json::from_slice(&header_bytes).map_err(|e| format!("malformed JWT header: {e}"))?;
+        serde_json::from_slice(&header_bytes).map_err(crate::json_err("malformed JWT header"))?;
     let payload = URL_SAFE_NO_PAD
         .decode(p)
         .map_err(|_| "malformed JWT: payload is not base64url".to_string())?;
@@ -173,12 +173,25 @@ pub fn verify_signature(parts: &Parts, key: &Jwk) -> Result<(), String> {
 
 /// Deserialize the token's claims payload as a JSON object.
 pub fn claims(parts: &Parts) -> Result<Value, String> {
-    serde_json::from_slice(&parts.payload).map_err(|e| format!("malformed JWT claims: {e}"))
+    serde_json::from_slice(&parts.payload).map_err(crate::json_err("malformed JWT claims"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A JWT header field of the wrong type is refused WITHOUT echoing its value: the header comes
+    /// from an untrusted bearer and this error is logged, and serde's own text quotes the value.
+    #[test]
+    fn a_mistyped_header_field_is_refused_without_echoing_it() {
+        let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"ES256","kid":12345678}"#);
+        let body = URL_SAFE_NO_PAD.encode(b"{}");
+        let Err(err) = split(&format!("{header}.{body}.c2ln")) else {
+            panic!("a mistyped kid is refused");
+        };
+        assert!(err.starts_with("malformed JWT header"), "got: {err}");
+        assert!(!err.contains("12345678"), "the value is echoed: {err}");
+    }
 
     /// RFC 7517 §4.2: a JWK explicitly marked `"use": "enc"` (encryption-only — e.g. published
     /// alongside a signing key on the same JWKS endpoint for key-agreement) must never verify a
