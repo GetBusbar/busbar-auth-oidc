@@ -119,3 +119,32 @@ fn validate_refuses_a_plaintext_jwks_url_as_open_does() {
     assert!(refused.is_err(), "validate accepted what open refuses");
     assert!(<Oidc as Life>::validate(&settings()).is_ok());
 }
+
+/// A nonce mismatch answers the security-check verdict AND says so in the plugin's log, with no
+/// nonce value in it.
+#[test]
+fn a_nonce_mismatch_is_logged() {
+    use base64::Engine as _;
+    let oidc = Oidc::open(&settings(), &lent(b""), 1).expect("opens");
+    let id_token = format!(
+        "h.{}.s",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(br#"{"nonce":"THEIRS-SECRET"}"#)
+    );
+    let mut answer = Some(LoginHttpResponse {
+        status: 200,
+        body: serde_json::json!({ "id_token": id_token }).to_string(),
+    });
+    let mut io = HostIo::new(None, Ticket::NONE, IoState::default(), false);
+    let cap = busbar_contract::testkit::WarnCapture::default();
+    let login = tracing::subscriber::with_default(cap.clone(), || {
+        oidc.now()
+            .login(None, None, None, "MINE-SECRET", &mut answer, &mut io)
+    });
+    assert!(matches!(login, Step::Ready(Login::SecurityCheck)));
+    let logged = cap.messages().join("\n");
+    assert!(
+        logged.contains("does not carry this login's nonce"),
+        "{logged:?}"
+    );
+    assert!(!logged.contains("SECRET"), "a nonce leaked: {logged:?}");
+}
