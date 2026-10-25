@@ -603,3 +603,70 @@ fn a_ticketless_caller_never_claims_or_waits() {
     assert_eq!(serve(&c, &idp, t0), Ok(()), "warm: no ticket needed");
     assert_eq!(idp.calls(), 1);
 }
+
+/// An abandoned single flight (its owner pended and never re-entered) must not keep the rate-limit
+/// window shut: past FLIGHT_MAX a cold caller takes it over and fetches, rather than being told a
+/// fetch attempt failed when none did.
+#[test]
+fn an_abandoned_flight_does_not_keep_the_rate_limit_window_shut_for_a_cold_caller() {
+    let c = JwksCache::new(Duration::from_secs(60), Duration::from_secs(3600));
+    let idp = Idp::new(jwks("k1"));
+    let t0 = Instant::now();
+    let f = |_: &Jwk| Ok::<_, String>("verified");
+    let mut a = idp.pending(ticket(1));
+    assert_eq!(c.with_key(URL, "k1", t0, &mut a, f), Step::Pending);
+
+    let later = t0 + crate::flight::FLIGHT_MAX + Duration::from_secs(1);
+    let mut b = idp.pending(ticket(2));
+    let first = c.with_key(URL, "k1", later, &mut b, f);
+    assert!(
+        !matches!(&first, Step::Ready(Err(e)) if e.contains("no JWKS has been fetched")),
+        "a cold caller was refused though no attempt failed: {first:?}"
+    );
+    assert_eq!(
+        idp.calls(),
+        2,
+        "the cold caller took over the abandoned flight"
+    );
+}
+
+/// A cold-cache fetch failure has no previous keys to fall back to, but is still logged.
+#[test]
+fn a_cold_fetch_failure_logs_a_warn_with_the_error() {
+    let c = JwksCache::new(Duration::from_secs(60), Duration::from_secs(3600));
+    let idp = Idp::answering(Err("provider unreachable".into()));
+    let cap = busbar_contract::testkit::WarnCapture::default();
+    tracing::subscriber::with_default(cap.clone(), || {
+        serve(&c, &idp, Instant::now()).unwrap_err();
+    });
+    assert_eq!(
+        cap.count("JWKS fetch failed; no key set to serve"),
+        1,
+        "{:?}",
+        cap.messages()
+    );
+    assert!(
+        cap.contains("provider unreachable") && cap.contains(URL),
+        "{:?}",
+        cap.messages()
+    );
+}
+
+/// A rate-limited unknown-kid miss made no refetch, so its error must not claim one.
+#[test]
+fn a_rate_limited_unknown_kid_error_does_not_claim_a_refetch() {
+    let c = JwksCache::new(Duration::from_secs(60), Duration::from_secs(3600));
+    let idp = Idp::new(jwks("k1"));
+    let t0 = Instant::now();
+    serve(&c, &idp, t0).expect("prime");
+    let err = ready(c.with_key(
+        URL,
+        "ghost",
+        t0 + Duration::from_secs(1),
+        &mut idp.at_once(Some(ME)),
+        |_| Ok(()),
+    ))
+    .unwrap_err();
+    assert_eq!(idp.calls(), 1, "rate-limited: no refetch");
+    assert!(err.contains("may not have been refetched"), "{err}");
+}
