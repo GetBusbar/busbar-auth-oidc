@@ -311,9 +311,9 @@ impl Life for Oidc {
 
     fn validate(settings: &[u8]) -> Result<(), Refusal> {
         // The checks `open` makes of the settings alone, so a config `--validate` accepts is one
-        // boot opens: parsed, and an explicit `jwks_url` held to https.
+        // boot opens: parsed, and an explicit `jwks_url` held to https (or loopback http).
         config(text(settings)?)
-            .and_then(|c| crate::check_jwks_url(&c))
+            .and_then(|c| crate::check_jwks_url(&c).map(drop))
             .map_err(Refusal::failed)
     }
 

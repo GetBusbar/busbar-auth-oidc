@@ -30,10 +30,13 @@ pub fn config(cfg: &str) -> Result<OidcConfig, String> {
     serde_json::from_str(cfg).map_err(|e| format!("invalid oidc plugin config: {e}"))
 }
 
-/// The module `open` builds from the settings: parsed, its explicit `jwks_url` held to https.
+/// The module `open` builds from the settings: parsed, its explicit `jwks_url` held to https, or
+/// plain http to a loopback host, which opens with a WARNING naming it ([`check_jwks_url`]).
 pub(crate) fn module(cfg: &str) -> Result<OidcModule, String> {
     let cfg = config(cfg)?;
-    check_jwks_url(&cfg)?;
+    if let Some(warning) = check_jwks_url(&cfg)? {
+        tracing::warn!(module = "oidc", "{warning}");
+    }
     Ok(OidcModule::new(&cfg))
 }
 
