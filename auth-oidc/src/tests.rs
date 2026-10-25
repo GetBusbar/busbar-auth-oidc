@@ -129,7 +129,7 @@ impl Module {
         ))
         .expect("no discovery")
         {
-            Some(hop) => LoginOutcome::Exchange(hop),
+            Some(hop) => LoginOutcome::Exchange(LoginHop::clone(&hop)),
             None => LoginOutcome::Reject,
         }
     }
