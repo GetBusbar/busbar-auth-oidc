@@ -40,7 +40,9 @@ use busbar_contract::abi::mechanism::call::{AbiStr, Blob};
 use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::sdk::conn::{ConnFailure, Host};
 use busbar_contract::abi::sdk::door::abi_str;
-use busbar_contract::abi::sdk::exchange::{exchange, Exchange, ExchangeResponse, Request};
+use busbar_contract::abi::sdk::exchange::{
+    exchange, Exchange, ExchangeResponse, Request, REPLY_OVER_BOUND,
+};
 use busbar_contract::abi::sdk::net::{
     extract_normalized_host, host_is_private_or_loopback, scheme_is,
 };
@@ -210,11 +212,21 @@ pub fn failed(url: &str, why: impl Display) -> String {
 /// 1.5.5's texts: `"{url} returned HTTP {status}"`, or [`capped`]'s.
 pub fn document(url: &str, status: u16, body: Vec<u8>) -> Result<String, String> {
     if !(200..300).contains(&status) {
-        let shown = http::StatusCode::from_u16(status)
-            .map_or_else(|_| status.to_string(), |s| s.to_string());
-        return Err(format!("{url} returned HTTP {shown}"));
+        return Err(refused_status(url, status));
     }
     capped(url, body, MAX_JWKS_BYTES)
+}
+
+/// 1.5.5's text for a non-2xx `status` from `url`.
+fn refused_status(url: &str, status: u16) -> String {
+    let shown =
+        http::StatusCode::from_u16(status).map_or_else(|_| status.to_string(), |s| s.to_string());
+    format!("{url} returned HTTP {shown}")
+}
+
+/// 1.5.5's text for a body past `cap` bytes.
+fn over_cap(url: &str, cap: usize) -> String {
+    format!("{url} JWKS body exceeds the {cap}-byte cap")
 }
 
 /// `body` as text, refusing anything over `cap` bytes or not UTF-8.
@@ -223,7 +235,7 @@ pub fn document(url: &str, status: u16, body: Vec<u8>) -> Result<String, String>
 /// 1.5.5's texts: `"{url} JWKS body exceeds the {cap}-byte cap"`, `"{url} JWKS body is not UTF-8"`.
 pub fn capped(url: &str, body: Vec<u8>, cap: usize) -> Result<String, String> {
     if body.len() > cap {
-        return Err(format!("{url} JWKS body exceeds the {cap}-byte cap"));
+        return Err(over_cap(url, cap));
     }
     String::from_utf8(body).map_err(|_| format!("{url} JWKS body is not UTF-8"))
 }
@@ -376,7 +388,8 @@ impl<'h> HostIo<'h> {
         let mut c = host.connector_from(self.ticket, self.state.issued);
         let mut ex = match self.state.current.take() {
             Some((at, ex)) if at == url => ex,
-            _ => match Exchange::request(request(&parsed)) {
+            _ => match Exchange::request(request(&parsed)).map(|ex| ex.reply_limit(MAX_JWKS_BYTES))
+            {
                 Ok(ex) => ex,
                 Err(e) => return Poll::Ready(Err(failed(url, e))),
             },
@@ -388,7 +401,22 @@ impl<'h> HostIo<'h> {
             }
             Poll::Ready(r) => {
                 self.state.issued = c.issued();
-                Poll::Ready(r.map_err(|e| failed(url, e)))
+                Poll::Ready(r.map_err(|e| {
+                    match e {
+                        // Cut off at the cap while reading (1.5.5 read at most cap + 1 bytes): its
+                        // words, the status judged before the body for a GET.
+                        ConnFailure::Failed(why) if why == REPLY_OVER_BOUND => {
+                            match ex
+                                .head_status()
+                                .filter(|s| need != NEED_TOKEN && !(200..300).contains(s))
+                            {
+                                Some(status) => refused_status(url, status),
+                                None => over_cap(url, MAX_JWKS_BYTES),
+                            }
+                        }
+                        e => failed(url, e),
+                    }
+                }))
             }
         }
     }
