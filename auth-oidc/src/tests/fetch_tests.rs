@@ -352,3 +352,63 @@ fn documents_stay_https_only_whatever_the_host() {
     assert!(plaintext_allowed(NEED_TOKEN, "http://10.1.2.3/token"));
     assert!(!plaintext_allowed(NEED_TOKEN, "https://10.1.2.3/token"));
 }
+
+/// Holds `T` to wiping itself on drop: a compile-time check.
+fn wipes<T: zeroize::ZeroizeOnDrop>(_: &T) {}
+
+/// THE TOKEN REQUEST'S CREDENTIAL COPIES ARE WIPED (bank grade): the form pairs (client secret,
+/// code, code_verifier), the encoded body, and the hop the token exchange builds each wipe
+/// themselves on drop. A type-level check: it does not compile while any of them is a plain
+/// `Vec`/`String`/`LoginHop`.
+#[test]
+fn the_token_request_copies_wipe_on_drop() {
+    let pairs = form(&hop(), Some("s3cret"));
+    wipes(&pairs);
+    wipes(&form_body(&pairs));
+    let cfg: crate::OidcConfig = serde_json::from_str(
+        r#"{"issuer":"https://i.test","audience":"a","jwks_url":"https://i.test/keys",
+            "token_endpoint":"https://i.test/token"}"#,
+    )
+    .expect("a config");
+    let m = crate::OidcModule::new(&cfg);
+    let made = crate::script::ready(m.token_exchange(
+        Some("code"),
+        Some("https://busbar.test/cb"),
+        Some("verifier"),
+        std::time::Instant::now(),
+        &mut crate::script::Idp::new(String::new()).at_once(Some(crate::script::ME)),
+    ))
+    .expect("configured")
+    .expect("a hop");
+    wipes(&made);
+}
+
+/// The one-buffer encoder writes byte for byte what the `url` crate's form serializer (the
+/// encoder it replaces) wrote, so the wire does not change.
+#[test]
+fn the_form_body_matches_the_url_form_serializer() {
+    let cases: Vec<Vec<(&str, &str)>> = vec![
+        vec![],
+        vec![("a", "")],
+        vec![("grant_type", "authorization_code"), ("code", "a b&c")],
+        vec![
+            ("client_secret", "p@ss/w+rd=%?#~!'()*-._"),
+            ("redirect_uri", "https://busbar.test/auth/token?x=1&y=2"),
+            (
+                "code_verifier",
+                "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+            ),
+        ],
+        vec![("ünï", "çødé 日本 \u{1F600}"), ("ctl", "\t\r\n\0\x7f")],
+    ];
+    for case in cases {
+        let pairs: Vec<(String, String)> = case
+            .iter()
+            .map(|(n, v)| ((*n).to_string(), (*v).to_string()))
+            .collect();
+        let old = url::form_urlencoded::Serializer::new(String::new())
+            .extend_pairs(pairs.iter())
+            .finish();
+        assert_eq!(form_body(&pairs).as_str(), old, "pairs {case:?}");
+    }
+}
