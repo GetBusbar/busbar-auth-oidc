@@ -141,18 +141,31 @@ impl Discovery {
         let checked = check_document(cfg, &url, fetched).map(Arc::new);
         let mut guard = self.lock();
         let (state, waiters) = &mut *guard;
-        // A late answer never undoes a document another caller has since resolved.
-        if !matches!(&*state, State::Done(_)) {
-            *state = match &checked {
-                Ok(doc) => State::Done(Arc::clone(doc)),
-                Err(error) => State::Failed {
+        // A document resolves whenever it is not already Done (any valid issuer-matched one is
+        // good). A failure ends only this caller's own flight: a late error from an abandoned
+        // flight must not overwrite the one another caller has since taken over.
+        let mut failed = None;
+        let waiters = match (&checked, &*state) {
+            (_, State::Done(_)) => Vec::new(),
+            (Ok(doc), _) => {
+                *state = State::Done(Arc::clone(doc));
+                std::mem::take(waiters)
+            }
+            (Err(error), State::Flight(fl)) if fl.mine(me) => {
+                *state = State::Failed {
                     error: error.clone(),
                     at: now,
-                },
-            };
-        }
-        let waiters = std::mem::take(waiters);
+                };
+                failed = Some(error.clone());
+                std::mem::take(waiters)
+            }
+            (Err(_), _) => Vec::new(),
+        };
         drop(guard);
+        if let Some(e) = failed {
+            // The tick discards a discovery failure, so say it here, once per attempt.
+            tracing::warn!(module = "oidc", url = %url, error = %e, "OIDC discovery failed");
+        }
         // The waiters re-enter on this wake and read the document (or its failure).
         if !waiters.is_empty() {
             io.wake(&waiters);
