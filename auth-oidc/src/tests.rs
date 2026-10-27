@@ -1202,25 +1202,6 @@ fn now_unix_fails_closed_below_the_sanity_floor() {
     assert!(err.contains("expired"), "got: {err}");
 }
 
-/// Boundary-tests the pure comparison [`is_clock_sane`] was extracted from `now_unix` for (see its
-/// doc comment): `now_unix` itself reads the real host clock and cannot be driven with an injected
-/// value, so the floor comparison is only directly testable once pulled out.
-#[test]
-fn is_clock_sane_boundary() {
-    assert!(
-        !is_clock_sane(CLOCK_SANITY_FLOOR_UNIX - 1),
-        "one second below the floor must be considered insane"
-    );
-    assert!(
-        is_clock_sane(CLOCK_SANITY_FLOOR_UNIX),
-        "exactly at the floor must be considered sane (the floor itself is a trustworthy reading)"
-    );
-    assert!(
-        is_clock_sane(CLOCK_SANITY_FLOOR_UNIX + 1),
-        "above the floor must be considered sane"
-    );
-}
-
 /// The fail-closed MAPPING `now_unix` applies (OIDC-13): below the floor the reading becomes
 /// `i64::MAX` (every token then fails `exp`), at or above it the reading passes through. Pinning
 /// the mapping, not just the comparison, is what catches a `now_unix` that returns the raw reading.

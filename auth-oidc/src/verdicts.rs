@@ -135,16 +135,6 @@ impl VerdictCache {
         state.entries.clear();
         n
     }
-
-    /// How many entries are held.
-    pub fn len(&self) -> usize {
-        self.lock().entries.len()
-    }
-
-    /// Whether none is.
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
 }
 
 #[cfg(test)]
