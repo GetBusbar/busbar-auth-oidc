@@ -106,19 +106,15 @@ pub const CACHE_FAMILY: u32 = 0;
 /// This plugin's Statement: its name and alias, its version, the most calls one instance holds in
 /// flight, its one secret reference, its six outbound needs, its one metric family and its auth
 /// tail.
-pub const STATEMENT: Statement = Statement {
-    families: FAMILIES.as_ptr(),
-    families_len: FAMILIES.len(),
-    secret_refs: SECRET_REFS.as_ptr(),
-    secret_refs_len: SECRET_REFS.len(),
-    rewrites: REWRITES.as_ptr(),
-    rewrites_len: REWRITES.len(),
-    needs: NEEDS.as_ptr(),
-    needs_len: NEEDS.len(),
-    mark_words: CARRIERS.as_ptr(),
-    mark_words_len: CARRIERS.len(),
-    ..with_tail(statement(NAME, env!("CARGO_PKG_VERSION"), 64), &TAIL)
-};
+pub const STATEMENT: Statement = with_tail(
+    statement(NAME, env!("CARGO_PKG_VERSION"), 64)
+        .with_families(FAMILIES)
+        .with_secret_refs(SECRET_REFS)
+        .with_rewrites(REWRITES)
+        .with_needs(NEEDS)
+        .with_mark_words(CARRIERS),
+    &TAIL,
+);
 
 /// The most short answers kept for their re-call at once.
 const REACHED_MAX: usize = 1024;
