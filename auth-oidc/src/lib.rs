@@ -941,6 +941,7 @@ pub fn build_token_exchange(
 ///   - The clock IS readable but below [`CLOCK_SANITY_FLOOR_UNIX`] — the realistic broken-clock case
 ///     (a dead RTC booting a host at the epoch, or an NTP/RTC fault landing in 1970-2000), which
 ///     `duration_since` reports as `Ok(small_value)` and would otherwise sail straight through.
+#[cfg(test)]
 pub(crate) fn now_unix() -> i64 {
     let t = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -949,10 +950,11 @@ pub(crate) fn now_unix() -> i64 {
     clock_or_fail_closed(t)
 }
 
-/// The fail-closed mapping [`now_unix`] applies to a clock reading: a reading at or above
+/// The fail-closed mapping every clock reading takes (the request's timestamp, the host's
+/// `clock.now`, the tests' `now_unix`): a reading at or above
 /// [`CLOCK_SANITY_FLOOR_UNIX`] passes through, anything below becomes `i64::MAX`. Pure, so the mapping
 /// is testable (`now_unix` reads the real host clock).
-fn clock_or_fail_closed(t: i64) -> i64 {
+pub(crate) fn clock_or_fail_closed(t: i64) -> i64 {
     if t >= CLOCK_SANITY_FLOOR_UNIX {
         t
     } else {

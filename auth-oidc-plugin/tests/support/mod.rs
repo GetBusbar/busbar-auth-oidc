@@ -94,7 +94,9 @@ impl busbar_contract::services::double::ServicesDouble for Clock {
     fn now(&self) -> Reading {
         CLOCK_READS.fetch_add(1, Ordering::SeqCst);
         Reading {
-            wall_ns: 0,
+            wall_ns: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos() as u64),
             mono_ns: now_ns(),
         }
     }
@@ -660,6 +662,15 @@ impl Bound {
         )
     }
 
+    /// `verify` of `credential` with the request's facts stating `timestamp` (unix seconds).
+    pub fn verify_at(&self, credential: Option<&str>, timestamp: u64) -> String {
+        self.identify(
+            slot::VERIFY,
+            |out_buf| verify_in_at(credential, out_buf, timestamp),
+            (IDENTITY_BUF_BYTES, IDENTITY_GROUPS),
+        )
+    }
+
     /// `begin_login` for the core's `state`, `challenge` and `nonce`: the authorize URL, or the
     /// refusal.
     pub fn begin(&self, redirect: &str, state: &str, challenge: &str, nonce: &str) -> String {
@@ -716,7 +727,17 @@ impl Bound {
 
 /// A `verify` `in` for `credential` over `out_buf`.
 pub fn verify_in(credential: Option<&str>, out_buf: IdentityBuf) -> VerifyIn {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    verify_in_at(credential, out_buf, now)
+}
+
+/// [`verify_in`] with the request's facts stating `timestamp` (unix seconds): the host's clock as
+/// the request arrived, the time a token's expiry is judged at.
+pub fn verify_in_at(credential: Option<&str>, out_buf: IdentityBuf, timestamp: u64) -> VerifyIn {
     let mut i: VerifyIn = z();
+    i.request.timestamp = timestamp;
     i.head = in_head();
     i.credential = credential.map_or(NO_BLOB, |c| blob(c.as_bytes(), BLOB_OCTETS));
     i.out_buf = out_buf;
