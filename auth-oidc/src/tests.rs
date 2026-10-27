@@ -1805,6 +1805,32 @@ fn complete_login_verifies_the_token_response_and_rejects_a_forged_one() {
     }
 }
 
+/// RED (ruling 2026-10-27): a token endpoint that answers 5xx or 429 is the IdP unable to answer,
+/// an outage the host answers 503 (retryable), never a declined login; a 4xx is still declined.
+#[test]
+fn an_idp_5xx_or_429_at_the_token_endpoint_is_an_outage_not_a_decline() {
+    let key = TestKey::generate(KID);
+    let m = Module::new(&cfg("groups"), FixtureFetcher::new(key.jwks()));
+    let answered = |status: u16| {
+        ready(m.m.identity_from_token_response(
+            &LoginHttpResponse {
+                status,
+                body: r#"{"error":"temporarily_unavailable"}"#.to_string(),
+            },
+            0,
+            Instant::now(),
+            &mut m.idp.at_once(Some(ME)),
+        ))
+    };
+    for status in [500, 502, 503, 429] {
+        let Err(cause) = answered(status) else {
+            panic!("{status} was not an outage");
+        };
+        assert!(cause.contains(&status.to_string()), "{cause}");
+    }
+    assert!(matches!(answered(400), Ok(LoginOutcome::Reject)));
+}
+
 /// Fail-closed: a module with no login endpoints configured whose issuer's discovery document names
 /// none either (a verify-only deployment) rejects both login steps rather than emitting a malformed
 /// authorize URL or exchange.
