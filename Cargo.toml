@@ -35,12 +35,13 @@ repository = "https://github.com/GetBusbar/busbar-auth-oidc"
 needless_update = "allow"
 
 [workspace.dependencies]
-busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "71b70e487bebe5ae2feb1fabf32d8906edf4ccad" }
-busbar-plugin-loader = { git = "https://github.com/GetBusbar/busbar", rev = "71b70e487bebe5ae2feb1fabf32d8906edf4ccad" }
+busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "91af6001dad844b8a441e41c397034a874ccb52f" }
+busbar-plugin-loader = { git = "https://github.com/GetBusbar/busbar", rev = "91af6001dad844b8a441e41c397034a874ccb52f" }
+busbar-test-kit = { git = "https://github.com/GetBusbar/busbar", rev = "91af6001dad844b8a441e41c397034a874ccb52f" }
 # THE SUITE'S HOST CONNECTOR (dev-only; auth-oidc-plugin/tests/support/conformance_host.rs,
 # rendered because the declares file states network needs): busbar's connector and its TLS
 # test kit at the pin, and the transport framers those needs name, at the revs busbar links.
-busbar-core-connector = { git = "https://github.com/GetBusbar/busbar", rev = "71b70e487bebe5ae2feb1fabf32d8906edf4ccad", features = ["test-support"] }
+busbar-core-connector = { git = "https://github.com/GetBusbar/busbar", rev = "91af6001dad844b8a441e41c397034a874ccb52f", features = ["test-support"] }
 busbar-transport-http = { git = "https://github.com/GetBusbar/busbar-transport-http", rev = "12b078389496d4c1fd81b730f5d9d0887537c3b0" }
 busbar-transport-tcp = { git = "https://github.com/GetBusbar/busbar-transport-tcp", rev = "223ec3f02000de94089a1752635b9e206f7492e5" }
 # busbar's root [workspace.dependencies], third-party rows, at 71b70e487bebe5ae2feb1fabf32d8906edf4ccad
@@ -137,4 +138,4 @@ ulid = "1"
 # patches them to its own tree. The source is busbar spelled through www.github.com: Cargo
 # refuses a patch that names the source it patches.
 [patch."https://github.com/GetBusbar/busbar"]
-busbar-contract = { git = "https://www.github.com/GetBusbar/busbar", rev = "71b70e487bebe5ae2feb1fabf32d8906edf4ccad" }
+busbar-contract = { git = "https://www.github.com/GetBusbar/busbar", rev = "91af6001dad844b8a441e41c397034a874ccb52f" }
