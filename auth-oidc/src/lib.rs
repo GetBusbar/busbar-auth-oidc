@@ -183,6 +183,11 @@ impl OidcVerifier {
     /// overage marker (REJECT, never call Graph), and reads `role_claim` into the principal's groups.
     /// `now_unix` is the current UNIX time in seconds.
     pub fn validate_claims(&self, claims: &Value, now_unix: i64) -> Result<Principal, String> {
+        // `now_unix()`'s broken-clock sentinel: refused outright, so an `exp` that saturates cannot
+        // pass it, and the refusal names the clock rather than the token.
+        if now_unix == i64::MAX {
+            return Err("the host clock is unreadable or reads before 2026-01-01 (the clock sanity floor), so every token is treated as expired; fix the host clock".to_string());
+        }
         // iss — exact match. A wrong issuer is a different tenant / a token minted elsewhere.
         match claims.get("iss").and_then(Value::as_str) {
             Some(iss) if iss == self.issuer => {}
@@ -487,18 +492,10 @@ impl OidcModule {
     /// # Errors
     /// The discovery error, or a document with no `jwks_uri`.
     pub fn jwks_url(&self, now: Instant, io: &mut dyn Fetch) -> Step<Result<String, String>> {
-        if let Some(url) = &self.cfg.jwks_url {
-            return Step::Ready(Ok(url.clone()));
-        }
-        let doc = step_ok!(self.discovery.document(&self.cfg, now, io));
-        Step::Ready(
-            doc.get("jwks_uri")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-                .ok_or_else(|| {
-                    "OIDC discovery document has no 'jwks_uri'; set jwks_url explicitly".to_string()
-                }),
-        )
+        let url = step_ok!(self.endpoint(self.cfg.jwks_url.as_ref(), "jwks_uri", now, io));
+        Step::Ready(url.ok_or_else(|| {
+            "OIDC discovery document has no 'jwks_uri'; set jwks_url explicitly".to_string()
+        }))
     }
 
     /// THE HOST'S `ready` (after `open`, before any listener binds; boot awaits it): BOOT-TIME
@@ -583,13 +580,36 @@ impl OidcModule {
         io: &mut dyn Fetch,
     ) -> Step<Result<LoginOutcome, String>> {
         // A non-2xx token-endpoint response (e.g. invalid_grant) never carries a usable id_token.
+        // A 4xx refuses the user's code (an end-user decline: info); a 5xx is the IdP failing (the
+        // operator's to see: warn). Both are a declined login.
         if !(200..300).contains(&resp.status) {
+            if resp.status >= 500 {
+                tracing::warn!(
+                    module = "oidc",
+                    status = resp.status,
+                    "OIDC token endpoint answered a non-2xx status; login declined"
+                );
+            } else {
+                tracing::info!(
+                    module = "oidc",
+                    status = resp.status,
+                    "OIDC token endpoint answered a non-2xx status; login declined"
+                );
+            }
             return Step::Ready(Ok(LoginOutcome::Reject));
         }
-        let Ok(body) = serde_json::from_str::<Value>(&resp.body) else {
-            return Step::Ready(Ok(LoginOutcome::Reject));
+        let body = match serde_json::from_str::<Value>(&resp.body) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(module = "oidc", error = %e, "OIDC token endpoint response is not JSON; login declined");
+                return Step::Ready(Ok(LoginOutcome::Reject));
+            }
         };
         let Some(id_token) = body.get("id_token").and_then(Value::as_str) else {
+            tracing::warn!(
+                module = "oidc",
+                "OIDC token endpoint response carries no id_token; login declined"
+            );
             return Step::Ready(Ok(LoginOutcome::Reject));
         };
         let verdict = match step!(self.verify_with(
@@ -602,8 +622,6 @@ impl OidcModule {
             Ok(v) => v,
             // The key set's URL could not be discovered: the key set cannot be had, which 1.5.5
             // answered as it answered a key set it could not fetch — a declined login, logged.
-            // The warn line is 1.5.5's own words for that case, kept byte for byte (customer-visible
-            // log parity), pinned by `tests.rs` ("1.5.5's warn"); Q128 NIT rejected on that ground.
             Err(e) => {
                 tracing::warn!(module = "oidc", error = %e, "OIDC token signature verification failed");
                 AuthVerdict::Reject
@@ -736,25 +754,56 @@ impl OidcModule {
         code_verifier: Option<&str>,
         now: Instant,
         io: &mut dyn Fetch,
-    ) -> Step<Result<Option<LoginHop>, String>> {
+    ) -> Step<Result<Option<TokenHop>, String>> {
         let (Some(code), Some(redirect_uri), Some(code_verifier)) =
             (code, redirect_uri, code_verifier)
         else {
+            let absent: Vec<&str> = [
+                ("code", code.is_none()),
+                ("redirect_uri", redirect_uri.is_none()),
+                ("code_verifier", code_verifier.is_none()),
+            ]
+            .into_iter()
+            .filter_map(|(name, missing)| missing.then_some(name))
+            .collect();
+            // The user's callback, not the operator's config: an end-user decline (info).
+            tracing::info!(module = "oidc", absent = %absent.join(", "), "OIDC callback lacks fields the token exchange needs; login declined");
             return Step::Ready(Ok(None));
         };
         let Some(endpoint) = step_ok!(self.token_endpoint(now, io)) else {
+            tracing::warn!(module = "oidc", "no token_endpoint is configured and the discovery document names none; login declined");
             return Step::Ready(Ok(None));
         };
         let mut cfg = self.cfg.clone();
         cfg.token_endpoint = Some(endpoint);
-        Step::Ready(Ok(Some(build_token_exchange(
+        Step::Ready(Ok(Some(TokenHop(build_token_exchange(
             &cfg,
             code,
             redirect_uri,
             code_verifier,
-        ))))
+        )))))
     }
 }
+
+/// The token-exchange hop the plugin builds and sends, its form values (the code and the
+/// code_verifier) wiped when it drops. [`LoginHop`] is the contract's type, plain `String`s with no
+/// wipe of their own, so this holder wipes the copies the plugin made into it.
+pub struct TokenHop(LoginHop);
+
+impl std::ops::Deref for TokenHop {
+    type Target = LoginHop;
+    fn deref(&self) -> &LoginHop {
+        &self.0
+    }
+}
+
+impl Drop for TokenHop {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.0.form);
+    }
+}
+
+impl zeroize::ZeroizeOnDrop for TokenHop {}
 
 /// THE NONCE BINDING (1.5.5's core check, now the plugin's): `true` when the token endpoint's `body`
 /// carries no `id_token`, or carries one whose (unverified) payload names `nonce` as its `nonce`
@@ -887,7 +936,7 @@ pub fn build_token_exchange(
 /// Current UNIX time in seconds. Fails CLOSED on a clock this module cannot trust: `validate_claims`'s
 /// `exp` check is `exp + skew >= now_unix`, so a `now_unix` that reads too LOW makes every token
 /// appear unexpired (fail OPEN) — the exact failure this guards against. Two cases, both mapped to
-/// `i64::MAX` (which fails `exp`/`nbf` checks for any realistic token):
+/// `i64::MAX` (which `validate_claims` refuses outright, naming the clock):
 ///   - `SystemTime::now()` returns `Err` (host clock strictly before the UNIX epoch) — rare.
 ///   - The clock IS readable but below [`CLOCK_SANITY_FLOOR_UNIX`] — the realistic broken-clock case
 ///     (a dead RTC booting a host at the epoch, or an NTP/RTC fault landing in 1970-2000), which
@@ -901,45 +950,100 @@ pub(crate) fn now_unix() -> i64 {
     clock_or_fail_closed(t)
 }
 
-/// The fail-closed mapping [`now_unix`] applies to a clock reading: a sane reading passes through,
-/// anything below [`CLOCK_SANITY_FLOOR_UNIX`] becomes `i64::MAX`. Pure, so the mapping itself is
-/// testable (`now_unix` reads the real host clock).
+/// The fail-closed mapping every clock reading takes (the request's timestamp, the host's
+/// `clock.now`, the tests' `now_unix`): a reading at or above
+/// [`CLOCK_SANITY_FLOOR_UNIX`] passes through, anything below becomes `i64::MAX`. Pure, so the mapping
+/// is testable (`now_unix` reads the real host clock).
 pub(crate) fn clock_or_fail_closed(t: i64) -> i64 {
-    if is_clock_sane(t) {
+    if t >= CLOCK_SANITY_FLOOR_UNIX {
         t
     } else {
         i64::MAX
     }
 }
 
-/// Whether a UNIX timestamp reading is within the range this module considers a trustworthy clock
-/// (see [`CLOCK_SANITY_FLOOR_UNIX`]). Pulled out of [`now_unix`] as a pure, parameterized function
-/// purely for testability: `now_unix` itself reads the real host clock and cannot be driven with an
-/// injected boundary value from a test.
-fn is_clock_sane(t: i64) -> bool {
-    t >= CLOCK_SANITY_FLOOR_UNIX
+/// The `map_err` for a `serde_json` decode whose INPUT may carry a value that must not be echoed: the
+/// settings, or a bearer's JWT header/claims. `serde_json::Error`'s own `Display` is withheld: a
+/// data error quotes the offending value (`invalid type: string "<the value>"`), and these messages
+/// reach `--validate` output and logs. What survives is `what` failed, the CLASS of failure and
+/// WHERE. The decoder texts kept verbatim name a KEY, never a value: a missing field (spelled from
+/// the type's schema) and an unknown field (the key, and the schema's expected keys).
+pub(crate) fn json_err(what: &'static str) -> impl FnOnce(serde_json::Error) -> String {
+    move |e: serde_json::Error| {
+        if e.is_data() {
+            let text = e.to_string();
+            if text.starts_with("missing field `") || text.starts_with("unknown field `") {
+                return format!("{what}: {text}");
+            }
+        }
+        let class = match e.classify() {
+            serde_json::error::Category::Io => "the input could not be read",
+            serde_json::error::Category::Syntax => "it is not well-formed JSON",
+            serde_json::error::Category::Data => "a field is missing or has the wrong type",
+            serde_json::error::Category::Eof => "it ends before the JSON does",
+        };
+        let (line, column) = (e.line(), e.column());
+        format!("{what}: {class} (line {line}, column {column}; the decoder's text is withheld)")
+    }
 }
 
-/// The configured `jwks_url`, checked: it must be an `https` URL. Every request is https-only, so
-/// any other value would load cleanly and then reject every token at first use; it is refused at
-/// `open` instead, with an error naming the field. Absent is fine: discovery names it.
+/// The configured `jwks_url`, checked. Absent is fine (discovery names it), and so is `https`.
+///
+/// Plain `http` is accepted only for a LOOPBACK host ([`is_loopback_host`]: 127.0.0.0/8, `::1`,
+/// `localhost`, `*.localhost`), the local identity-provider rig 1.5.5 booted (1.5.5 returned an
+/// explicit `jwks_url` unchecked). Such a config opens with the warning this returns, which `open`
+/// logs: the key set is still only ever fetched over https ([`fetch::plaintext_allowed`]), as on
+/// 1.5.5, so every token it is asked to verify is rejected until the URL is https. Any other value
+/// (http to a host that is not loopback, another scheme, or no URL at all) is refused at `open`
+/// with an error naming the field and the loopback exception, rather than loading and then
+/// rejecting every token from a remote identity provider.
 ///
 /// # Errors
-/// The URL does not parse, or is not https.
-pub fn check_jwks_url(cfg: &OidcConfig) -> Result<(), String> {
+/// The URL does not parse, or is neither https nor http to a loopback host.
+pub fn check_jwks_url(cfg: &OidcConfig) -> Result<Option<String>, String> {
+    const ONLY: &str = "it must be an https URL (plain http is accepted only for a loopback host: \
+                        127.0.0.0/8, ::1 or localhost)";
     let Some(url) = &cfg.jwks_url else {
-        return Ok(());
+        return Ok(None);
     };
-    let parsed = url::Url::parse(url)
-        .map_err(|e| format!("jwks_url is not a valid URL ({e}); it must be an https URL"))?;
-    if parsed.scheme() != "https" {
-        return Err(format!(
-            "jwks_url must be an https URL (got scheme '{}'); the JWKS is only ever fetched \
-             over https",
-            parsed.scheme().escape_debug()
-        ));
+    let parsed =
+        url::Url::parse(url).map_err(|e| format!("jwks_url is not a valid URL ({e}); {ONLY}"))?;
+    match parsed.scheme() {
+        "https" => Ok(None),
+        "http" if is_loopback_host(&parsed) => Ok(Some(
+            "jwks_url is plain http to a loopback host; it loads, but the JWKS is only ever \
+             fetched over https, so every OIDC token will be rejected until jwks_url is an https \
+             URL"
+            .to_string(),
+        )),
+        "http" => Err(
+            "jwks_url must be an https URL (got scheme 'http' for a host that is not loopback); \
+             the JWKS is only ever fetched over https, and plain http is accepted only for a \
+             loopback host (127.0.0.0/8, ::1 or localhost)"
+                .to_string(),
+        ),
+        other => Err(format!(
+            "jwks_url must be an https URL (got scheme '{}'); {ONLY}",
+            other.escape_debug()
+        )),
     }
-    Ok(())
+}
+
+/// Whether the parsed URL's host is loopback: an IPv4 literal in 127.0.0.0/8, the IPv6 literal
+/// `::1`, or the `localhost` name or a name under it (RFC 6761 reserves both to loopback), a
+/// trailing dot and case ignored. It reads the parsed host only, so a userinfo
+/// (`http://127.0.0.1@evil.example/`) or a lookalike name (`127.0.0.1.evil.example`) is not loopback,
+/// and no DNS lookup is made.
+fn is_loopback_host(url: &url::Url) -> bool {
+    match url.host() {
+        Some(url::Host::Ipv4(v4)) => v4.is_loopback(),
+        Some(url::Host::Ipv6(v6)) => v6.is_loopback(),
+        Some(url::Host::Domain(name)) => {
+            let name = name.strip_suffix('.').unwrap_or(name).to_ascii_lowercase();
+            name == "localhost" || name.ends_with(".localhost")
+        }
+        None => false,
+    }
 }
 
 #[cfg(test)]

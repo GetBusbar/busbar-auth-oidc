@@ -51,11 +51,10 @@ use std::time::{Duration, Instant};
 use busbar_contract::abi::host::conn::connector::{
     DIRECTION_OUTBOUND, EGRESS_OPERATOR_INFRASTRUCTURE,
 };
-use busbar_contract::abi::mechanism::call::{Blob, Outcome, BLOB_ABSENT};
-use busbar_contract::abi::mechanism::door::DoorFn;
+use busbar_contract::abi::mechanism::call::{Blob, Outcome};
 use busbar_contract::abi::mechanism::lifecycle::{slot as life, OpenIn, OpenOut};
 use busbar_contract::abi::mechanism::rendering::{ReadBlob, ReadNeed};
-use busbar_contract::abi::sdk::door::{blank_in, blank_out};
+use busbar_contract::abi::sdk::door::{blank_in, blank_out, MacroDoor};
 use busbar_contract::abi::transport::slot;
 use busbar_contract::conn::{
     ConnError, ConnId, DeclaredConns, InstanceId, NeedId, OpenDesc, PieceKind, NO_TICKET,
@@ -77,12 +76,12 @@ pub const FAR_END: &str = "localhost:45739";
 /// The framer doors the host serves, as the root links them: (claim, door). One row a line,
 /// whatever the claims' lengths (a `vec!` would be reflowed by rustfmt).
 #[allow(clippy::vec_init_then_push)]
-fn doors() -> Vec<(&'static str, DoorFn)> {
-    use busbar_transport_http::linked::door as http_door;
-    use busbar_transport_tcp::linked::door as tcp_door;
+fn doors() -> Vec<(&'static str, MacroDoor)> {
+    use busbar_transport_http::door::MACRO_DOOR as http_door;
+    use busbar_transport_tcp::door::MACRO_DOOR as tcp_door;
     // Each row is compiled against this repo's own pin of busbar-contract (the rendered `[patch]`),
     // as busbar compiles the rows it links.
-    let mut doors: Vec<(&'static str, DoorFn)> = Vec::new();
+    let mut doors: Vec<(&'static str, MacroDoor)> = Vec::new();
     doors.push(("tcp", tcp_door));
     doors.push(("http", http_door));
     doors
@@ -105,7 +104,10 @@ pub fn anchors() -> &'static str {
 /// # Panics
 /// The anchors do not parse, a transport door does not load or open, or the view does not compose.
 #[must_use]
-pub fn host(wake: Arc<dyn Fn(u64) + Send + Sync>, anchors: Option<&str>) -> Arc<dyn DeclaredConns> {
+pub fn host(
+    wake: busbar_contract::conn::ConnWake,
+    anchors: Option<&str>,
+) -> Arc<dyn DeclaredConns> {
     // The reactor a socket a plugin opens from a dispatcher worker registers on, as the root
     // installs it (`root::connector::io_reactor`): the connector's own I/O thread.
     busbar_core_connector::io::install_process_reactor(io_reactor());
@@ -191,7 +193,7 @@ fn entries() -> Vec<Entry> {
                 // A transport door is a framer the connector drives: it declares no need.
                 conns: ConnTable::NoNeeds,
             };
-            let plugin = LinkedRow::of(door)
+            let plugin = LinkedRow::of_macro(door)
                 .and_then(|row| load_linked::<Transport>(&row, bind))
                 .unwrap_or_else(|e| panic!("the host's transport `{claim}` does not load: {e}"));
             Entry {
@@ -215,12 +217,7 @@ impl Opened {
             .cloned()
             .unwrap_or_else(|| panic!("the host's transport `{claim}` states no transport tail"));
         let mut i: OpenIn = blank_in();
-        i.settings = Blob {
-            ptr: std::ptr::null(),
-            len: 0,
-            fmt: BLOB_ABSENT,
-            flags: 0,
-        };
+        i.settings = Blob::ABSENT;
         let mut f = Frame::new(i, blank_out::<OpenOut>());
         let opened = plugin.call(life::OPEN, &mut f);
         assert_eq!(
@@ -238,6 +235,7 @@ impl Opened {
             composes_over: stated.composes_over,
             ported: stated.ported,
             status_rows: stated.status_rows,
+            datagram: stated.datagram,
             duplex: stated
                 .upgrades
                 .iter()
@@ -587,7 +585,7 @@ fn tls_echo() -> String {
 /// to the test CA is upgraded and round-trips (the anchors went to the host, never to the plugin).
 #[test]
 fn the_hosts_tls_upgrade_verifies_against_the_suites_test_anchors() {
-    let c = host(Arc::new(|_| {}), Some(anchors()));
+    let c = host(Arc::new(|_, _| {}), Some(anchors()));
     assert_eq!(
         upgraded_echo(c.as_ref(), &tls_echo()),
         Ok(b"hello".to_vec())
@@ -598,7 +596,7 @@ fn the_hosts_tls_upgrade_verifies_against_the_suites_test_anchors() {
 /// trust the test CA.
 #[test]
 fn red_with_the_anchors_withheld_the_hosts_tls_upgrade_is_refused() {
-    let c = host(Arc::new(|_| {}), None);
+    let c = host(Arc::new(|_, _| {}), None);
     let answer = upgraded_echo(c.as_ref(), &tls_echo());
     assert!(answer.is_err(), "upgraded over an untrusted CA: {answer:?}");
 }
@@ -626,7 +624,7 @@ fn an_http_need_reaches_a_local_http_listener_through_the_hosts_framer() {
         String::from_utf8_lossy(&seen).into_owned()
     });
 
-    let c = host(Arc::new(|_| {}), None);
+    let c = host(Arc::new(|_, _| {}), None);
     assert!(c.serves_scheme("http"), "the host serves http");
     c.declare(
         OWNER,

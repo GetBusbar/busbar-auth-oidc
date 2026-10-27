@@ -93,6 +93,74 @@ fn an_explicit_jwks_url_opens_and_resolves_without_a_request() {
     );
 }
 
+/// A loopback `jwks_url` over plain http OPENS, as 1.5.5 booted it (the oracle's login-hop rig
+/// serves its key set on http://127.0.0.1), and `open` logs a WARNING naming `jwks_url` and the URL:
+/// the key set is still only ever fetched over https, so the operator is told every token will be
+/// rejected until it is an https URL. Loopback is 127.0.0.0/8, ::1, `localhost` and `*.localhost`
+/// (RFC 6761), read off the parsed host, so a userinfo or a lookalike name cannot pass for it.
+#[test]
+fn a_loopback_http_jwks_url_opens_with_a_warning() {
+    for url in [
+        "http://127.0.0.1:8080/jwks",
+        "http://127.9.8.7/jwks",
+        "http://[::1]:9443/jwks",
+        "http://localhost:1/jwks",
+        "http://LOCALHOST./jwks",
+        "http://idp.localhost/jwks",
+    ] {
+        let settings = serde_json::json!({
+            "issuer": "https://issuer.invalid.example",
+            "audience": "api://busbar-client",
+            "jwks_url": url,
+        })
+        .to_string();
+        let cap = busbar_contract::testkit::WarnCapture::default();
+        let opened = tracing::subscriber::with_default(cap.clone(), || module(&settings));
+        assert!(opened.is_ok(), "a loopback http jwks_url must open: {url}");
+        let logged = cap.messages().join("\n");
+        assert!(logged.contains("jwks_url"), "{url}: {logged:?}");
+        assert!(logged.contains("loopback"), "{url}: {logged:?}");
+        assert!(logged.contains("https"), "{url}: {logged:?}");
+    }
+    // An https jwks_url opens with no warning at all.
+    let cap = busbar_contract::testkit::WarnCapture::default();
+    let opened = tracing::subscriber::with_default(cap.clone(), || {
+        module(
+            r#"{"issuer":"https://issuer.invalid.example","audience":"api://busbar-client",
+                "jwks_url":"https://127.0.0.1/keys"}"#,
+        )
+    });
+    assert!(opened.is_ok());
+    assert!(cap.messages().is_empty(), "{:?}", cap.messages());
+}
+
+/// Plain http to any host that is not loopback is refused at open, naming `jwks_url` and saying
+/// why: a private address, a public name, a name that only starts like loopback, and a userinfo
+/// that dresses a remote host as 127.0.0.1 are all remote hosts.
+#[test]
+fn a_non_loopback_http_jwks_url_is_refused_at_open_with_the_reason() {
+    for url in [
+        "http://10.0.0.7/keys",
+        "http://192.168.1.2/keys",
+        "http://idp.example/keys",
+        "http://127.0.0.1.evil.example/keys",
+        "http://localhost.evil.example/keys",
+        "http://127.0.0.1@evil.example/keys",
+        "http://[::ffff:7f00:1]/keys",
+    ] {
+        let settings = serde_json::json!({
+            "issuer": "https://issuer.invalid.example",
+            "audience": "api://busbar-client",
+            "jwks_url": url,
+        })
+        .to_string();
+        let err = expect_err(module(&settings));
+        assert!(err.contains("jwks_url"), "{url}: {err}");
+        assert!(err.contains("https"), "{url}: {err}");
+        assert!(err.contains("loopback"), "{url}: {err}");
+    }
+}
+
 #[test]
 fn an_explicit_http_jwks_url_is_refused_at_open() {
     // OIDC-5 (owner-approved 2026-09-30): every request is https-only, so an http `jwks_url` would
@@ -202,4 +270,31 @@ fn a_failed_login_discovery_fails_begin_login_with_its_cause() {
         "the cause is named: {err}"
     );
     assert_eq!(idp.calls(), 1);
+}
+
+/// A mistyped settings value is refused WITHOUT echoing the value: serde's own text quotes it
+/// (`invalid type: string "..."`), and this error reaches `--validate` output and logs. The key a
+/// missing or unknown field names is kept (it comes from the schema or is a key, not a value).
+#[test]
+fn a_mistyped_settings_value_is_refused_without_echoing_it() {
+    let err = expect_err(module(
+        r#"{"issuer":"https://i.test","audience":"a","jwks_ttl_secs":"Zq7distinctiveValue"}"#,
+    ));
+    assert!(err.contains("invalid oidc plugin config"), "got: {err}");
+    assert!(
+        !err.contains("Zq7distinctiveValue"),
+        "the value is echoed: {err}"
+    );
+    assert!(err.contains("line 1"), "where it failed is kept: {err}");
+
+    let err = expect_err(module(r#"{"audience":"a"}"#));
+    assert!(
+        err.contains("missing field `issuer`"),
+        "the missing key is named: {err}"
+    );
+    let err = expect_err(module(r#"{"issuer":"i","audience":"a","isuer":"x"}"#));
+    assert!(
+        err.contains("unknown field `isuer`"),
+        "the unknown key is named: {err}"
+    );
 }

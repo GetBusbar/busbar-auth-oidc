@@ -16,12 +16,11 @@ on:
 
 permissions:
   contents: read
-  issues: write
   actions: read
 
 jobs:
   consumer:
-    uses: GetBusbar/busbar/.github/workflows/plugin-consumer-verify.yml@4aadbe5ec4d49d24caf1da663e1d6455cef328ec
+    uses: GetBusbar/busbar/.github/workflows/plugin-consumer-verify.yml@71b70e487bebe5ae2feb1fabf32d8906edf4ccad
     with:
       version: ${{ inputs.version || '' }}
       asset_prefix: busbar-auth-oidc
@@ -30,4 +29,3 @@ jobs:
       plugin_kind: auth
       bundle_image: ""
       bundle_env: ""
-    secrets: inherit

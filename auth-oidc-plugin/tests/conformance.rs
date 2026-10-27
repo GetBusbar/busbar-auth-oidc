@@ -67,8 +67,8 @@ use busbar_plugin_loader::dispatch::{now_ns, out_head, Frame, LoadError};
 use busbar_plugin_loader::sign::{sign, Manifest, SigningKey, TrustPolicy};
 use busbar_plugin_loader::PluginRegistry;
 use support::{
-    bind, bind_as, identity_buf, open, row, verify_bytes, verify_in, verify_ticketless, z, Arm,
-    Bound, Idp, Issuer, DISCOVERY_PATH, ISSUER, UNUSED_ISSUER,
+    bind, bind_as, identity_buf, open, row, verify_in, verify_ticketless, verify_ticketless_raw, z,
+    Arm, Bound, Idp, Issuer, DISCOVERY_PATH, ISSUER, UNUSED_ISSUER,
 };
 
 /// The module's registry name and alias (what an operator's `identity-providers:` names).
@@ -648,6 +648,65 @@ fn cold_verifies(staggered: bool) {
     assert_eq!(idp.sent_to("/keys").len(), 1, "{seen}");
 }
 
+/// THE BODY CAP IS ENFORCED WHILE READING: a discovery reply far past the 1 MiB cap is refused in
+/// 1.5.5's words, and the plugin stopped reading at the cap rather than buffering the SDK's
+/// 16 MiB reply ceiling first (1.5.5 read at most cap + 1 bytes).
+#[test]
+fn red_an_oversized_reply_is_cut_off_at_the_cap_not_buffered_whole() {
+    let _one = support::serial();
+    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let token = key.sign(&claims(AUDIENCE));
+    let idp = Idp::new(&key);
+    let huge = "x".repeat(4 * 1024 * 1024);
+    idp.answer(DISCOVERY_PATH, 200, &huge);
+    let b = bind(&Arm::Linked, &idp);
+    open(&b.plugin, &config(AUDIENCE), None).expect("opens");
+
+    let refused = b.verify(Some(&token), None);
+    let url = format!("https://idp.conformance.example{DISCOVERY_PATH}");
+    assert_eq!(
+        refused,
+        format!(
+            "Failed OIDC discovery fetch failed ({url}): {url} JWKS body exceeds the 1048576-byte \
+             cap; set jwks_url explicitly"
+        )
+    );
+    assert!(
+        idp.served() < 2 * 1024 * 1024,
+        "the plugin read {} bytes of a reply capped at 1 MiB",
+        idp.served()
+    );
+}
+
+/// THE STATUS IS JUDGED BEFORE THE BODY, as 1.5.5 judged it: a non-2xx discovery reply with a body
+/// far past the cap is refused naming its status, and is still cut off at the cap while reading.
+#[test]
+fn red_an_oversized_error_reply_names_its_status_and_is_cut_off_at_the_cap() {
+    let _one = support::serial();
+    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let token = key.sign(&claims(AUDIENCE));
+    let idp = Idp::new(&key);
+    let huge = "x".repeat(4 * 1024 * 1024);
+    idp.answer(DISCOVERY_PATH, 500, &huge);
+    let b = bind(&Arm::Linked, &idp);
+    open(&b.plugin, &config(AUDIENCE), None).expect("opens");
+
+    let refused = b.verify(Some(&token), None);
+    let url = format!("https://idp.conformance.example{DISCOVERY_PATH}");
+    assert_eq!(
+        refused,
+        format!(
+            "Failed OIDC discovery fetch failed ({url}): {url} returned HTTP 500 Internal Server \
+             Error; set jwks_url explicitly"
+        )
+    );
+    assert!(
+        idp.served() < 2 * 1024 * 1024,
+        "the plugin read {} bytes of a reply capped at 1 MiB",
+        idp.served()
+    );
+}
+
 /// THE LOGIN WHOSE KEY SET CANNOT BE HAD, through the real dispatcher (ARCHITECT ruling: 1.5.5's
 /// answer). The token endpoint answers an identity token, but the key set's URL is to be
 /// discovered and the issuer's discovery answers 503: the door answers `LOGIN_BAD_CREDENTIAL`
@@ -897,13 +956,14 @@ fn red_the_statement_declares_six_outbound_http_needs_in_their_classes() {
     assert_eq!(packed.as_deref(), Some(&row.statement[..]));
 }
 
-/// A CREDENTIAL THAT IS NOT TEXT IS NO JWT, AND STILL A WHOLE ANSWER (THE DESIGN §6, "Auth points
-/// and guest lists": every auth called names its credential lines; App. A.3): READY PASS with the
-/// decision CONTINUE and the credential line named for the transport to strip. RED before the fix:
-/// READY PASS with no decision and no strip name, which the host's check turns into FAULT.
+/// A BEARER THAT IS NOT UTF-8 IS NOT THIS MODULE'S CREDENTIAL, ANSWERED AS ONE (Q128 auth-oidc
+/// MEDIUM, reader r61 on 7b84416; THE DESIGN §6 "Auth points and guest lists": every auth called
+/// names its credential lines whatever its verdict): PASS with the chain's CONTINUE decision and the
+/// credential line named for the transport to strip, as 1.5.5 passed a header that did not read as
+/// text (no bearer for this module). RED before the fix: PASS with no decision and no strip name,
+/// which the host faults.
 #[test]
-fn a_credential_that_is_not_text_passes_with_its_line_named() {
-    let _one = support::serial();
+fn a_bearer_that_is_not_utf8_passes_with_a_decision_and_its_line_named() {
     let key = Issuer::start(UNUSED_ISSUER, KID);
     let lib = cdylib();
     let stated = row().statement;
@@ -917,12 +977,59 @@ fn a_credential_that_is_not_text_passes_with_its_line_named() {
         let idp = Idp::new(&key);
         let b = bind(&arm, &idp);
         open(&b.plugin, &config(AUDIENCE), None).expect("opens");
-        let (outcome, verdict, decision, strips) = verify_bytes(&b.plugin, &[0xff, 0xfe, b'x']);
-        assert_eq!(outcome, Outcome::Ready);
+        let (verdict, decision, strips) =
+            verify_ticketless_raw(&b.plugin, b"eyJ\xff\xfe.not-text").expect("answered at once");
         assert_eq!(verdict, busbar_contract::abi::auth::VERDICT_PASS);
         assert_eq!(decision, busbar_contract::abi::auth::DECISION_CONTINUE);
-        assert_eq!(strips, 1, "the credential line is named");
+        assert!(strips >= 1, "the credential line is named for stripping");
+        assert!(idp.sent().is_empty(), "nothing is fetched for it");
     }
+}
+
+/// AN IDENTITY CARRIES THE CREDENTIAL IT WAS VERIFIED FROM (Q128 auth-oidc LOW, reader r81 on
+/// 59293c0; THE DESIGN §6 "Auth points and guest lists", step 4; `IdentityOut::credential`): the
+/// kernel holds it on the unit for the `caller-credential` style. RED before the fix: the span was
+/// absent.
+#[test]
+fn an_identity_carries_the_credential_it_was_verified_from() {
+    let _one = support::serial();
+    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let token = key.sign(&claims(AUDIENCE));
+    let idp = Idp::new(&key);
+    let b = bind(&Arm::Linked, &idp);
+    open(&b.plugin, &config(AUDIENCE), None).expect("opens");
+    let (mut bytes, mut groups) = (
+        vec![0_u8; IDENTITY_BUF_BYTES],
+        vec![z::<Span>(); IDENTITY_GROUPS as usize],
+    );
+    let ticket = b.dispatcher.mint(0).expect("a ticket");
+    let mut out: IdentifyOut = z();
+    out.head = out_head();
+    let done = b
+        .dispatcher
+        .submit(
+            &b.plugin,
+            ticket,
+            slot::VERIFY,
+            Frame::new(
+                verify_in(Some(&token), identity_buf(&mut bytes, &mut groups)),
+                out,
+            ),
+            busbar_contract::abi::mechanism::call::DeadlineClass::Call,
+            now_ns() + 20_000_000_000,
+        )
+        .wait(Duration::from_secs(30))
+        .expect("the op completes");
+    b.dispatcher.recycle(ticket);
+    assert_eq!(done.outcome, Outcome::Ready, "{:?}", done.error);
+    let out = done.frame.expect("the frame").out;
+    assert_eq!(out.verdict, 1, "identified");
+    let held = out.identity.credential;
+    assert_eq!(
+        &bytes[held.offset as usize..(held.offset as usize + held.len as usize)],
+        token.as_bytes(),
+        "the verified credential rides the identity"
+    );
 }
 
 /// ONE CLOCK (THE DESIGN §1): a token's expiry is judged at the request's own timestamp, the

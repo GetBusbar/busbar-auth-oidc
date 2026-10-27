@@ -170,6 +170,8 @@ pub struct Idp {
     reads: Mutex<HashMap<u64, Reply>>,
     next: AtomicU64,
     pended: AtomicU32,
+    /// Reply body bytes handed to the plugin so far, over every request.
+    served: AtomicU64,
     delay: Mutex<Duration>,
 }
 
@@ -187,6 +189,7 @@ impl Idp {
             reads: Mutex::new(HashMap::new()),
             next: AtomicU64::new(1),
             pended: AtomicU32::new(0),
+            served: AtomicU64::new(0),
             delay: Mutex::new(Duration::from_millis(5)),
         });
         let doc = serde_json::json!({
@@ -232,6 +235,11 @@ impl Idp {
     /// How many reads answered PENDING.
     pub fn pended(&self) -> u32 {
         self.pended.load(Ordering::SeqCst)
+    }
+
+    /// How many reply body bytes the plugin has read from this IdP.
+    pub fn served(&self) -> u64 {
+        self.served.load(Ordering::SeqCst)
     }
 
     /// Every need the loader declared, as it declared it, sorted.
@@ -343,6 +351,7 @@ impl Conns for Idp {
                 let n = (r.body.len() - r.at).min(buf.len());
                 buf[..n].copy_from_slice(&r.body[r.at..r.at + n]);
                 r.at += n;
+                self.served.fetch_add(n as u64, Ordering::SeqCst);
                 Ok(piece(PieceKind::Body, n))
             }
             _ => Ok(piece(PieceKind::Completion, 0)),
@@ -644,21 +653,21 @@ impl Bound {
         }
     }
 
-    /// `verify` of `credential` with the request's facts stating `timestamp` (unix seconds).
-    pub fn verify_at(&self, credential: Option<&str>, timestamp: u64) -> String {
-        self.identify(
-            slot::VERIFY,
-            |out_buf| verify_in_at(credential, out_buf, timestamp),
-            (IDENTITY_BUF_BYTES, IDENTITY_GROUPS),
-        )
-    }
-
     /// `verify` of `credential` (none = none presented), with the host's starting buffers or `cap`.
     pub fn verify(&self, credential: Option<&str>, cap: Option<(usize, u32)>) -> String {
         self.identify(
             slot::VERIFY,
             |out_buf| verify_in(credential, out_buf),
             cap.unwrap_or((IDENTITY_BUF_BYTES, IDENTITY_GROUPS)),
+        )
+    }
+
+    /// `verify` of `credential` with the request's facts stating `timestamp` (unix seconds).
+    pub fn verify_at(&self, credential: Option<&str>, timestamp: u64) -> String {
+        self.identify(
+            slot::VERIFY,
+            |out_buf| verify_in_at(credential, out_buf, timestamp),
+            (IDENTITY_BUF_BYTES, IDENTITY_GROUPS),
         )
     }
 
@@ -772,23 +781,24 @@ pub fn verify_ticketless(p: &Plugin<Auth>, credential: Option<&str>) -> String {
     }
 }
 
-/// A ticket-less `verify` of the raw credential bytes `credential` (any bytes, text or not): the
-/// outcome, the verdict, the decision and how many strip names the answer wrote.
-pub fn verify_bytes(p: &Plugin<Auth>, credential: &[u8]) -> (Outcome, u32, u32, u32) {
+/// A `verify` of the raw `credential` bytes made with NO ticket: `(verdict, decision, strip_len)`,
+/// or the outcome when it is not READY.
+pub fn verify_ticketless_raw(
+    p: &Plugin<Auth>,
+    credential: &[u8],
+) -> Result<(u32, u32, u32), Outcome> {
     let (mut bytes, mut groups) = (
         vec![0_u8; IDENTITY_BUF_BYTES],
         vec![z::<Span>(); IDENTITY_GROUPS as usize],
     );
-    let mut i = verify_in(None, identity_buf(&mut bytes, &mut groups));
-    i.credential = blob(credential, BLOB_OCTETS);
     let mut out: IdentifyOut = z();
     out.head = out_head();
+    let mut i = verify_in(None, identity_buf(&mut bytes, &mut groups));
+    i.credential = blob(credential, BLOB_OCTETS);
     let mut f = Frame::new(i, out);
     let called = p.call(slot::VERIFY, &mut f);
-    (
-        called.outcome,
-        f.out.verdict,
-        f.out.decision,
-        f.out.strip_len,
-    )
+    match called.outcome {
+        Outcome::Ready => Ok((f.out.verdict, f.out.decision, f.out.strip_len)),
+        other => Err(other),
+    }
 }
