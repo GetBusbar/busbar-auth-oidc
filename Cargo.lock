@@ -152,16 +152,19 @@ dependencies = [
 [[package]]
 name = "busbar-contract"
 version = "1.6.0"
-source = "git+https://www.github.com/GetBusbar/busbar?rev=71b70e487bebe5ae2feb1fabf32d8906edf4ccad#71b70e487bebe5ae2feb1fabf32d8906edf4ccad"
+source = "git+https://www.github.com/GetBusbar/busbar?rev=63fff7fe08d365cb3e930ab298cce10fd14e77dd#63fff7fe08d365cb3e930ab298cce10fd14e77dd"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
  "futures",
+ "getrandom 0.3.4",
  "hex",
  "http",
  "idna",
  "indexmap",
  "memchr",
+ "num-bigint",
+ "ring",
  "serde",
  "serde_json",
  "serde_yaml_ng",
@@ -176,8 +179,9 @@ dependencies = [
 [[package]]
 name = "busbar-plugin-loader"
 version = "1.5.0"
-source = "git+https://github.com/GetBusbar/busbar?rev=71b70e487bebe5ae2feb1fabf32d8906edf4ccad#71b70e487bebe5ae2feb1fabf32d8906edf4ccad"
+source = "git+https://github.com/GetBusbar/busbar?rev=63fff7fe08d365cb3e930ab298cce10fd14e77dd#63fff7fe08d365cb3e930ab298cce10fd14e77dd"
 dependencies = [
+ "base64 0.22.1",
  "busbar-contract",
  "ed25519-dalek",
  "flate2",
