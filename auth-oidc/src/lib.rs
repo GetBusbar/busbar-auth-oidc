@@ -492,18 +492,10 @@ impl OidcModule {
     /// # Errors
     /// The discovery error, or a document with no `jwks_uri`.
     pub fn jwks_url(&self, now: Instant, io: &mut dyn Fetch) -> Step<Result<String, String>> {
-        if let Some(url) = &self.cfg.jwks_url {
-            return Step::Ready(Ok(url.clone()));
-        }
-        let doc = step_ok!(self.discovery.document(&self.cfg, now, io));
-        Step::Ready(
-            doc.get("jwks_uri")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-                .ok_or_else(|| {
-                    "OIDC discovery document has no 'jwks_uri'; set jwks_url explicitly".to_string()
-                }),
-        )
+        let url = step_ok!(self.endpoint(self.cfg.jwks_url.as_ref(), "jwks_uri", now, io));
+        Step::Ready(url.ok_or_else(|| {
+            "OIDC discovery document has no 'jwks_uri'; set jwks_url explicitly".to_string()
+        }))
     }
 
     /// THE HOST'S `ready` (after `open`, before any listener binds; boot awaits it): BOOT-TIME
@@ -957,23 +949,15 @@ pub(crate) fn now_unix() -> i64 {
     clock_or_fail_closed(t)
 }
 
-/// The fail-closed mapping [`now_unix`] applies to a clock reading: a sane reading passes through,
-/// anything below [`CLOCK_SANITY_FLOOR_UNIX`] becomes `i64::MAX`. Pure, so the mapping itself is
-/// testable (`now_unix` reads the real host clock).
+/// The fail-closed mapping [`now_unix`] applies to a clock reading: a reading at or above
+/// [`CLOCK_SANITY_FLOOR_UNIX`] passes through, anything below becomes `i64::MAX`. Pure, so the mapping
+/// is testable (`now_unix` reads the real host clock).
 fn clock_or_fail_closed(t: i64) -> i64 {
-    if is_clock_sane(t) {
+    if t >= CLOCK_SANITY_FLOOR_UNIX {
         t
     } else {
         i64::MAX
     }
-}
-
-/// Whether a UNIX timestamp reading is within the range this module considers a trustworthy clock
-/// (see [`CLOCK_SANITY_FLOOR_UNIX`]). Pulled out of [`now_unix`] as a pure, parameterized function
-/// purely for testability: `now_unix` itself reads the real host clock and cannot be driven with an
-/// injected boundary value from a test.
-fn is_clock_sane(t: i64) -> bool {
-    t >= CLOCK_SANITY_FLOOR_UNIX
 }
 
 /// The `map_err` for a `serde_json` decode whose INPUT may carry a value that must not be echoed: the
