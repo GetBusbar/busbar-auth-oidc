@@ -74,11 +74,6 @@ const ISSUER_PATH: &str = "settings.issuer";
 /// The setting every need's extra trusted root comes from.
 const CA_CERT_PATH: &str = "settings.ca_cert_pem";
 
-const ABSENT: AbiStr = AbiStr {
-    ptr: std::ptr::null(),
-    len: 0,
-};
-
 /// The egress class of every need: `operator-infrastructure` (ARCHITECT ruling 2026-10-09). 1.5.5
 /// accepted a plaintext token endpoint on a PRIVATE host, not only on loopback (`auth/token.rs`
 /// `vet_hop_url`), which `open-web` (secure only) and `loopback-allowed` (plaintext to loopback
@@ -98,7 +93,7 @@ const fn need(target_from: AbiStr, trust_from: AbiStr) -> Need {
         direction: DIRECTION_OUTBOUND,
         egress_class: EGRESS_CLASS,
         transport: abi_str("http"),
-        auth: ABSENT,
+        auth: AbiStr::ABSENT,
         target_from,
         trust_from,
         details: Blob::ABSENT,
@@ -118,11 +113,11 @@ const fn need(target_from: AbiStr, trust_from: AbiStr) -> Need {
 /// discovered).
 pub const NEEDS: &[Need] = &[
     need(abi_str(ISSUER_PATH), abi_str(CA_CERT_PATH)),
-    need(ABSENT, abi_str(CA_CERT_PATH)),
-    need(ABSENT, abi_str(CA_CERT_PATH)),
-    need(abi_str(ISSUER_PATH), ABSENT),
-    need(ABSENT, ABSENT),
-    need(ABSENT, ABSENT),
+    need(AbiStr::ABSENT, abi_str(CA_CERT_PATH)),
+    need(AbiStr::ABSENT, abi_str(CA_CERT_PATH)),
+    need(abi_str(ISSUER_PATH), AbiStr::ABSENT),
+    need(AbiStr::ABSENT, AbiStr::ABSENT),
+    need(AbiStr::ABSENT, AbiStr::ABSENT),
 ];
 
 /// The need index `need` (an anchored-set index) goes out on: itself for a module that trusts an

@@ -69,6 +69,7 @@ pub struct JwksCache {
     inner: Mutex<Inner>,
 }
 
+#[derive(Default)]
 struct Inner {
     /// The current key set, behind an `Arc` so callers snapshot it and verify with no lock held.
     keys: Option<Arc<JwkSet>>,
@@ -90,13 +91,7 @@ impl JwksCache {
             min_refetch_interval,
             ttl,
             max_stale,
-            inner: Mutex::new(Inner {
-                keys: None,
-                fetched_at: None,
-                last_attempt: None,
-                flight: None,
-                waiters: Vec::new(),
-            }),
+            inner: Mutex::default(),
         }
     }
 
@@ -120,14 +115,7 @@ impl JwksCache {
         let mine = self.lock().flight.filter(|(fl, _)| fl.mine(io.caller()));
         let (keys, now) = match mine {
             Some((flight, point)) => {
-                let fetched = match io.get(Doc::Jwks, url) {
-                    Poll::Pending => return Step::Pending,
-                    Poll::Ready(r) => r,
-                };
-                let keys = match self.settle(io, url, flight.at, fetched) {
-                    Ok(keys) => keys,
-                    Err(e) => return Step::Ready(Err(e)),
-                };
+                let keys = step_ok!(self.land(io, url, flight.at));
                 if point == Point::Rotation {
                     return Step::Ready(Self::after_rotation(keys.as_deref(), kid, &f));
                 }
@@ -181,11 +169,8 @@ impl JwksCache {
     pub fn warm(&self, url: &str, now: Instant, io: &mut dyn Fetch) -> Step<Result<(), String>> {
         let mine = self.lock().flight.filter(|(fl, _)| fl.mine(io.caller()));
         if let Some((flight, _)) = mine {
-            let fetched = match io.get(Doc::Jwks, url) {
-                Poll::Pending => return Step::Pending,
-                Poll::Ready(r) => r,
-            };
-            return Step::Ready(self.settle(io, url, flight.at, fetched).map(|_| ()));
+            let _ = step_ok!(self.land(io, url, flight.at));
+            return Step::Ready(Ok(()));
         }
         let (keys, _, expired) = self.snapshot(now);
         if keys.is_some() && !expired {
@@ -209,11 +194,8 @@ impl JwksCache {
     ) -> Step<Result<(), String>> {
         let mine = self.lock().flight.filter(|(fl, _)| fl.mine(io.caller()));
         if let Some((flight, _)) = mine {
-            let fetched = match io.get(Doc::Jwks, url) {
-                Poll::Pending => return Step::Pending,
-                Poll::Ready(r) => r,
-            };
-            return Step::Ready(self.settle(io, url, flight.at, fetched).map(|_| ()));
+            let _ = step_ok!(self.land(io, url, flight.at));
+            return Step::Ready(Ok(()));
         }
         if !self.due(now, lead) {
             return Step::Ready(Ok(()));
@@ -346,9 +328,19 @@ impl JwksCache {
             inner.flight = Some((Flight { owner, at: now }, point));
         }
         // THE FETCH — no lock held.
+        self.land(io, url, now)
+    }
+
+    /// Drive this caller's JWKS fetch one step: PENDING until the host answers, then settle it.
+    fn land(
+        &self,
+        io: &mut dyn Fetch,
+        url: &str,
+        at: Instant,
+    ) -> Step<Result<Option<Arc<JwkSet>>, String>> {
         match io.get(Doc::Jwks, url) {
             Poll::Pending => Step::Pending,
-            Poll::Ready(fetched) => Step::Ready(self.settle(io, url, now, fetched)),
+            Poll::Ready(fetched) => Step::Ready(self.settle(io, url, at, fetched)),
         }
     }
 

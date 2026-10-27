@@ -84,16 +84,8 @@ const REWRITES: &[Rewrite] = &[Rewrite {
     class: REWRITE_ALIAS,
     _reserved: 0,
     from: abi_str("oidc"),
-    to: AbiStr {
-        ptr: std::ptr::null(),
-        len: 0,
-    },
+    to: AbiStr::ABSENT,
 }];
-
-const ABSENT_STR: AbiStr = AbiStr {
-    ptr: std::ptr::null(),
-    len: 0,
-};
 
 /// The metric families `refresh`'s envelope indexes into: the verdict cache's flush count
 /// (`abi::auth`: "an auth plugin that caches verdicts declares a counter family of this name (no
@@ -101,7 +93,7 @@ const ABSENT_STR: AbiStr = AbiStr {
 const FAMILIES: &[MetricFamily] = &[MetricFamily {
     name: abi_str(METRIC_CACHE_FLUSHED),
     help: abi_str("inbound verdict cache entries dropped by refresh"),
-    unit: ABSENT_STR,
+    unit: AbiStr::ABSENT,
     label_keys: std::ptr::null(),
     label_keys_len: 0,
     kind: FAMILY_COUNTER,
