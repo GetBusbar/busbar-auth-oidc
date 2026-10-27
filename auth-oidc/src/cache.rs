@@ -29,6 +29,9 @@
 //! Bounding the rotation path alone is not enough: because `fetched_at` advances only on success, an
 //! unreachable IdP would leave the set permanently TTL-stale and every single request would issue its
 //! own fresh GET — an unbounded fetch storm against the provider.
+//! The one exception: a caller with nothing to serve may take over a flight abandoned past
+//! [`crate::flight::FLIGHT_MAX`] (its op was cancelled before it settled), which made no attempt
+//! the window can stand for; that is bounded at one fetch per `FLIGHT_MAX`.
 
 use crate::fetch::{Doc, Fetch};
 use crate::flight::{Flight, Step};
@@ -66,6 +69,7 @@ pub struct JwksCache {
     inner: Mutex<Inner>,
 }
 
+#[derive(Default)]
 struct Inner {
     /// The current key set, behind an `Arc` so callers snapshot it and verify with no lock held.
     keys: Option<Arc<JwkSet>>,
@@ -87,13 +91,7 @@ impl JwksCache {
             min_refetch_interval,
             ttl,
             max_stale,
-            inner: Mutex::new(Inner {
-                keys: None,
-                fetched_at: None,
-                last_attempt: None,
-                flight: None,
-                waiters: Vec::new(),
-            }),
+            inner: Mutex::default(),
         }
     }
 
@@ -117,14 +115,7 @@ impl JwksCache {
         let mine = self.lock().flight.filter(|(fl, _)| fl.mine(io.caller()));
         let (keys, now) = match mine {
             Some((flight, point)) => {
-                let fetched = match io.get(Doc::Jwks, url) {
-                    Poll::Pending => return Step::Pending,
-                    Poll::Ready(r) => r,
-                };
-                let keys = match self.settle(io, url, flight.at, fetched) {
-                    Ok(keys) => keys,
-                    Err(e) => return Step::Ready(Err(e)),
-                };
+                let keys = step_ok!(self.land(io, url, flight.at));
                 if point == Point::Rotation {
                     return Step::Ready(Self::after_rotation(keys.as_deref(), kid, &f));
                 }
@@ -178,11 +169,8 @@ impl JwksCache {
     pub fn warm(&self, url: &str, now: Instant, io: &mut dyn Fetch) -> Step<Result<(), String>> {
         let mine = self.lock().flight.filter(|(fl, _)| fl.mine(io.caller()));
         if let Some((flight, _)) = mine {
-            let fetched = match io.get(Doc::Jwks, url) {
-                Poll::Pending => return Step::Pending,
-                Poll::Ready(r) => r,
-            };
-            return Step::Ready(self.settle(io, url, flight.at, fetched).map(|_| ()));
+            let _ = step_ok!(self.land(io, url, flight.at));
+            return Step::Ready(Ok(()));
         }
         let (keys, _, expired) = self.snapshot(now);
         if keys.is_some() && !expired {
@@ -206,11 +194,8 @@ impl JwksCache {
     ) -> Step<Result<(), String>> {
         let mine = self.lock().flight.filter(|(fl, _)| fl.mine(io.caller()));
         if let Some((flight, _)) = mine {
-            let fetched = match io.get(Doc::Jwks, url) {
-                Poll::Pending => return Step::Pending,
-                Poll::Ready(r) => r,
-            };
-            return Step::Ready(self.settle(io, url, flight.at, fetched).map(|_| ()));
+            let _ = step_ok!(self.land(io, url, flight.at));
+            return Step::Ready(Ok(()));
         }
         if !self.due(now, lead) {
             return Step::Ready(Ok(()));
@@ -244,7 +229,8 @@ impl JwksCache {
         // newline or a terminal escape must not forge or colour log records. Printable kids are
         // byte-identical.
         Err(format!(
-            "no JWKS key matches the token's kid '{}' (after a bounded rotation refetch); the \
+            "no JWKS key matches the token's kid '{}' (a rotation refetch is bounded by \
+             jwks_min_refetch_secs, so the key set may not have been refetched for this token); the \
              signing key is unknown to the configured jwks_url",
             kid.escape_debug()
         ))
@@ -325,8 +311,10 @@ impl JwksCache {
                 return Step::Wait;
             }
             // Re-check the rate limit for the desperate caller: the fetch it would have waited for
-            // has already been made, and re-fetching immediately would defeat the bound.
-            if !self.permits_attempt(&inner, now) {
+            // has already been made, and re-fetching immediately would defeat the bound. A flight
+            // past FLIGHT_MAX was abandoned without settling, so it made no attempt this window can
+            // stand for; taking it over is bounded by FLIGHT_MAX.
+            if inner.flight.is_none() && !self.permits_attempt(&inner, now) {
                 return Step::Ready(self.serve_within_ceiling(&inner, url, now));
             }
             // A call on no ticket may not pend, so it may not claim a fetch either: it would hold
@@ -340,9 +328,19 @@ impl JwksCache {
             inner.flight = Some((Flight { owner, at: now }, point));
         }
         // THE FETCH — no lock held.
+        self.land(io, url, now)
+    }
+
+    /// Drive this caller's JWKS fetch one step: PENDING until the host answers, then settle it.
+    fn land(
+        &self,
+        io: &mut dyn Fetch,
+        url: &str,
+        at: Instant,
+    ) -> Step<Result<Option<Arc<JwkSet>>, String>> {
         match io.get(Doc::Jwks, url) {
             Poll::Pending => Step::Pending,
-            Poll::Ready(fetched) => Step::Ready(self.settle(io, url, now, fetched)),
+            Poll::Ready(fetched) => Step::Ready(self.settle(io, url, at, fetched)),
         }
     }
 
@@ -365,6 +363,7 @@ impl JwksCache {
         }
         let waiters = std::mem::take(&mut inner.waiters);
         let mut kept_through: Option<String> = None;
+        let mut nothing_kept: Option<String> = None;
         let settled = match fetched {
             // A late answer to a flight another caller has since taken over never replaces keys
             // fetched after it was claimed.
@@ -381,7 +380,10 @@ impl JwksCache {
                         kept_through = Some(e);
                         Ok(Some(keys))
                     }
-                    _ => Err(e),
+                    _ => {
+                        nothing_kept = Some(e.clone());
+                        Err(e)
+                    }
                 }
             }
         };
@@ -396,6 +398,16 @@ impl JwksCache {
                 url = %url,
                 error = %e,
                 "JWKS refresh failed; serving the previous key set"
+            );
+        }
+        if let Some(e) = nothing_kept {
+            // Nothing to fall back to, so the error goes to the caller; `warm` and `refresh_ahead`
+            // discard it, which would leave a cold-cache failure unlogged.
+            tracing::warn!(
+                module = "oidc",
+                url = %url,
+                error = %e,
+                "JWKS fetch failed; no key set to serve"
             );
         }
         // The waiters re-enter on this wake, after the cache is settled: the keys are in, or the

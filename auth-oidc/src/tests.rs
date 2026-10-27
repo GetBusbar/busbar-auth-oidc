@@ -129,7 +129,7 @@ impl Module {
         ))
         .expect("no discovery")
         {
-            Some(hop) => LoginOutcome::Exchange(hop),
+            Some(hop) => LoginOutcome::Exchange(LoginHop::clone(&hop)),
             None => LoginOutcome::Reject,
         }
     }
@@ -1202,25 +1202,6 @@ fn now_unix_fails_closed_below_the_sanity_floor() {
     assert!(err.contains("expired"), "got: {err}");
 }
 
-/// Boundary-tests the pure comparison [`is_clock_sane`] was extracted from `now_unix` for (see its
-/// doc comment): `now_unix` itself reads the real host clock and cannot be driven with an injected
-/// value, so the floor comparison is only directly testable once pulled out.
-#[test]
-fn is_clock_sane_boundary() {
-    assert!(
-        !is_clock_sane(CLOCK_SANITY_FLOOR_UNIX - 1),
-        "one second below the floor must be considered insane"
-    );
-    assert!(
-        is_clock_sane(CLOCK_SANITY_FLOOR_UNIX),
-        "exactly at the floor must be considered sane (the floor itself is a trustworthy reading)"
-    );
-    assert!(
-        is_clock_sane(CLOCK_SANITY_FLOOR_UNIX + 1),
-        "above the floor must be considered sane"
-    );
-}
-
 /// The fail-closed MAPPING `now_unix` applies (OIDC-13): below the floor the reading becomes
 /// `i64::MAX` (every token then fails `exp`), at or above it the reading passes through. Pinning
 /// the mapping, not just the comparison, is what catches a `now_unix` that returns the raw reading.
@@ -1512,10 +1493,6 @@ fn identity_from_token_response_verifies_id_token() {
     ));
 }
 
-/// OIDC-1 (OIDC Core 1.0 §3.1.3.7 step 3): the browser-login `id_token`'s `aud` must contain
-/// the OAuth `client_id`, not the bearer `audience`. With `audience` "api://x" and `client_id`
-/// "cid", an id_token for "cid" identifies and one for "api://x" is refused; the bearer path still
-/// checks `audience`.
 /// A KEY SET THAT CANNOT BE HAD AT LOGIN is a declined login, as in 1.5.5 (ARCHITECT ruling: v1.0.6
 /// `identity_from_token_response` answered `Reject` for a key set it could not fetch; v1.5.5
 /// `auth/token.rs:543-549` rendered that 401 "Sign-in was declined", 502 being only for a token
@@ -1564,6 +1541,10 @@ fn a_key_set_that_cannot_be_had_at_login_is_a_declined_login_as_in_1_5_5() {
     }
 }
 
+/// OIDC-1 (OIDC Core 1.0 §3.1.3.7 step 3): the browser-login `id_token`'s `aud` must contain
+/// the OAuth `client_id`, not the bearer `audience`. With `audience` "api://x" and `client_id`
+/// "cid", an id_token for "cid" identifies and one for "api://x" is refused; the bearer path still
+/// checks `audience`.
 #[test]
 fn login_id_token_audience_is_the_client_id_not_the_bearer_audience() {
     let key = TestKey::generate(KID);
@@ -2006,4 +1987,180 @@ fn an_id_token_binds_only_to_the_logins_nonce() {
         "n-1"
     ));
     assert!(!nonce_binds(&body("garbage".to_string()), "n-1"));
+}
+
+/// Every refusal of the browser login's token response is explained in the plugin's log, by status
+/// or by kind, and never with the body.
+#[test]
+fn a_refused_token_response_is_logged_with_its_reason() {
+    let m = OidcModule::new(&cfg("groups"));
+    let idp = Idp::new(String::new());
+    let now = 1_700_000_000;
+    for (status, body, reason) in [
+        (400, r#"{"error":"invalid_grant"}"#, "status=400"),
+        (200, "not-json-SECRETBODY", "not JSON"),
+        (200, r#"{"access_token":"x"}"#, "carries no id_token"),
+    ] {
+        let response = LoginHttpResponse {
+            status,
+            body: body.to_string(),
+        };
+        let cap = busbar_contract::testkit::WarnCapture::capturing_debug();
+        let outcome = tracing::subscriber::with_default(cap.clone(), || {
+            ready(m.identity_from_token_response(
+                &response,
+                now,
+                Instant::now(),
+                &mut idp.at_once(Some(ME)),
+            ))
+        });
+        assert!(matches!(outcome, Ok(LoginOutcome::Reject)));
+        let logged = cap.messages().join("\n");
+        assert!(logged.contains(reason), "{reason}: not logged: {logged:?}");
+        assert!(
+            !logged.contains("SECRETBODY"),
+            "the body leaked: {logged:?}"
+        );
+    }
+}
+
+/// A callback that cannot be exchanged says why in the plugin's log.
+#[test]
+fn a_refused_token_exchange_is_logged_with_its_reason() {
+    let mut c = cfg("groups");
+    c.token_endpoint = Some("https://idp.test/token".to_string());
+    let idp = Idp::new(String::new());
+    let run = |m: &OidcModule, code: Option<&str>| {
+        let cap = busbar_contract::testkit::WarnCapture::capturing_debug();
+        let out = tracing::subscriber::with_default(cap.clone(), || {
+            ready(m.token_exchange(
+                code,
+                Some("https://busbar.test/cb"),
+                None,
+                Instant::now(),
+                &mut idp.at_once(Some(ME)),
+            ))
+        });
+        assert!(matches!(out, Ok(None)));
+        cap.messages().join("\n")
+    };
+    let logged = run(&OidcModule::new(&c), None);
+    assert!(
+        logged.contains("code") && logged.contains("code_verifier"),
+        "absent fields are named: {logged:?}"
+    );
+    let mut none = cfg("groups");
+    none.jwks_url = None;
+    none.token_endpoint = None;
+    idp.set_body(serde_json::json!({ "issuer": ISSUER }).to_string());
+    let mut io = idp.at_once(Some(ME));
+    let cap = busbar_contract::testkit::WarnCapture::default();
+    let out = tracing::subscriber::with_default(cap.clone(), || {
+        ready(OidcModule::new(&none).token_exchange(
+            Some("c"),
+            Some("r"),
+            Some("v"),
+            Instant::now(),
+            &mut io,
+        ))
+    });
+    assert!(matches!(out, Ok(None)));
+    assert!(
+        cap.contains("names none"),
+        "no endpoint is explained: {:?}",
+        cap.messages()
+    );
+}
+
+/// The host clock's sentinel is refused outright, even by a token whose `exp` saturates, and the
+/// refusal names the clock.
+#[test]
+fn the_clock_sentinel_is_refused_even_for_an_exp_at_i64_max() {
+    let mut c = base_claims(0);
+    c["exp"] = serde_json::json!(i64::MAX);
+    let err = verifier("groups")
+        .validate_claims(&c, i64::MAX)
+        .expect_err("a broken clock must never verify a token");
+    assert!(err.contains("host clock"), "names the clock: {err}");
+}
+
+/// The constant-time fold zips, so it truncates to the shorter side: only the length check stops a
+/// prefix nonce from binding. A shorter, a longer and an empty claim must all fail to bind.
+#[test]
+fn an_id_token_nonce_of_a_different_length_does_not_bind() {
+    let token = |nonce: &str| {
+        let part = |v: &serde_json::Value| URL_SAFE_NO_PAD.encode(serde_json::to_vec(v).unwrap());
+        format!(
+            "{}.{}.sig",
+            part(&serde_json::json!({ "alg": "ES256" })),
+            part(&serde_json::json!({ "nonce": nonce }))
+        )
+    };
+    let body = |nonce: &str| serde_json::json!({ "id_token": token(nonce) }).to_string();
+    // The claim is a strict prefix of the login's nonce.
+    assert!(!nonce_binds(&body("n-1"), "n-1-and-more"));
+    // The login's nonce is a strict prefix of the claim.
+    assert!(!nonce_binds(&body("n-1-and-more"), "n-1"));
+    // An empty claim against a non-empty nonce.
+    assert!(!nonce_binds(&body(""), "n-1"));
+    // The same nonce still binds.
+    assert!(nonce_binds(&body("n-1"), "n-1"));
+}
+
+/// END-USER DECLINES LOG AT INFO, operator-actionable conditions at WARN (the fleet's levels, as
+/// busbar-auth-github logs them): the IdP refusing the user's code (a 4xx such as invalid_grant)
+/// and a callback lacking its code are the user's, so they are recorded below warn; an IdP 5xx is
+/// the operator's and stays at warn.
+#[test]
+fn an_end_user_decline_logs_at_info_and_an_idp_failure_at_warn() {
+    let mut c = cfg("groups");
+    c.token_endpoint = Some("https://idp.test/token".to_string());
+    let m = OidcModule::new(&c);
+    let idp = Idp::new(String::new());
+    let refused = |status: u16| {
+        let response = LoginHttpResponse {
+            status,
+            body: r#"{"error":"invalid_grant"}"#.to_string(),
+        };
+        let (warn, all) = (
+            busbar_contract::testkit::WarnCapture::default(),
+            busbar_contract::testkit::WarnCapture::capturing_debug(),
+        );
+        for cap in [&warn, &all] {
+            tracing::subscriber::with_default(cap.clone(), || {
+                ready(m.identity_from_token_response(
+                    &response,
+                    1_700_000_000,
+                    Instant::now(),
+                    &mut idp.at_once(Some(ME)),
+                ))
+            })
+            .expect("a verdict");
+        }
+        (warn.contains("non-2xx"), all.contains("non-2xx"))
+    };
+    assert_eq!(refused(400), (false, true), "a 4xx is the user's: info");
+    assert_eq!(refused(503), (true, true), "a 5xx is the IdP's: warn");
+
+    let (warn, all) = (
+        busbar_contract::testkit::WarnCapture::default(),
+        busbar_contract::testkit::WarnCapture::capturing_debug(),
+    );
+    for cap in [&warn, &all] {
+        tracing::subscriber::with_default(cap.clone(), || {
+            ready(m.token_exchange(
+                None,
+                Some("https://busbar.test/cb"),
+                Some("v"),
+                Instant::now(),
+                &mut idp.at_once(Some(ME)),
+            ))
+        })
+        .expect("no discovery");
+    }
+    assert!(
+        !warn.contains("lacks fields"),
+        "a bare callback is the user's: info"
+    );
+    assert!(all.contains("lacks fields"), "and it is still recorded");
 }
