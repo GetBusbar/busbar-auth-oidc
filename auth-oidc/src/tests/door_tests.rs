@@ -104,19 +104,27 @@ fn refresh_drops_the_verdict_cache_and_reports_its_count() {
     assert_eq!(refreshed.counted, flushed(1.0));
 }
 
-/// `validate` HOLDS `jwks_url` TO HTTPS AS `open` DOES (Q128 auth-oidc LOW, reader r82 on 59293c0):
-/// a config `--validate` accepts is one boot opens. RED before the fix: validate parsed the config
-/// and skipped the https check `open` applies.
+/// `validate` ANSWERS AS `open` DOES (Q128 auth-oidc LOW, reader r82 on 59293c0): a plain http
+/// `jwks_url` on a remote host, which a 1.5.5 config carried and boot opens with a warning
+/// (owner 2026-10-20), validates; one that is not a URL at all is refused by both.
 #[test]
-fn validate_refuses_a_plaintext_jwks_url_as_open_does() {
+fn validate_answers_a_jwks_url_as_open_does() {
     let plaintext = serde_json::json!({
         "issuer": ISSUER,
         "audience": AUDIENCE,
         "jwks_url": "http://jwks.test/keys",
     })
     .to_string();
-    let refused = <Oidc as Life>::validate(plaintext.as_bytes());
-    assert!(refused.is_err(), "validate accepted what open refuses");
+    assert!(<Oidc as Life>::validate(plaintext.as_bytes()).is_ok());
+    assert!(Oidc::open(plaintext.as_bytes(), &lent(b""), 1).is_ok());
+    let other = serde_json::json!({
+        "issuer": ISSUER,
+        "audience": AUDIENCE,
+        "jwks_url": "ftp://jwks.test/keys",
+    })
+    .to_string();
+    assert!(<Oidc as Life>::validate(other.as_bytes()).is_err());
+    assert!(Oidc::open(other.as_bytes(), &lent(b""), 1).is_err());
     assert!(<Oidc as Life>::validate(&settings()).is_ok());
 }
 

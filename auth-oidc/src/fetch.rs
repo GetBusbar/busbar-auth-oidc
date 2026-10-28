@@ -1,24 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! THE MODULE'S WAY OUT, THROUGH THE HOST (THE DESIGN 5, Connections: "No plugin opens a socket,
-//! dials, binds or does TLS"; OWNER LAW 2026-09-27: the reqwest users move onto kernel
-//! transports). The module states three outbound needs ([`NEEDS`]) and makes every request as ONE
+//! The module's way out, through the host (no plugin opens a socket, dials, binds or does TLS).
+//! The module states three outbound needs ([`NEEDS`]) and makes every request as ONE
 //! framed `exchange()` over the host's connector ([`HostIo`]): the issuer's discovery document, the
 //! JWKS, and the login's code-for-token POST. Each answers PENDING while it is in flight and is
 //! re-asked when the op re-enters on its wake (the replay rule, `abi::sdk::conn`).
 //!
-//! Every need is `operator-infrastructure` (ARCHITECT ruling 2026-10-09; the class the oauth
-//! plugin's mint needs take): private and loopback destinations allowed, plaintext allowed by the
-//! class, cloud metadata refused, the destination guard applying. The module narrows the scheme to
-//! exactly what 1.5.5 accepted ([`plaintext_allowed`]): discovery and the JWKS https only (1.5.5's
-//! `https_only` fetcher); the token exchange https, or plaintext to a private or loopback host only
-//! (1.5.5 `auth/token.rs` `vet_hop_url`: a public host must use https). Every need rides the `http`
+//! Every need is `operator-infrastructure` (the class the oauth plugin's mint needs take): private
+//! and loopback destinations allowed, plaintext allowed by the class, cloud metadata refused, the
+//! destination guard applying. The module narrows the scheme ([`plaintext_allowed`]): discovery and
+//! the JWKS https only; the token exchange https, or plaintext to a private or loopback host only (a
+//! public host must use https). Every need rides the `http`
 //! transport, its connections secured by the target's `https` scheme (the connector's TLS). The
 //! discovery need is pinned to the `issuer` setting's target (`target_from`); the JWKS and token
 //! endpoints may be discovered, so the module names them per request.
 //!
-//! `ca_cert_pem` is OPTIONAL, as it was in 1.5.5 (an extra root on top of the public ones, never a
+//! `ca_cert_pem` is OPTIONAL (an extra root on top of the public ones, never a
 //! replacement). The host's connector refuses a need whose `trust_from` resolves to nothing, so
 //! the three needs are stated twice: the ANCHORED set trusts `ca_cert_pem` (`trust_from`), the
 //! PUBLIC set trusts the public roots only. A module whose settings name a `ca_cert_pem` goes out
@@ -26,9 +24,9 @@
 //! never asked for a connection (the anchored set of a module with no `ca_cert_pem` is refused at
 //! declaration, and stays unused).
 //!
-//! What the module reads back keeps 1.5.5's words: [`document`] (a non-2xx GET, the 1 MiB cap, a
-//! body that is not UTF-8) and [`failed`] (a request that never got an answer, the connector's own
-//! text after 1.5.5's prefix).
+//! What the module reads back: [`document`] (a non-2xx GET, the 1 MiB cap, a body that is not
+//! UTF-8) and [`failed`] (a request that never got an answer, the connector's own text after a
+//! fixed prefix).
 
 use std::fmt::Display;
 use std::task::Poll;
@@ -55,7 +53,7 @@ use zeroize::Zeroizing;
 /// discovery document.
 pub const MAX_JWKS_BYTES: usize = 1024 * 1024;
 
-/// The bound on one request, milliseconds: 1.5.5's 10s fetch timeout. Generous enough for a cold
+/// The bound on one request, milliseconds: 10s. Generous enough for a cold
 /// DNS + TLS handshake to a public IdP, short enough that a hung endpoint cannot hold an op.
 pub const FETCH_TIMEOUT_MS: u64 = 10_000;
 
@@ -74,15 +72,12 @@ const ISSUER_PATH: &str = "settings.issuer";
 /// The setting every need's extra trusted root comes from.
 const CA_CERT_PATH: &str = "settings.ca_cert_pem";
 
-/// The egress class of every need: `operator-infrastructure` (ARCHITECT ruling 2026-10-09). 1.5.5
-/// accepted a plaintext token endpoint on a PRIVATE host, not only on loopback (`auth/token.rs`
-/// `vet_hop_url`), which `open-web` (secure only) and `loopback-allowed` (plaintext to loopback
-/// only) would both refuse at the connector. The discovery and JWKS fetches are 1.5.5's too: the
-/// v1.0.6 module (shipped with 1.5.5) fetched both through a plain client with no address guard
-/// (`auth-oidc/src/reqwest_fetcher.rs`, `reqwest::blocking::Client::builder()`), and its
-/// `ca_cert_pem` setting exists for an on-prem IdP on an internal host (an internal-CA Keycloak,
-/// `auth-oidc/src/lib.rs` `ca_cert_pem`), so an IdP on a private address, a discovered `jwks_uri`
-/// among them, is served as 1.5.5 served it. The guarded `open-web` class would refuse it.
+/// The egress class of every need: `operator-infrastructure`. A plaintext token endpoint on a
+/// PRIVATE host, not only on loopback, is accepted, which `open-web` (secure only) and
+/// `loopback-allowed` (plaintext to loopback only) would both refuse at the connector. The discovery
+/// and JWKS fetches need it too: the `ca_cert_pem` setting exists for an on-prem IdP on an internal
+/// host (an internal-CA Keycloak), so an IdP on a private address, a discovered `jwks_uri` among
+/// them, must be served. The guarded `open-web` class would refuse it.
 pub const EGRESS_CLASS: u32 = EGRESS_OPERATOR_INFRASTRUCTURE;
 
 /// One outbound need over the `http` transport (the scheme the http framer claims) in
@@ -156,27 +151,27 @@ pub trait Fetch {
     /// no ticket, which may not pend, so may neither fetch nor wait.
     fn caller(&self) -> Option<Ticket>;
 
-    /// GET `doc` at `url`: the body of a 2xx answer, or 1.5.5's error text ([`document`],
+    /// GET `doc` at `url`: the body of a 2xx answer, or the error text ([`document`],
     /// [`failed`]).
     fn get(&mut self, doc: Doc, url: &str) -> Poll<Result<String, String>>;
 
     /// A request to `url` this op would have to make, or wait on, but cannot: it runs on no ticket
-    /// and may not pend. Answers the error the op reports (1.5.5's prefix, then why); a host-backed
+    /// and may not pend. Answers the error the op reports (the prefix, then why); a host-backed
     /// `Fetch` also notes that the op asked for I/O it could not wait on, so an answer reached
     /// without it is not the op's verdict ([`HostIo::wanted_io`]).
     fn cannot_pend(&mut self, url: &str) -> String {
         failed(url, ConnFailure::NoTicket)
     }
 
-    /// WAKE the ops `waiters` names: they answered PENDING waiting on a fetch this caller made,
-    /// which has now landed (THE DESIGN, auth: "one `exchange()` fetches, every waiter wakes"). A
+    /// Wake the ops `waiters` names: they answered PENDING waiting on a fetch this caller made,
+    /// which has now landed (one `exchange()` fetches, every waiter wakes). A
     /// host-backed `Fetch` wakes each ticket through the host; the default wakes nothing.
     fn wake(&self, waiters: &[Ticket]) {
         let _ = waiters;
     }
 
-    /// THE LOGIN TOKEN EXCHANGE, made by the plugin itself (THE DESIGN 6.7: an IdP login holds its
-    /// own client secret and makes its own token exchange): `hop` sent as a form ([`form`]). The
+    /// The login token exchange, made by the plugin itself (an IdP login holds its own client
+    /// secret and makes its own token exchange): `hop` sent as a form ([`form`]). The
     /// answer is the status and the body, whatever the status; a request that got no answer is
     /// `Err`.
     fn post(
@@ -186,26 +181,25 @@ pub trait Fetch {
     ) -> Poll<Result<LoginHttpResponse, String>>;
 }
 
-/// Whether a request on `need` may go to `url` in plaintext, as 1.5.5 judged it: never for
-/// discovery or the JWKS (1.5.5's fetcher was `https_only`); for the token exchange only when the
-/// URL's host is private or loopback (1.5.5 `auth/token.rs` `vet_hop_url`: "https for public hosts;
-/// http only for loopback/private (a local/on-prem IdP)"), read by the same host reader 1.5.5 used.
+/// Whether a request on `need` may go to `url` in plaintext: never for discovery or the JWKS; for
+/// the token exchange only when the URL's host is private or loopback (https for public hosts; http
+/// only for loopback/private, a local/on-prem IdP).
 pub fn plaintext_allowed(need: u32, url: &str) -> bool {
     need == NEED_TOKEN
         && scheme_is(url, "http")
         && extract_normalized_host(url).is_some_and(|h| host_is_private_or_loopback(&h))
 }
 
-/// A request to `url` that got no answer: 1.5.5's prefix, then why.
+/// A request to `url` that got no answer: a fixed prefix, then why.
 pub fn failed(url: &str, why: impl Display) -> String {
     format!("request to {url} failed: {why}")
 }
 
 /// A GET's answer as the document it carries: a non-2xx status is refused naming the status as
-/// 1.5.5's client printed it (`404 Not Found`), then the body is [`capped`].
+/// the HTTP client prints it (`404 Not Found`), then the body is [`capped`].
 ///
 /// # Errors
-/// 1.5.5's texts: `"{url} returned HTTP {status}"`, or [`capped`]'s.
+/// `"{url} returned HTTP {status}"`, or [`capped`]'s.
 pub fn document(url: &str, status: u16, body: Vec<u8>) -> Result<String, String> {
     if !(200..300).contains(&status) {
         return Err(refused_status(url, status));
@@ -213,14 +207,14 @@ pub fn document(url: &str, status: u16, body: Vec<u8>) -> Result<String, String>
     capped(url, body, MAX_JWKS_BYTES)
 }
 
-/// 1.5.5's text for a non-2xx `status` from `url`.
+/// The text for a non-2xx `status` from `url`.
 fn refused_status(url: &str, status: u16) -> String {
     let shown =
         http::StatusCode::from_u16(status).map_or_else(|_| status.to_string(), |s| s.to_string());
     format!("{url} returned HTTP {shown}")
 }
 
-/// 1.5.5's text for a body past `cap` bytes.
+/// The text for a body past `cap` bytes.
 fn over_cap(url: &str, cap: usize) -> String {
     format!("{url} JWKS body exceeds the {cap}-byte cap")
 }
@@ -228,7 +222,7 @@ fn over_cap(url: &str, cap: usize) -> String {
 /// `body` as text, refusing anything over `cap` bytes or not UTF-8.
 ///
 /// # Errors
-/// 1.5.5's texts: `"{url} JWKS body exceeds the {cap}-byte cap"`, `"{url} JWKS body is not UTF-8"`.
+/// `"{url} JWKS body exceeds the {cap}-byte cap"`, `"{url} JWKS body is not UTF-8"`.
 pub fn capped(url: &str, body: Vec<u8>, cap: usize) -> Result<String, String> {
     if body.len() > cap {
         return Err(over_cap(url, cap));
@@ -236,7 +230,7 @@ pub fn capped(url: &str, body: Vec<u8>, cap: usize) -> Result<String, String> {
     String::from_utf8(body).map_err(|_| format!("{url} JWKS body is not UTF-8"))
 }
 
-/// The form `hop` is sent as, as 1.5.5's core sent it, with `secret` filling the field
+/// The form `hop` is sent as, with `secret` filling the field
 /// `hop.secret_form_field` names. With no secret lent, that field is dropped rather than sent empty
 /// (a public client sends none).
 /// The pairs are wiped on drop: they carry the code, the code_verifier and the lent secret.
@@ -313,7 +307,7 @@ fn head_target(url: &url::Url) -> Vec<u8> {
     .into_bytes()
 }
 
-/// The GET of `url`, as 1.5.5's client sent it.
+/// The GET of `url`.
 pub fn get_request(url: &url::Url) -> Request {
     Request {
         method: b"GET".to_vec(),
@@ -325,7 +319,7 @@ pub fn get_request(url: &url::Url) -> Request {
 }
 
 /// The token exchange `hop` to `url` with `secret`: its method (POST when it names none a request
-/// can carry), the form url-encoded as 1.5.5's client encoded it, then the hop's own fields.
+/// can carry), the form url-encoded, then the hop's own fields.
 pub fn post_request(url: &url::Url, hop: &LoginHop, secret: Option<&str>) -> Request {
     let method = http::Method::from_bytes(hop.method.as_bytes()).unwrap_or(http::Method::POST);
     // The form holds the lent client secret, the code and the code_verifier: its pairs are wiped
@@ -335,8 +329,7 @@ pub fn post_request(url: &url::Url, hop: &LoginHop, secret: Option<&str>) -> Req
     let pairs = form(hop, secret);
     let mut body = form_body(&pairs);
     drop(pairs);
-    // 1.5.5's order: the form's content-type, then the client's `accept` (the oracle's
-    // `egress.auth|login-hop|oidc` cell holds the wire bytes).
+    // Order on the wire: the form's content-type, then the client's `accept`.
     let mut fields = vec![
         (
             b"content-type".to_vec(),
@@ -390,6 +383,21 @@ impl<'h> HostIo<'h> {
         }
     }
 
+    /// The host's wall clock, unix seconds (`clock.now`), the time a
+    /// login's id_token expiry is judged at; a clock the host cannot answer, or one below the
+    /// sanity floor, fails CLOSED (`i64::MAX`), as [`crate::clock_or_fail_closed`] maps any reading.
+    #[must_use]
+    pub fn wall_now(&self) -> i64 {
+        let read = self.host.map(|h| h.connector(self.ticket).clock_now());
+        let secs = match read {
+            Some(Poll::Ready(Ok(r))) => {
+                i64::try_from(r.wall_ns / 1_000_000_000).unwrap_or(i64::MAX)
+            }
+            _ => i64::MAX,
+        };
+        crate::clock_or_fail_closed(secs)
+    }
+
     /// Whether the op asked for a request it could not wait on (it runs on no ticket): whatever it
     /// answered without that request is not its verdict, and the host should ask again on a ticket.
     pub fn wanted_io(&self) -> bool {
@@ -413,7 +421,7 @@ impl<'h> HostIo<'h> {
             Ok(u) => u,
             Err(e) => return Poll::Ready(Err(failed(url, e))),
         };
-        // THE SCHEME, as 1.5.5 judged it ([`plaintext_allowed`]): https, or (the token exchange
+        // The scheme ([`plaintext_allowed`]): https, or (the token exchange
         // only) plaintext to a private or loopback host. The operator-infrastructure class lets
         // plaintext through to any address, so a public host's https is held HERE, before the host
         // is asked and before the secret is in any request.
@@ -445,8 +453,8 @@ impl<'h> HostIo<'h> {
                 self.state.issued = c.issued();
                 Poll::Ready(r.map_err(|e| {
                     match e {
-                        // Cut off at the cap while reading (1.5.5 read at most cap + 1 bytes): its
-                        // words, the status judged before the body for a GET.
+                        // Cut off at the cap while reading (at most cap + 1 bytes): the status is
+                        // judged before the body for a GET.
                         ConnFailure::Failed(why) if why == REPLY_OVER_BOUND => {
                             match ex
                                 .head_status()

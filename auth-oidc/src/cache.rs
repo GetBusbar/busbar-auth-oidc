@@ -5,7 +5,7 @@
 //! absent from the cached set (the provider rotated its signing key), refetch once, rate-limited,
 //! and retry. Guards against a bogus-`kid` flood turning into a fetch storm.
 //!
-//! ## Sans-IO single-flight (THE DESIGN, auth)
+//! ## Sans-IO single-flight
 //!
 //! The cache never blocks and never dials: its fetch is the caller's [`Fetch`], which answers
 //! PENDING while the caller's own exchange is in flight. A cold key id pends `verify`; ONE caller
@@ -111,8 +111,13 @@ impl JwksCache {
         io: &mut dyn Fetch,
         f: impl Fn(&Jwk) -> Result<T, String>,
     ) -> Step<Result<T, String>> {
-        // RESUME: this caller's own fetch, then on from the point it claimed it.
-        let mine = self.lock().flight.filter(|(fl, _)| fl.mine(io.caller()));
+        // RESUME: this caller's own fetch, then on from the point it claimed it. One lock reads
+        // both the flight and the snapshot.
+        let (mine, snapshot) = {
+            let inner = self.lock();
+            let mine = inner.flight.filter(|(fl, _)| fl.mine(io.caller()));
+            (mine, self.snapshot_of(&inner, now))
+        };
         let (keys, now) = match mine {
             Some((flight, point)) => {
                 let keys = step_ok!(self.land(io, url, flight.at));
@@ -122,7 +127,7 @@ impl JwksCache {
                 (keys, flight.at)
             }
             None => {
-                let (mut keys, stale, expired) = self.snapshot(now);
+                let (mut keys, stale, expired) = snapshot;
                 // Past the absolute staleness ceiling: treat exactly like a cold cache. `settle`
                 // itself refuses to fall back to these same keys once they are this old, so forcing
                 // the "nothing to serve" path here — rather than trying `keys` first — means an
@@ -258,12 +263,16 @@ impl JwksCache {
     /// Snapshot the cached set, whether it is past TTL, and whether it is past the absolute staleness
     /// ceiling (`max_stale`). Holds the lock for an `Arc` clone.
     fn snapshot(&self, now: Instant) -> (Option<Arc<JwkSet>>, bool, bool) {
-        let inner = self.lock();
+        self.snapshot_of(&self.lock(), now)
+    }
+
+    /// [`Self::snapshot`] under a lock the caller holds.
+    fn snapshot_of(&self, inner: &Inner, now: Instant) -> (Option<Arc<JwkSet>>, bool, bool) {
         let stale = match inner.fetched_at {
             None => true,
             Some(t) => now.saturating_duration_since(t) >= self.ttl,
         };
-        (inner.keys.clone(), stale, self.past_ceiling(&inner, now))
+        (inner.keys.clone(), stale, self.past_ceiling(inner, now))
     }
 
     /// Bring the cache up to date if the rate limit allows, and answer the current key set.

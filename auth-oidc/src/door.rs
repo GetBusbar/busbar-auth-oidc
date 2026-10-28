@@ -62,7 +62,7 @@ use zeroize::Zeroizing;
 use crate::fetch::{Fetch, HostIo, IoState, NEEDS};
 use crate::flight::FLIGHT_MAX;
 use crate::open::{config, module};
-use crate::{now_unix, OidcModule, Step};
+use crate::{OidcModule, Step};
 
 /// The plugin's name: the manifest name its release packs it under.
 pub const NAME: &str = "busbar-auth-oidc";
@@ -209,7 +209,7 @@ impl Opened {
         Step::Ready(
             match step!(self
                 .module
-                .identity_from_token_response(response, now_unix(), now, io))
+                .identity_from_token_response(response, io.wall_now(), now, io))
             {
                 Ok(LoginOutcome::Identify(p)) => Login::Identity(p),
                 Ok(_) => Login::Bad,
@@ -317,7 +317,7 @@ impl Life for Oidc {
 
     fn validate(settings: &[u8]) -> Result<(), Refusal> {
         // The checks `open` makes of the settings alone, so a config `--validate` accepts is one
-        // boot opens: parsed, and an explicit `jwks_url` held to https (or loopback http).
+        // boot opens: parsed, and an explicit `jwks_url` https or http.
         config(text(settings)?)
             .and_then(|c| crate::check_jwks_url(&c).map(drop))
             .map_err(Refusal::failed)
@@ -407,12 +407,16 @@ impl Drop for Parked {
     }
 }
 
-/// The op's requests on its ticket, resumed from what it parked.
-fn resume<'h>(instance: &Instance<'_, Held<Oidc>>, h: &'h Held<Oidc>) -> (HostIo<'h>, Parked) {
+/// The op's requests on its ticket, resumed from what it parked, for the `opened` module.
+fn resume<'h>(
+    instance: &Instance<'_, Held<Oidc>>,
+    h: &'h Held<Oidc>,
+    opened: &Opened,
+) -> (HostIo<'h>, Parked) {
     let mut parked = instance
         .resume::<Parked>()
         .map_or_else(Parked::default, |p| *p);
-    let anchored = h.life().now().module.anchored();
+    let anchored = opened.module.anchored();
     let io = HostIo::new(
         h.host(),
         instance.ticket(),
@@ -601,12 +605,27 @@ impl SafeSlot for Verify {
             Some(Ok(token)) => Some(token),
             None => None,
         };
+        // ONE CLOCK (THE DESIGN §1): expiry is judged at the request's own timestamp, the host's
+        // clock as it arrived; a request stating none (`0`) fails closed.
+        let timestamp = input.field(|i| &i.request).timestamp;
+        let request_now = crate::clock_or_fail_closed(i64::try_from(timestamp).unwrap_or(i64::MAX));
         let ticketless = instance.ticket().is_none();
-        let (mut io, parked) = resume(&instance, h);
         let opened = h.life().now();
+        let (mut io, parked) = resume(&instance, h, &opened);
+        // A HIT is answered from the cached identity itself, with no copy of it.
+        if let Some(p) = token.and_then(|t| opened.module.cached(t, request_now)) {
+            return answer(
+                Some(&*p),
+                token.map(str::as_bytes),
+                Some((input.strip(), DECISION_CONTINUE)),
+                input.field(|i| &i.out_buf),
+                &mut out,
+                VERDICT_IDENTITY,
+            );
+        }
         let verdict = match opened
             .module
-            .verify(token, now_unix(), Instant::now(), &mut io)
+            .judge(token, request_now, Instant::now(), &mut io)
         {
             // ON THE SPOT (no ticket): a verify that needs a fetch, or waits on another call's, may
             // not pend, so it answers REFUSED and the host makes it again on a ticket
@@ -676,8 +695,8 @@ impl SafeSlot for Begin {
             nonce: str_text(input.field(|i| &i.nonce)).map(str::to_string),
             scopes: Vec::new(),
         };
-        let (mut io, parked) = resume(&instance, h);
         let opened = h.life().now();
+        let (mut io, parked) = resume(&instance, h, &opened);
         match opened.module.begin_login(&begin, Instant::now(), &mut io) {
             Step::Ready(Ok(LoginOutcome::Authorize(url))) => {
                 out.set(|o| &o.shape, BEGIN_AUTHORIZE);
@@ -722,8 +741,9 @@ impl SafeSlot for Complete {
         let principal = match kept {
             Some(r) => r.principal,
             None => {
-                let (mut io, mut parked) = resume(&instance, h);
-                let login = oidc.now().login(
+                let opened = oidc.now();
+                let (mut io, mut parked) = resume(&instance, h, &opened);
+                let login = opened.login(
                     code,
                     str_text(input.field(|i| &i.redirect_uri)),
                     blob_text(input.field(|i| &i.code_verifier)),
