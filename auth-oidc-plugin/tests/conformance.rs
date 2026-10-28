@@ -349,9 +349,9 @@ fn the_linked_and_the_dropped_in_oidc_module_are_one_module() {
         "invalid_grant is a bad credential: {text}"
     );
     assert_eq!(
-        a[14], "verdict 2 ",
-        "an IdP 5xx is a declined login, as 1.5.5 answered it (its module read a non-2xx token \
-         response as a rejection): {text}"
+        a[14], "verdict 3 ",
+        "an IdP 5xx is an outage (LOGIN_OUTAGE; the host answers 503, retryable), never a declined \
+         login (ruling 2026-10-27; 1.5.5 declined it): {text}"
     );
     assert_eq!(
         a[15], "verdict 4 ",
