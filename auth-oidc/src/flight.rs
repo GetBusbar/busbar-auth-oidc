@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! SINGLE-FLIGHT, SANS-IO (THE DESIGN, auth: "JWKS fetching is sans-IO single-flight: a cold key id
-//! pends verify, one `exchange()` fetches, every waiter wakes"). The module never blocks and never
+//! Single-flight, sans-IO (a cold key id pends verify, one `exchange()` fetches, every waiter
+//! wakes). The module never blocks and never
 //! dials: a read that needs the IdP answers [`Step::Pending`] while the caller's own exchange is in
 //! flight, or [`Step::Wait`] while ANOTHER caller's is, and the op re-enters (on its wake, or on its
 //! timer) and asks again. [`Flight`] is who is fetching, and since when.
@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use busbar_contract::abi::mechanism::ticket::Ticket;
 
-/// How long one fetch may hold its flight before another caller takes it over: 1.5.5's bound on a
+/// How long one fetch may hold its flight before another caller takes it over: the bound on a
 /// discovery or JWKS fetch (connect + total). An op whose exchange outlived it was cancelled or
 /// faulted, and never settles its flight.
 pub const FLIGHT_MAX: Duration = Duration::from_secs(10);

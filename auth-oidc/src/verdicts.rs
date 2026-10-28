@@ -1,21 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! THE INBOUND VERDICT CACHE, the plugin's own (owner ruling Q-INCACHE, `abi::auth`: "THE CACHE
-//! LIVES IN THE PLUGIN ... the kernel keeps no verdict cache"). 1.5.5's engine credential cache
-//! (`crates/busbar/src/auth_cache.rs` at v1.5.5) held every OIDC identity it verified, so a repeat
-//! bearer was answered without a second decode, parse and signature check; this is that cache, moved
-//! into the module with 1.5.5's rules:
+//! The inbound verdict cache, the plugin's own (the kernel keeps no verdict cache). It holds every
+//! OIDC identity verified, so a repeat bearer is answered without a second decode, parse and
+//! signature check:
 //!
 //! - key = SHA-256 of the credential bytes (the credential itself is never stored); one instance is
-//!   one provider, so the provider half of 1.5.5's `(provider, hash)` key is the instance;
+//!   one provider, so the provider half of the `(provider, hash)` key is the instance;
 //! - an identity is held for its own `ttl_secs` (the token's remaining life, at most 300 s:
 //!   [`crate::OidcVerifier::validate_claims`]), absent = 300 s, never past 3600 s;
 //! - a REJECT is never cached, and neither is a PASS (`abi::auth`: Pass buffering is the kernel's);
 //! - at most 4096 entries: at capacity the expired ones go, then the oldest-inserted;
 //! - [`VerdictCache::flush`] drops everything and answers how many it held: the admin flush's
-//!   `{"flushed": N}`, reported on `refresh`. A FLUSH GENERATION ([`VerdictCache::generation`],
-//!   1.5.5's `CacheGeneration`) is captured before a verify judges and handed to
+//!   `{"flushed": N}`, reported on `refresh`. A FLUSH GENERATION ([`VerdictCache::generation`]) is captured before a verify judges and handed to
 //!   [`VerdictCache::put`], which drops the insert when a flush landed in between, so a verdict
 //!   reached before a flush never outlives it.
 
@@ -24,11 +21,11 @@ use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use busbar_contract::auth::Principal;
 
-/// TTL of a cached identity whose module suggested none, seconds (1.5.5 `DEFAULT_IDENTIFY_TTL_SECS`).
+/// TTL of a cached identity whose module suggested none, seconds.
 const DEFAULT_TTL_SECS: u64 = 300;
-/// The ceiling on any identity's cache TTL, seconds (1.5.5 `MAX_IDENTIFY_TTL_SECS`).
+/// The ceiling on any identity's cache TTL, seconds.
 const MAX_TTL_SECS: u64 = 3600;
-/// The most entries held (1.5.5 `MAX_ENTRIES`).
+/// The most entries held.
 pub const MAX_ENTRIES: usize = 4096;
 
 /// A flush generation: the cache's flush counter at one moment.
