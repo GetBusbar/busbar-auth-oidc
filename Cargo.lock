@@ -157,11 +157,14 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "futures",
+ "getrandom 0.3.4",
  "hex",
  "http",
  "idna",
  "indexmap",
  "memchr",
+ "num-bigint",
+ "ring",
  "serde",
  "serde_json",
  "serde_yaml_ng",
@@ -178,6 +181,7 @@ name = "busbar-plugin-loader"
 version = "1.5.0"
 source = "git+https://github.com/GetBusbar/busbar?rev=9f29c70fb0914c700c44bef77f77646d1cb110e9#9f29c70fb0914c700c44bef77f77646d1cb110e9"
 dependencies = [
+ "base64 0.22.1",
  "busbar-contract",
  "ed25519-dalek",
  "flate2",
