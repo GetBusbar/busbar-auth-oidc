@@ -253,3 +253,39 @@ fn a_blank_issuer_or_audience_is_refused_naming_the_key() {
         assert!(text.contains(key), "open names `{key}`: {text}");
     }
 }
+
+/// RED (BIND-AUDIT): a plain http `jwks_url` raises the diagnostic the Statement declares,
+/// `OIDC_JWKS_PLAIN_HTTP`, at warn, in the very words `open` logs, so the host audits the loaded
+/// but flagged instance on the plugin's behalf (`plugin.open`, `degraded`). An https one raises
+/// nothing, and a `refresh` to https stops raising it.
+#[test]
+fn a_plain_http_jwks_url_raises_its_declared_diagnostic() {
+    let plain = serde_json::json!({
+        "issuer": ISSUER,
+        "audience": AUDIENCE,
+        "jwks_url": "http://127.0.0.1:8080/jwks",
+    })
+    .to_string();
+    let oidc = Oidc::open(plain.as_bytes(), &lent(b""), 1).expect("a plain http jwks_url opens");
+    let flag = oidc.flagged().expect("it raises its warning");
+
+    // SAFETY: the Statement's `'static` list of `diag_ids_len` ids.
+    let ids = unsafe { std::slice::from_raw_parts(STATEMENT.diag_ids, STATEMENT.diag_ids_len) };
+    let id = ids[flag.id_idx as usize];
+    // SAFETY: a `'static` id.
+    let id = unsafe { std::slice::from_raw_parts(id.ptr, id.len) };
+    assert_eq!(id, JWKS_PLAIN_HTTP.as_bytes());
+    assert_eq!(
+        flag.severity,
+        busbar_contract::abi::mechanism::call::SEVERITY_WARN
+    );
+    let logged = crate::check_jwks_url(&config(&plain).expect("parses"))
+        .expect("checks")
+        .expect("a warning");
+    assert_eq!(flag.text, logged, "the words the log line says");
+
+    let https = Oidc::open(&settings(), &lent(b""), 1).expect("opens");
+    assert_eq!(https.flagged(), None, "an https jwks_url raises nothing");
+    oidc.refresh(&settings(), &lent(b""), 2).expect("refreshes");
+    assert_eq!(oidc.flagged(), None, "a refresh to https stops raising it");
+}
