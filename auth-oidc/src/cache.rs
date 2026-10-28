@@ -5,7 +5,7 @@
 //! absent from the cached set (the provider rotated its signing key), refetch once, rate-limited,
 //! and retry. Guards against a bogus-`kid` flood turning into a fetch storm.
 //!
-//! ## Sans-IO single-flight (THE DESIGN, auth)
+//! ## Sans-IO single-flight
 //!
 //! The cache never blocks and never dials: its fetch is the caller's [`Fetch`], which answers
 //! PENDING while the caller's own exchange is in flight. A cold key id pends `verify`; ONE caller

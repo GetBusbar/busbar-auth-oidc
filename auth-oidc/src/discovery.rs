@@ -35,7 +35,7 @@ pub fn discovery_url(cfg: &OidcConfig) -> String {
 /// The discovery document `fetched` from `url`, validated against `cfg`'s issuer.
 ///
 /// # Errors
-/// 1.5.5's texts: the fetch failed, the body is not JSON, the document names another issuer (the
+/// The fetch failed, the body is not JSON, the document names another issuer (the
 /// remote value escaped: it is untrusted input an operator reads) or none.
 pub fn check_document(
     cfg: &OidcConfig,
