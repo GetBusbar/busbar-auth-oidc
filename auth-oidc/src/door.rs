@@ -44,7 +44,9 @@ use busbar_contract::abi::auth::{
     LOGIN_IDENTITY, LOGIN_KIND_REDIRECT, LOGIN_OUTAGE, LOGIN_SECURITY_CHECK_FAILED,
     METRIC_CACHE_FLUSHED, SPAN_ABSENT, STRIP_FIELD, VERDICT_IDENTITY, VERDICT_PASS, VERDICT_REJECT,
 };
-use busbar_contract::abi::mechanism::call::{AbiStr, Blob, OutHead, Outcome, Span, BLOB_ABSENT};
+use busbar_contract::abi::mechanism::call::{
+    AbiStr, Blob, OutHead, Outcome, Span, BLOB_ABSENT, SEVERITY_WARN,
+};
 use busbar_contract::abi::mechanism::door::{
     MarkWord, MetricFamily, Rewrite, Statement, FAMILY_COUNTER, REWRITE_ALIAS,
 };
@@ -54,7 +56,7 @@ use busbar_contract::abi::sdk::auth_door::{carrier, verify_tail, with_tail};
 use busbar_contract::abi::sdk::conn::{ConnFailure, Host};
 use busbar_contract::abi::sdk::door::{abi_str, statement, AbiIn, AbiOut};
 use busbar_contract::abi::sdk::lent::HostBuf;
-use busbar_contract::abi::sdk::life::{Counted, Held, Life, Refreshed, Refusal};
+use busbar_contract::abi::sdk::life::{Counted, Flagged, Held, Life, Refreshed, Refusal};
 use busbar_contract::abi::sdk::{Instance, Lent, Out, Safe, SafeSlot};
 use busbar_contract::auth::{AuthVerdict, BeginLogin, LoginHttpResponse, LoginOutcome, Principal};
 use zeroize::Zeroizing;
@@ -74,6 +76,17 @@ const TAIL: AuthTail = AuthTail {
     login_kind: LOGIN_KIND_REDIRECT,
     ..verify_tail(FACT_CACHEABLE, AuthPoints::HEAD)
 };
+
+/// The diagnostic a plain http `jwks_url` raises at `open` and `refresh` ([`crate::check_jwks_url`]):
+/// the host audits it on the plugin's behalf (`plugin.open`, `degraded`). Its words are the
+/// warning `open` logs, unchanged.
+pub const JWKS_PLAIN_HTTP: &str = "OIDC_JWKS_PLAIN_HTTP";
+
+/// The diagnostic ids the Statement declares, in `Diag::id_idx` order.
+pub const DIAG_IDS: [AbiStr; 1] = [abi_str(JWKS_PLAIN_HTTP)];
+
+/// [`JWKS_PLAIN_HTTP`]'s index in [`DIAG_IDS`].
+const JWKS_PLAIN_HTTP_IDX: u32 = 0;
 
 /// The settings key whose value is the confidential-client secret's reference: the kernel
 /// resolves it into `OpenIn::secrets[0]`.
@@ -117,6 +130,8 @@ pub const STATEMENT: Statement = Statement {
     needs_len: NEEDS.len(),
     mark_words: CARRIERS.as_ptr(),
     mark_words_len: CARRIERS.len(),
+    diag_ids: DIAG_IDS.as_ptr(),
+    diag_ids_len: DIAG_IDS.len(),
     ..with_tail(statement(NAME, env!("CARGO_PKG_VERSION"), 64), &TAIL)
 };
 
@@ -141,11 +156,17 @@ struct Opened {
     secret: Option<Zeroizing<String>>,
     /// The settings and secret it was opened with: a `refresh` with the same ones keeps it.
     settings: Vec<u8>,
+    /// The warning its settings raise ([`crate::check_jwks_url`]), in the words `open` logs.
+    flagged: Option<String>,
 }
 
 impl Opened {
     fn new(settings: &[u8], secrets: &[&[u8]]) -> Result<Self, Refusal> {
         let module = module(text(settings)?).map_err(Refusal::failed)?;
+        // `module` opened these settings, so they parse and their `jwks_url` checks.
+        let flagged = config(text(settings)?)
+            .ok()
+            .and_then(|c| crate::check_jwks_url(&c).ok().flatten());
         // An empty lent secret is none (a provider with no `browser_login.client_secret`): the
         // token exchange then sends no secret field, as 1.5.5's core sent none.
         let secret = lent_secret(secrets)
@@ -159,6 +180,7 @@ impl Opened {
             module,
             secret,
             settings: settings.to_vec(),
+            flagged,
         })
     }
 
@@ -386,6 +408,16 @@ impl Life for Oidc {
                 family: CACHE_FAMILY,
                 value: flushed as f64,
             }),
+        })
+    }
+
+    /// A plain http `jwks_url` raises [`JWKS_PLAIN_HTTP`] at warn on the `open` or `refresh` that
+    /// built the running module, in the words its log line says.
+    fn flagged(&self) -> Option<Flagged> {
+        self.now().flagged.clone().map(|text| Flagged {
+            id_idx: JWKS_PLAIN_HTTP_IDX,
+            severity: SEVERITY_WARN,
+            text,
         })
     }
 }
