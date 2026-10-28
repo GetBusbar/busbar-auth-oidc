@@ -153,6 +153,7 @@ impl Module {
 fn resolve_jwks_url(c: &OidcConfig, idp: &Idp) -> Result<String, String> {
     check_jwks_url(c)?;
     ready(OidcModule::new(c).jwks_url(Instant::now(), &mut idp.at_once(Some(ME))))
+        .map(std::borrow::Cow::into_owned)
 }
 
 /// 1.5.5's `resolve_login_endpoints`: explicit ones win, the others discovered.

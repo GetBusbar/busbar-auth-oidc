@@ -20,7 +20,7 @@
 //!   reached before a flush never outlives it.
 
 use std::collections::HashMap;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use busbar_contract::auth::Principal;
 
@@ -39,7 +39,7 @@ struct Entry {
     /// UNIX seconds; served while `expires_at > now`.
     expires_at: i64,
     inserted: u64,
-    principal: Principal,
+    principal: Arc<Principal>,
 }
 
 #[derive(Default)]
@@ -51,10 +51,11 @@ struct State {
     flushes: u64,
 }
 
-/// The cache of identities this module verified.
+/// The cache of identities this module verified. A hit takes the read lock and an `Arc` clone, so
+/// concurrent hits never serialise.
 #[derive(Default)]
 pub struct VerdictCache {
-    state: Mutex<State>,
+    state: RwLock<State>,
 }
 
 fn key(credential: &str) -> [u8; 32] {
@@ -65,30 +66,33 @@ fn key(credential: &str) -> [u8; 32] {
 }
 
 impl VerdictCache {
-    fn lock(&self) -> MutexGuard<'_, State> {
-        self.state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    fn read(&self) -> RwLockReadGuard<'_, State> {
+        self.state.read().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn lock(&self) -> RwLockWriteGuard<'_, State> {
+        self.state.write().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// The current flush generation: capture it BEFORE judging a credential.
     pub fn generation(&self) -> Generation {
-        Generation(self.lock().flushes)
+        Generation(self.read().flushes)
     }
 
     /// The identity cached for `credential` at UNIX second `now`; an expired entry is a miss and
     /// goes.
-    pub fn get(&self, credential: &str, now: i64) -> Option<Principal> {
+    pub fn get(&self, credential: &str, now: i64) -> Option<Arc<Principal>> {
         let k = key(credential);
-        let mut state = self.lock();
-        match state.entries.get(&k) {
-            Some(e) if e.expires_at > now => Some(e.principal.clone()),
-            Some(_) => {
-                state.entries.remove(&k);
-                None
-            }
-            None => None,
+        match self.read().entries.get(&k) {
+            Some(e) if e.expires_at > now => return Some(Arc::clone(&e.principal)),
+            Some(_) => {}
+            None => return None,
         }
+        let mut state = self.lock();
+        if state.entries.get(&k).is_some_and(|e| e.expires_at <= now) {
+            state.entries.remove(&k);
+        }
+        None
     }
 
     /// Hold `principal`, the identity `credential` verified as at UNIX second `now`, unless a flush
@@ -122,7 +126,7 @@ impl VerdictCache {
             Entry {
                 expires_at: now.saturating_add(i64::try_from(ttl).unwrap_or(i64::MAX)),
                 inserted: *seq,
-                principal: principal.clone(),
+                principal: Arc::new(principal.clone()),
             },
         );
     }
