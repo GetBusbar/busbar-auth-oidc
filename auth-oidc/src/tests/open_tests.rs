@@ -114,7 +114,7 @@ fn a_loopback_http_jwks_url_opens_with_a_warning() {
             "jwks_url": url,
         })
         .to_string();
-        let cap = busbar_contract::testkit::WarnCapture::default();
+        let cap = busbar_test_kit::warn_capture::WarnCapture::default();
         let opened = tracing::subscriber::with_default(cap.clone(), || module(&settings));
         assert!(opened.is_ok(), "a loopback http jwks_url must open: {url}");
         let logged = cap.messages().join("\n");
@@ -123,7 +123,7 @@ fn a_loopback_http_jwks_url_opens_with_a_warning() {
         assert!(logged.contains("https"), "{url}: {logged:?}");
     }
     // An https jwks_url opens with no warning at all.
-    let cap = busbar_contract::testkit::WarnCapture::default();
+    let cap = busbar_test_kit::warn_capture::WarnCapture::default();
     let opened = tracing::subscriber::with_default(cap.clone(), || {
         module(
             r#"{"issuer":"https://issuer.invalid.example","audience":"api://busbar-client",
