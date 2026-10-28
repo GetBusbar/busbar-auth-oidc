@@ -37,6 +37,7 @@ use busbar_contract::auth::{
 };
 use serde::Deserialize;
 use serde_json::Value;
+use std::borrow::Cow;
 use std::time::{Duration, Instant};
 
 #[macro_use]
@@ -491,7 +492,7 @@ impl OidcModule {
     ///
     /// # Errors
     /// The discovery error, or a document with no `jwks_uri`.
-    pub fn jwks_url(&self, now: Instant, io: &mut dyn Fetch) -> Step<Result<String, String>> {
+    pub fn jwks_url(&self, now: Instant, io: &mut dyn Fetch) -> Step<Result<Cow<'_, str>, String>> {
         let url = step_ok!(self.endpoint(self.cfg.jwks_url.as_ref(), "jwks_uri", now, io));
         Step::Ready(url.ok_or_else(|| {
             "OIDC discovery document has no 'jwks_uri'; set jwks_url explicitly".to_string()
@@ -519,21 +520,21 @@ impl OidcModule {
     /// The login endpoint `configured`, else the discovery document's `field` (the SAME
     /// issuer-match–guarded document [`Self::jwks_url`] reads); `None` when the document omits it
     /// too (that half of browser login is then unavailable and fails closed).
-    fn endpoint(
-        &self,
-        configured: Option<&String>,
+    fn endpoint<'a>(
+        &'a self,
+        configured: Option<&'a String>,
         field: &str,
         now: Instant,
         io: &mut dyn Fetch,
-    ) -> Step<Result<Option<String>, String>> {
+    ) -> Step<Result<Option<Cow<'a, str>>, String>> {
         if let Some(url) = configured {
-            return Step::Ready(Ok(Some(url.clone())));
+            return Step::Ready(Ok(Some(Cow::Borrowed(url))));
         }
         let doc = step_ok!(self.discovery.document(&self.cfg, now, io));
         Step::Ready(Ok(doc
             .get(field)
             .and_then(Value::as_str)
-            .map(str::to_string)))
+            .map(|s| Cow::Owned(s.to_string()))))
     }
 
     /// The IdP `authorization_endpoint`: configured, or discovered.
@@ -543,7 +544,8 @@ impl OidcModule {
         io: &mut dyn Fetch,
     ) -> Step<Result<Option<String>, String>> {
         let configured = self.cfg.authorization_endpoint.as_ref();
-        self.endpoint(configured, "authorization_endpoint", now, io)
+        let url = step_ok!(self.endpoint(configured, "authorization_endpoint", now, io));
+        Step::Ready(Ok(url.map(Cow::into_owned)))
     }
 
     /// The IdP `token_endpoint`: configured, or discovered.
@@ -553,7 +555,8 @@ impl OidcModule {
         io: &mut dyn Fetch,
     ) -> Step<Result<Option<String>, String>> {
         let configured = self.cfg.token_endpoint.as_ref();
-        self.endpoint(configured, "token_endpoint", now, io)
+        let url = step_ok!(self.endpoint(configured, "token_endpoint", now, io));
+        Step::Ready(Ok(url.map(Cow::into_owned)))
     }
 
     /// Verify a login token-endpoint response into an identity. Parses the token endpoint's JSON,
@@ -656,14 +659,32 @@ impl OidcModule {
         now_mono: Instant,
         io: &mut dyn Fetch,
     ) -> Step<Result<AuthVerdict, String>> {
+        if let Some(principal) = token.and_then(|t| self.cached(t, now_unix)) {
+            return Step::Ready(Ok(AuthVerdict::Identify(Principal::clone(&principal))));
+        }
+        self.judge(token, now_unix, now_mono, io)
+    }
+
+    /// 1.5.5's credential cache: the identity a bearer this module identified within its TTL
+    /// verified as, answered with no decode, parse or signature check and no request.
+    pub fn cached(&self, token: &str, now_unix: i64) -> Option<std::sync::Arc<Principal>> {
+        self.verdicts.get(token, now_unix)
+    }
+
+    /// [`Self::verify`] past its cache: the credential judged, an identity cached.
+    ///
+    /// # Errors
+    /// The JWKS url could not be discovered.
+    pub fn judge(
+        &self,
+        token: Option<&str>,
+        now_unix: i64,
+        now_mono: Instant,
+        io: &mut dyn Fetch,
+    ) -> Step<Result<AuthVerdict, String>> {
         let Some(token) = token else {
             return Step::Ready(Ok(AuthVerdict::Pass));
         };
-        // 1.5.5's credential cache: a bearer this module identified within its TTL is answered
-        // from the cache, with no decode, parse or signature check and no request.
-        if let Some(principal) = self.verdicts.get(token, now_unix) {
-            return Step::Ready(Ok(AuthVerdict::Identify(principal)));
-        }
         let generation = self.verdicts.generation();
         let verdict = step!(self.verify_with(&self.verifier, token, now_unix, now_mono, io));
         if let Ok(AuthVerdict::Identify(principal)) = &verdict {
@@ -688,12 +709,12 @@ impl OidcModule {
             // the mode default) can handle it — a random opaque bearer is not an OIDC failure.
             Err(_) => return Step::Ready(Ok(AuthVerdict::Pass)),
         };
-        let kid = parts.header.kid.clone().unwrap_or_default();
+        let kid = parts.header.kid.as_deref().unwrap_or_default();
         let url = step_ok!(self.jwks_url(now_mono, io));
 
         // Verify the signature against the JWKS key for this kid (fetching / rotation-refetching as
         // needed). A signature or key error is a REJECT — a presented-but-invalid credential.
-        let signed = step!(self.jwks.with_key(&url, &kid, now_mono, io, |key| {
+        let signed = step!(self.jwks.with_key(&url, kid, now_mono, io, |key| {
             jwt::verify_signature(&parts, key)
         }));
         if let Err(e) = signed {

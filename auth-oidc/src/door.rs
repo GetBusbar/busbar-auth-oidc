@@ -407,12 +407,16 @@ impl Drop for Parked {
     }
 }
 
-/// The op's requests on its ticket, resumed from what it parked.
-fn resume<'h>(instance: &Instance<'_, Held<Oidc>>, h: &'h Held<Oidc>) -> (HostIo<'h>, Parked) {
+/// The op's requests on its ticket, resumed from what it parked, for the `opened` module.
+fn resume<'h>(
+    instance: &Instance<'_, Held<Oidc>>,
+    h: &'h Held<Oidc>,
+    opened: &Opened,
+) -> (HostIo<'h>, Parked) {
     let mut parked = instance
         .resume::<Parked>()
         .map_or_else(Parked::default, |p| *p);
-    let anchored = h.life().now().module.anchored();
+    let anchored = opened.module.anchored();
     let io = HostIo::new(
         h.host(),
         instance.ticket(),
@@ -606,11 +610,22 @@ impl SafeSlot for Verify {
         let timestamp = input.field(|i| &i.request).timestamp;
         let request_now = crate::clock_or_fail_closed(i64::try_from(timestamp).unwrap_or(i64::MAX));
         let ticketless = instance.ticket().is_none();
-        let (mut io, parked) = resume(&instance, h);
         let opened = h.life().now();
+        let (mut io, parked) = resume(&instance, h, &opened);
+        // A HIT is answered from the cached identity itself, with no copy of it.
+        if let Some(p) = token.and_then(|t| opened.module.cached(t, request_now)) {
+            return answer(
+                Some(&*p),
+                token.map(str::as_bytes),
+                Some((input.strip(), DECISION_CONTINUE)),
+                input.field(|i| &i.out_buf),
+                &mut out,
+                VERDICT_IDENTITY,
+            );
+        }
         let verdict = match opened
             .module
-            .verify(token, request_now, Instant::now(), &mut io)
+            .judge(token, request_now, Instant::now(), &mut io)
         {
             // ON THE SPOT (no ticket): a verify that needs a fetch, or waits on another call's, may
             // not pend, so it answers REFUSED and the host makes it again on a ticket
@@ -680,8 +695,8 @@ impl SafeSlot for Begin {
             nonce: str_text(input.field(|i| &i.nonce)).map(str::to_string),
             scopes: Vec::new(),
         };
-        let (mut io, parked) = resume(&instance, h);
         let opened = h.life().now();
+        let (mut io, parked) = resume(&instance, h, &opened);
         match opened.module.begin_login(&begin, Instant::now(), &mut io) {
             Step::Ready(Ok(LoginOutcome::Authorize(url))) => {
                 out.set(|o| &o.shape, BEGIN_AUTHORIZE);
@@ -726,8 +741,9 @@ impl SafeSlot for Complete {
         let principal = match kept {
             Some(r) => r.principal,
             None => {
-                let (mut io, mut parked) = resume(&instance, h);
-                let login = oidc.now().login(
+                let opened = oidc.now();
+                let (mut io, mut parked) = resume(&instance, h, &opened);
+                let login = opened.login(
                     code,
                     str_text(input.field(|i| &i.redirect_uri)),
                     blob_text(input.field(|i| &i.code_verifier)),
