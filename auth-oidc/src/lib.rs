@@ -37,6 +37,7 @@ use busbar_contract::auth::{
 };
 use serde::Deserialize;
 use serde_json::Value;
+use std::borrow::Cow;
 use std::time::{Duration, Instant};
 
 #[macro_use]
@@ -66,15 +67,12 @@ const DEFAULT_TTL_SECS: u64 = 3600;
 /// clock drift between busbar and the IdP does not spuriously reject a just-issued / near-expiry token.
 const CLOCK_SKEW_SECS: i64 = 60;
 /// Ceiling on the credential-cache TTL this module suggests via `Principal::ttl_secs`, the TTL its
-/// own verdict cache ([`verdicts`]) holds an identity for. Mirrors 1.5.5's engine
-/// `DEFAULT_IDENTIFY_TTL_SECS` (`auth_cache.rs`) — deliberately NOT its higher
-/// `MAX_IDENTIFY_TTL_SECS` (3600s), which exists to bound a module that gives no opinion at all. This
-/// value must only ever SHORTEN that default, never lengthen it: a token derives its TTL from
-/// its own remaining `exp`, but a standard access token's `exp` is often itself ~3600s out, and
-/// suggesting that as the cache TTL would take the stale-revocation window from "5 minutes today" to
-/// "up to an hour" — trading a small over-cache bug for a much larger one. `min`-ing against this
-/// keeps the module's whole reason for existing (bound the over-cache window) while still shortening
-/// the TTL for a token that expires sooner than this.
+/// own verdict cache ([`verdicts`]) holds an identity for. This is the default cache TTL, and it
+/// must only ever SHORTEN it, never lengthen it: a token derives its TTL from its own remaining
+/// `exp`, but a standard access token's `exp` is often itself ~3600s out, and suggesting that as the
+/// cache TTL would take the stale-revocation window from 5 minutes to up to an hour. `min`-ing
+/// against this bounds the over-cache window while still shortening the TTL for a token that
+/// expires sooner than this.
 const MAX_CACHE_TTL_SECS: i64 = 300;
 /// A host clock reading before this instant means the clock cannot be trusted at all — used to make
 /// `now_unix()` fail CLOSED not just on a sub-epoch clock (`SystemTime::now()` returning `Err`), but
@@ -236,7 +234,7 @@ impl OidcVerifier {
         //
         // `saturating_add`, not `checked_add`/reject: `exp` is IdP-signed and already unbounded above
         // by policy — nothing in this crate imposes a max-lifetime check, so every `exp` below the
-        // overflow band (i64::MAX - CLOCK_SKEW_SECS) is already accepted today, including
+        // overflow band (i64::MAX - CLOCK_SKEW_SECS) is already accepted, including
         // effectively-never-expiring values. Rejecting only the top CLOCK_SKEW_SECS values would be
         // an arbitrary cliff with no security benefit, since an IdP that can set `exp` at all can
         // trivially pick a value just below it for the identical effect. This guard exists solely to
@@ -297,8 +295,9 @@ impl OidcVerifier {
             );
         }
 
-        // Roles/groups claim → principal ROLES (1.5.0: the field was renamed groups->roles). A missing/empty claim is NOT an error here (an unmapped
-        // principal is denied downstream by the role bindings when default:deny); it yields no groups.
+        // Roles/groups claim → principal ROLES. A missing/empty claim is NOT an error here (an
+        // unmapped principal is denied downstream by the role bindings when default:deny); it
+        // yields no groups.
         let groups = extract_string_list(claims.get(&self.role_claim));
 
         // Subject → stable principal id. ONLY the IMMUTABLE identifier (`oid` — Entra's stable object
@@ -345,9 +344,8 @@ impl OidcVerifier {
         // check. `saturating_sub` + `max(0)`: exp can be within CLOCK_SKEW_SECS in the past and still
         // pass the check above, which must not underflow into a huge u64. Also `min`-ed against
         // MAX_CACHE_TTL_SECS: an un-ceilinged suggestion would, for a standard ~3600s-lived access
-        // token, WIDEN the engine's cache window instead of shortening it (its own default is 300s) —
-        // trading a small over-cache bug for a much larger one. This can only ever shorten the cache
-        // lifetime relative to today's fixed 300s, never lengthen it.
+        // token, WIDEN the cache window instead of shortening it (the default is 300s). This can
+        // only ever shorten the cache lifetime relative to the fixed 300s, never lengthen it.
         principal.ttl_secs = Some(exp.saturating_sub(now_unix).clamp(0, MAX_CACHE_TTL_SECS) as u64);
         Ok(principal)
     }
@@ -412,7 +410,7 @@ fn extract_string_list(v: Option<&Value>) -> Vec<String> {
 
 /// The runtime OIDC auth module: a verifier, the JWKS cache and the issuer's discovery document.
 /// Sans-IO: every request it makes goes through the caller's [`Fetch`], and every answer that may
-/// need one is a [`Step`] (THE DESIGN, auth: "JWKS fetching is sans-IO single-flight").
+/// need one is a [`Step`] (JWKS fetching is sans-IO single-flight).
 pub struct OidcModule {
     verifier: OidcVerifier,
     /// The verifier for the browser-login `id_token`: the same issuer and role claim, but the
@@ -422,8 +420,8 @@ pub struct OidcModule {
     login_verifier: OidcVerifier,
     jwks: JwksCache,
     discovery: Discovery,
-    /// The identities this module verified for bearer credentials, held for their TTL (1.5.5's
-    /// engine credential cache, now the plugin's: [`verdicts`]).
+    /// The identities this module verified for bearer credentials, held for their TTL
+    /// ([`verdicts`]).
     verdicts: verdicts::VerdictCache,
     /// The config, retained so the browser-login path can read the client-id, scopes, and the
     /// authorize/token endpoints, and the JWKS url when it is configured.
@@ -457,15 +455,14 @@ impl OidcModule {
         self.verdicts.flush()
     }
 
-    /// How often `tick` asks to run: the JWKS refetch bound (`jwks_min_refetch_secs`, 1.5.5's 60 s),
-    /// at least one second.
+    /// How often `tick` asks to run: the JWKS refetch bound (`jwks_min_refetch_secs`, 60 s by
+    /// default), at least one second.
     pub fn tick_period(&self) -> Duration {
         Duration::from_secs(self.cfg.jwks_min_refetch_secs.max(1))
     }
 
-    /// THE TICK (THE DESIGN, auth: "`tick` refreshes ahead of the TTL, with 1.5.5's timings"): the
-    /// key set fetched again once it is within one tick period of its TTL (`jwks_ttl_secs`, 1.5.5's
-    /// 3600 s), on the caller's ticket, rate-limited by `jwks_min_refetch_secs` like every fetch, so
+    /// The tick refreshes ahead of the TTL: the key set is fetched again once it is within one
+    /// tick period of its TTL (`jwks_ttl_secs`, 3600 s by default), on the caller's ticket, rate-limited by `jwks_min_refetch_secs` like every fetch, so
     /// the request that finds the set stale is not the one that waits on its refresh. PENDING while
     /// this caller's fetch is in flight (re-enter with the same `io` state); WAIT while another
     /// caller's discovery is.
@@ -491,25 +488,25 @@ impl OidcModule {
     ///
     /// # Errors
     /// The discovery error, or a document with no `jwks_uri`.
-    pub fn jwks_url(&self, now: Instant, io: &mut dyn Fetch) -> Step<Result<String, String>> {
+    pub fn jwks_url(&self, now: Instant, io: &mut dyn Fetch) -> Step<Result<Cow<'_, str>, String>> {
         let url = step_ok!(self.endpoint(self.cfg.jwks_url.as_ref(), "jwks_uri", now, io));
         Step::Ready(url.ok_or_else(|| {
             "OIDC discovery document has no 'jwks_uri'; set jwks_url explicitly".to_string()
         }))
     }
 
-    /// THE HOST'S `ready` (after `open`, before any listener binds; boot awaits it): BOOT-TIME
-    /// DISCOVERY, the JWKS url from the issuer's discovery document, a failure refusing boot in
-    /// 1.5.5's words (an explicit `jwks_url` skips it), then the key set's best-effort warm-up.
+    /// The host's `ready` (after `open`, before any listener binds; boot awaits it): boot-time
+    /// discovery, the JWKS url from the issuer's discovery document, a failure refusing boot (an
+    /// explicit `jwks_url` skips it), then the key set's best-effort warm-up.
     /// Single-flight with every op that needs the same document or keys.
     ///
     /// # Errors
     /// The discovery error, or a document with no `jwks_uri`.
     pub fn ready(&self, now: Instant, io: &mut dyn Fetch) -> Step<Result<(), String>> {
         let url = step_ok!(self.jwks_url(now, io));
-        // THE KEY SET'S WARM-UP: fetched once at boot so the first verdicts are answered on the
-        // spot. 1.5.5 fetched it on the first verify and a boot never failed on it, so neither
-        // does this one: a failed warm-up is left to the first verify, which fetches again.
+        // The key set's warm-up: fetched once at boot so the first verdicts are answered on the
+        // spot. A boot never fails on it: a failed warm-up is left to the first verify, which
+        // fetches again.
         match self.jwks.warm(&url, now, io) {
             Step::Pending => Step::Pending,
             Step::Ready(_) | Step::Wait => Step::Ready(Ok(())),
@@ -519,21 +516,21 @@ impl OidcModule {
     /// The login endpoint `configured`, else the discovery document's `field` (the SAME
     /// issuer-match–guarded document [`Self::jwks_url`] reads); `None` when the document omits it
     /// too (that half of browser login is then unavailable and fails closed).
-    fn endpoint(
-        &self,
-        configured: Option<&String>,
+    fn endpoint<'a>(
+        &'a self,
+        configured: Option<&'a String>,
         field: &str,
         now: Instant,
         io: &mut dyn Fetch,
-    ) -> Step<Result<Option<String>, String>> {
+    ) -> Step<Result<Option<Cow<'a, str>>, String>> {
         if let Some(url) = configured {
-            return Step::Ready(Ok(Some(url.clone())));
+            return Step::Ready(Ok(Some(Cow::Borrowed(url))));
         }
         let doc = step_ok!(self.discovery.document(&self.cfg, now, io));
         Step::Ready(Ok(doc
             .get(field)
             .and_then(Value::as_str)
-            .map(str::to_string)))
+            .map(|s| Cow::Owned(s.to_string()))))
     }
 
     /// The IdP `authorization_endpoint`: configured, or discovered.
@@ -543,7 +540,8 @@ impl OidcModule {
         io: &mut dyn Fetch,
     ) -> Step<Result<Option<String>, String>> {
         let configured = self.cfg.authorization_endpoint.as_ref();
-        self.endpoint(configured, "authorization_endpoint", now, io)
+        let url = step_ok!(self.endpoint(configured, "authorization_endpoint", now, io));
+        Step::Ready(Ok(url.map(Cow::into_owned)))
     }
 
     /// The IdP `token_endpoint`: configured, or discovered.
@@ -553,7 +551,8 @@ impl OidcModule {
         io: &mut dyn Fetch,
     ) -> Step<Result<Option<String>, String>> {
         let configured = self.cfg.token_endpoint.as_ref();
-        self.endpoint(configured, "token_endpoint", now, io)
+        let url = step_ok!(self.endpoint(configured, "token_endpoint", now, io));
+        Step::Ready(Ok(url.map(Cow::into_owned)))
     }
 
     /// Verify a login token-endpoint response into an identity. Parses the token endpoint's JSON,
@@ -562,16 +561,17 @@ impl OidcModule {
     /// checked is the OAuth `client_id`, not the bearer `audience` (OIDC Core 1.0 §3.1.3.7 step 3).
     /// A missing/malformed body, a missing `id_token`, or any signature/claim failure is a
     /// fail-closed `Reject`. So is an `id_token` whose key set cannot be had — fetched, or its URL
-    /// discovered — as in 1.5.5 (v1.0.6 `identity_from_token_response`: a key set it could not
-    /// fetch was a `Reject`, which the host renders as the declined sign-in), with 1.5.5's warn
-    /// naming why.
+    /// discovered: a key set that cannot be had is a `Reject`, which the host renders as the
+    /// declined sign-in, with a warn naming why.
     ///
-    /// NOTE (committed ABI): OIDC `nonce` is minted by the CORE at begin and is NOT carried back on
+    /// NOTE: OIDC `nonce` is minted by the CORE at begin and is NOT carried back on
     /// the callback, so nonce binding is the core's to enforce; this reuses the existing
     /// signature+claims path (iss/aud/exp) that the verify module already trusts.
     ///
     /// # Errors
-    /// None today: every failure is a `Reject`. The `Result` is the sans-IO step's shape.
+    /// The identity provider could not answer: its token endpoint answered 5xx or 429. That is an
+    /// outage (the host answers 503, retryable), never a declined login. Every
+    /// other failure is a `Reject`.
     pub fn identity_from_token_response(
         &self,
         resp: &LoginHttpResponse,
@@ -580,22 +580,26 @@ impl OidcModule {
         io: &mut dyn Fetch,
     ) -> Step<Result<LoginOutcome, String>> {
         // A non-2xx token-endpoint response (e.g. invalid_grant) never carries a usable id_token.
-        // A 4xx refuses the user's code (an end-user decline: info); a 5xx is the IdP failing (the
-        // operator's to see: warn). Both are a declined login.
+        // A 5xx or 429 is the IdP unable to answer: an outage, logged with its status (the
+        // operator's to see: warn). Any other non-2xx refuses the user's code (an end-user
+        // decline: info).
+        if resp.status >= 500 || resp.status == 429 {
+            tracing::warn!(
+                module = "oidc",
+                status = resp.status,
+                "OIDC token endpoint is unavailable; login refused as an outage"
+            );
+            return Step::Ready(Err(format!(
+                "the identity provider is unavailable: its token endpoint answered HTTP {}",
+                resp.status
+            )));
+        }
         if !(200..300).contains(&resp.status) {
-            if resp.status >= 500 {
-                tracing::warn!(
-                    module = "oidc",
-                    status = resp.status,
-                    "OIDC token endpoint answered a non-2xx status; login declined"
-                );
-            } else {
-                tracing::info!(
-                    module = "oidc",
-                    status = resp.status,
-                    "OIDC token endpoint answered a non-2xx status; login declined"
-                );
-            }
+            tracing::info!(
+                module = "oidc",
+                status = resp.status,
+                "OIDC token endpoint answered a non-2xx status; login declined"
+            );
             return Step::Ready(Ok(LoginOutcome::Reject));
         }
         let body = match serde_json::from_str::<Value>(&resp.body) {
@@ -620,8 +624,8 @@ impl OidcModule {
             io
         )) {
             Ok(v) => v,
-            // The key set's URL could not be discovered: the key set cannot be had, which 1.5.5
-            // answered as it answered a key set it could not fetch — a declined login, logged.
+            // The key set's URL could not be discovered: the key set cannot be had, which is
+            // answered as a key set that could not be fetched — a declined login, logged.
             Err(e) => {
                 tracing::warn!(module = "oidc", error = %e, "OIDC token signature verification failed");
                 AuthVerdict::Reject
@@ -650,14 +654,32 @@ impl OidcModule {
         now_mono: Instant,
         io: &mut dyn Fetch,
     ) -> Step<Result<AuthVerdict, String>> {
+        if let Some(principal) = token.and_then(|t| self.cached(t, now_unix)) {
+            return Step::Ready(Ok(AuthVerdict::Identify(Principal::clone(&principal))));
+        }
+        self.judge(token, now_unix, now_mono, io)
+    }
+
+    /// The credential cache: the identity a bearer this module identified within its TTL
+    /// verified as, answered with no decode, parse or signature check and no request.
+    pub fn cached(&self, token: &str, now_unix: i64) -> Option<std::sync::Arc<Principal>> {
+        self.verdicts.get(token, now_unix)
+    }
+
+    /// [`Self::verify`] past its cache: the credential judged, an identity cached.
+    ///
+    /// # Errors
+    /// The JWKS url could not be discovered.
+    pub fn judge(
+        &self,
+        token: Option<&str>,
+        now_unix: i64,
+        now_mono: Instant,
+        io: &mut dyn Fetch,
+    ) -> Step<Result<AuthVerdict, String>> {
         let Some(token) = token else {
             return Step::Ready(Ok(AuthVerdict::Pass));
         };
-        // 1.5.5's credential cache: a bearer this module identified within its TTL is answered
-        // from the cache, with no decode, parse or signature check and no request.
-        if let Some(principal) = self.verdicts.get(token, now_unix) {
-            return Step::Ready(Ok(AuthVerdict::Identify(principal)));
-        }
         let generation = self.verdicts.generation();
         let verdict = step!(self.verify_with(&self.verifier, token, now_unix, now_mono, io));
         if let Ok(AuthVerdict::Identify(principal)) = &verdict {
@@ -682,12 +704,12 @@ impl OidcModule {
             // the mode default) can handle it — a random opaque bearer is not an OIDC failure.
             Err(_) => return Step::Ready(Ok(AuthVerdict::Pass)),
         };
-        let kid = parts.header.kid.clone().unwrap_or_default();
+        let kid = parts.header.kid.as_deref().unwrap_or_default();
         let url = step_ok!(self.jwks_url(now_mono, io));
 
         // Verify the signature against the JWKS key for this kid (fetching / rotation-refetching as
         // needed). A signature or key error is a REJECT — a presented-but-invalid credential.
-        let signed = step!(self.jwks.with_key(&url, &kid, now_mono, io, |key| {
+        let signed = step!(self.jwks.with_key(&url, kid, now_mono, io, |key| {
             jwt::verify_signature(&parts, key)
         }));
         if let Err(e) = signed {
@@ -805,7 +827,7 @@ impl Drop for TokenHop {
 
 impl zeroize::ZeroizeOnDrop for TokenHop {}
 
-/// THE NONCE BINDING (1.5.5's core check, now the plugin's): `true` when the token endpoint's `body`
+/// The nonce binding: `true` when the token endpoint's `body`
 /// carries no `id_token`, or carries one whose (unverified) payload names `nonce` as its `nonce`
 /// claim, compared in constant time. An `id_token` with no readable `nonce` claim does not bind.
 /// The signature, issuer and audience are checked afterwards, by the verifier.
@@ -941,6 +963,7 @@ pub fn build_token_exchange(
 ///   - The clock IS readable but below [`CLOCK_SANITY_FLOOR_UNIX`] — the realistic broken-clock case
 ///     (a dead RTC booting a host at the epoch, or an NTP/RTC fault landing in 1970-2000), which
 ///     `duration_since` reports as `Ok(small_value)` and would otherwise sail straight through.
+#[cfg(test)]
 pub(crate) fn now_unix() -> i64 {
     let t = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -949,10 +972,11 @@ pub(crate) fn now_unix() -> i64 {
     clock_or_fail_closed(t)
 }
 
-/// The fail-closed mapping [`now_unix`] applies to a clock reading: a reading at or above
+/// The fail-closed mapping every clock reading takes (the request's timestamp, the host's
+/// `clock.now`, the tests' `now_unix`): a reading at or above
 /// [`CLOCK_SANITY_FLOOR_UNIX`] passes through, anything below becomes `i64::MAX`. Pure, so the mapping
 /// is testable (`now_unix` reads the real host clock).
-fn clock_or_fail_closed(t: i64) -> i64 {
+pub(crate) fn clock_or_fail_closed(t: i64) -> i64 {
     if t >= CLOCK_SANITY_FLOOR_UNIX {
         t
     } else {
@@ -987,20 +1011,18 @@ pub(crate) fn json_err(what: &'static str) -> impl FnOnce(serde_json::Error) -> 
 
 /// The configured `jwks_url`, checked. Absent is fine (discovery names it), and so is `https`.
 ///
-/// Plain `http` is accepted only for a LOOPBACK host ([`is_loopback_host`]: 127.0.0.0/8, `::1`,
-/// `localhost`, `*.localhost`), the local identity-provider rig 1.5.5 booted (1.5.5 returned an
-/// explicit `jwks_url` unchecked). Such a config opens with the warning this returns, which `open`
-/// logs: the key set is still only ever fetched over https ([`fetch::plaintext_allowed`]), as on
-/// 1.5.5, so every token it is asked to verify is rejected until the URL is https. Any other value
-/// (http to a host that is not loopback, another scheme, or no URL at all) is refused at `open`
-/// with an error naming the field and the loopback exception, rather than loading and then
-/// rejecting every token from a remote identity provider.
+/// Plain `http` OPENS, with the warning this returns, which `open` logs: an existing config
+/// loads unchanged. To a LOOPBACK
+/// host ([`is_loopback_host`]: 127.0.0.0/8, `::1`, `localhost`, `*.localhost`), the local
+/// identity-provider rig, the warning says so; to any other host it is LOUD: a key set over plain
+/// http could be substituted in transit. Either way the key set is fetched only over https
+/// ([`fetch::plaintext_allowed`]), so every token is rejected until the URL is https.
+/// Any other scheme, or no URL at all, is refused at `open`, naming the field.
 ///
 /// # Errors
-/// The URL does not parse, or is neither https nor http to a loopback host.
+/// The URL does not parse, or is neither https nor http.
 pub fn check_jwks_url(cfg: &OidcConfig) -> Result<Option<String>, String> {
-    const ONLY: &str = "it must be an https URL (plain http is accepted only for a loopback host: \
-                        127.0.0.0/8, ::1 or localhost)";
+    const ONLY: &str = "it must be an https URL (plain http loads, with a warning)";
     let Some(url) = &cfg.jwks_url else {
         return Ok(None);
     };
@@ -1014,12 +1036,12 @@ pub fn check_jwks_url(cfg: &OidcConfig) -> Result<Option<String>, String> {
              URL"
             .to_string(),
         )),
-        "http" => Err(
-            "jwks_url must be an https URL (got scheme 'http' for a host that is not loopback); \
-             the JWKS is only ever fetched over https, and plain http is accepted only for a \
-             loopback host (127.0.0.0/8, ::1 or localhost)"
+        "http" => Ok(Some(
+            "jwks_url is plain http on a non-loopback host: signing keys can be substituted in \
+             transit; use https (busbar fetches the key set only over https, so every OIDC token \
+             is rejected until jwks_url is an https URL)"
                 .to_string(),
-        ),
+        )),
         other => Err(format!(
             "jwks_url must be an https URL (got scheme '{}'); {ONLY}",
             other.escape_debug()

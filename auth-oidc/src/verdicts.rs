@@ -1,34 +1,31 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! THE INBOUND VERDICT CACHE, the plugin's own (owner ruling Q-INCACHE, `abi::auth`: "THE CACHE
-//! LIVES IN THE PLUGIN ... the kernel keeps no verdict cache"). 1.5.5's engine credential cache
-//! (`crates/busbar/src/auth_cache.rs` at v1.5.5) held every OIDC identity it verified, so a repeat
-//! bearer was answered without a second decode, parse and signature check; this is that cache, moved
-//! into the module with 1.5.5's rules:
+//! The inbound verdict cache, the plugin's own (the kernel keeps no verdict cache). It holds every
+//! OIDC identity verified, so a repeat bearer is answered without a second decode, parse and
+//! signature check:
 //!
 //! - key = SHA-256 of the credential bytes (the credential itself is never stored); one instance is
-//!   one provider, so the provider half of 1.5.5's `(provider, hash)` key is the instance;
+//!   one provider, so the provider half of the `(provider, hash)` key is the instance;
 //! - an identity is held for its own `ttl_secs` (the token's remaining life, at most 300 s:
 //!   [`crate::OidcVerifier::validate_claims`]), absent = 300 s, never past 3600 s;
 //! - a REJECT is never cached, and neither is a PASS (`abi::auth`: Pass buffering is the kernel's);
 //! - at most 4096 entries: at capacity the expired ones go, then the oldest-inserted;
 //! - [`VerdictCache::flush`] drops everything and answers how many it held: the admin flush's
-//!   `{"flushed": N}`, reported on `refresh`. A FLUSH GENERATION ([`VerdictCache::generation`],
-//!   1.5.5's `CacheGeneration`) is captured before a verify judges and handed to
+//!   `{"flushed": N}`, reported on `refresh`. A FLUSH GENERATION ([`VerdictCache::generation`]) is captured before a verify judges and handed to
 //!   [`VerdictCache::put`], which drops the insert when a flush landed in between, so a verdict
 //!   reached before a flush never outlives it.
 
 use std::collections::HashMap;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use busbar_contract::auth::Principal;
 
-/// TTL of a cached identity whose module suggested none, seconds (1.5.5 `DEFAULT_IDENTIFY_TTL_SECS`).
+/// TTL of a cached identity whose module suggested none, seconds.
 const DEFAULT_TTL_SECS: u64 = 300;
-/// The ceiling on any identity's cache TTL, seconds (1.5.5 `MAX_IDENTIFY_TTL_SECS`).
+/// The ceiling on any identity's cache TTL, seconds.
 const MAX_TTL_SECS: u64 = 3600;
-/// The most entries held (1.5.5 `MAX_ENTRIES`).
+/// The most entries held.
 pub const MAX_ENTRIES: usize = 4096;
 
 /// A flush generation: the cache's flush counter at one moment.
@@ -39,7 +36,7 @@ struct Entry {
     /// UNIX seconds; served while `expires_at > now`.
     expires_at: i64,
     inserted: u64,
-    principal: Principal,
+    principal: Arc<Principal>,
 }
 
 #[derive(Default)]
@@ -51,10 +48,11 @@ struct State {
     flushes: u64,
 }
 
-/// The cache of identities this module verified.
+/// The cache of identities this module verified. A hit takes the read lock and an `Arc` clone, so
+/// concurrent hits never serialise.
 #[derive(Default)]
 pub struct VerdictCache {
-    state: Mutex<State>,
+    state: RwLock<State>,
 }
 
 fn key(credential: &str) -> [u8; 32] {
@@ -65,30 +63,33 @@ fn key(credential: &str) -> [u8; 32] {
 }
 
 impl VerdictCache {
-    fn lock(&self) -> MutexGuard<'_, State> {
-        self.state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    fn read(&self) -> RwLockReadGuard<'_, State> {
+        self.state.read().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn lock(&self) -> RwLockWriteGuard<'_, State> {
+        self.state.write().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// The current flush generation: capture it BEFORE judging a credential.
     pub fn generation(&self) -> Generation {
-        Generation(self.lock().flushes)
+        Generation(self.read().flushes)
     }
 
     /// The identity cached for `credential` at UNIX second `now`; an expired entry is a miss and
     /// goes.
-    pub fn get(&self, credential: &str, now: i64) -> Option<Principal> {
+    pub fn get(&self, credential: &str, now: i64) -> Option<Arc<Principal>> {
         let k = key(credential);
-        let mut state = self.lock();
-        match state.entries.get(&k) {
-            Some(e) if e.expires_at > now => Some(e.principal.clone()),
-            Some(_) => {
-                state.entries.remove(&k);
-                None
-            }
-            None => None,
+        match self.read().entries.get(&k) {
+            Some(e) if e.expires_at > now => return Some(Arc::clone(&e.principal)),
+            Some(_) => {}
+            None => return None,
         }
+        let mut state = self.lock();
+        if state.entries.get(&k).is_some_and(|e| e.expires_at <= now) {
+            state.entries.remove(&k);
+        }
+        None
     }
 
     /// Hold `principal`, the identity `credential` verified as at UNIX second `now`, unless a flush
@@ -122,7 +123,7 @@ impl VerdictCache {
             Entry {
                 expires_at: now.saturating_add(i64::try_from(ttl).unwrap_or(i64::MAX)),
                 inserted: *seq,
-                principal: principal.clone(),
+                principal: Arc::new(principal.clone()),
             },
         );
     }

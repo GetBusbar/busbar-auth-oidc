@@ -42,8 +42,8 @@ pub fn config(cfg: &str) -> Result<OidcConfig, String> {
     Ok(cfg)
 }
 
-/// The module `open` builds from the settings: parsed, its explicit `jwks_url` held to https, or
-/// plain http to a loopback host, which opens with a WARNING naming it ([`check_jwks_url`]).
+/// The module `open` builds from the settings: parsed, its explicit `jwks_url` https, or plain
+/// http, which opens with a WARNING naming it ([`check_jwks_url`]).
 pub(crate) fn module(cfg: &str) -> Result<OidcModule, String> {
     let cfg = config(cfg)?;
     if let Some(warning) = check_jwks_url(&cfg)? {
