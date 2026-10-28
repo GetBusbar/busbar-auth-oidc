@@ -12,8 +12,8 @@ The OIDC auth module as a droppable busbar plugin: a cdylib exporting the auth C
 
 ## What it is for
 
-**This plugin's version: v1.0.0.** (Independently versioned from busbar
-itself — see [Versioning](#versioning) below.)
+**This plugin's version: 1.6.0.** (Versioned in this repo — see
+[Versioning](#versioning) below.)
 
 [![CI](https://github.com/GetBusbar/busbar-auth-oidc/actions/workflows/ci.yml/badge.svg)](https://github.com/GetBusbar/busbar-auth-oidc/actions/workflows/ci.yml)
 [![Coverage](https://codecov.io/gh/GetBusbar/busbar-auth-oidc/branch/dev/graph/badge.svg)](https://codecov.io/gh/GetBusbar/busbar-auth-oidc)
@@ -28,18 +28,20 @@ no `jsonwebtoken`/`rsa`), issuer/audience/expiry/not-before checks, and a
 claim-to-role mapping — then hands busbar a `Principal` it can bind to
 virtual keys and roles.
 
-It is a `cdylib` that implements busbar's `AuthModule` trait (via
-[`busbar-contract`](https://github.com/GetBusbar/busbar/tree/main/crates/busbar-contract))
-and is loaded in-process by busbar over the signed hybrid plugin ABI —
-`dlopen`'d, not spawned as a separate process.
+It is a `cdylib` exporting one door, `busbar_plugin_door`, on busbar's auth
+memory ABI (via
+[`busbar-contract`](https://github.com/GetBusbar/busbar/tree/main/crates/busbar-contract)),
+and is loaded in-process by busbar as a signed plugin — `dlopen`'d, not
+spawned as a separate process. A build can also link the same door in.
 
 ### Versioning
 
-This plugin is versioned **independently of busbar** — `v1.0.0` here says
-nothing about which busbar release it is. Compatibility with busbar is
-stated separately: **requires busbar 1.6.0+** (contract ABI 3, which this
-crate declares in `auth-oidc/declares.json`; busbar 1.5.x speaks an older
-auth ABI and refuses to load it). Pin both versions
+This plugin's version is set in this repo. `1.6.0` puts it on the busbar
+1.6 line, above every 1.5.5-era release of it (`v1.0.x`), so an operator's
+version floor or rollback pin never downgrades onto one. Compatibility with
+busbar is stated separately: **requires busbar 1.6.0+** (it speaks busbar
+1.6's memory ABI through `busbar-contract`, pinned in `.busbar-ref`; busbar
+1.5.x speaks an older auth ABI and refuses to load it). Pin both versions
 explicitly in production; do not assume they move together.
 
 
@@ -73,7 +75,8 @@ custom build can also link that logic statically instead of going
 through the plugin ABI.
 
 `jwks_url` in the config is optional: when omitted, it is resolved once
-at `open()` via the issuer's OIDC discovery document, so boot fails
+at boot (the host's `ready`, after `open` and before any listener binds)
+via the issuer's OIDC discovery document, so boot fails
 loudly if discovery can't find it rather than deferring the failure to
 the first request.
 
@@ -81,16 +84,16 @@ the first request.
 
 | Setting | Required | Default | Notes |
 |---|---|---|---|
-| `issuer` | yes | — | The IdP's OIDC issuer URL. Checked against the JWT's `iss` claim. |
-| `audience` | yes | — | The expected `aud` claim (busbar's registered client/resource identifier at the IdP). |
-| `jwks_url` | no | discovered from `issuer` | The IdP's JWKS endpoint. Must be an `https` URL (anything else is refused at load). When omitted, resolved once at `open()` via OIDC discovery (`<issuer>/.well-known/openid-configuration`). |
+| `issuer` | yes | — | The IdP's OIDC issuer URL. Checked against the JWT's `iss` claim. A blank value is refused at load. |
+| `audience` | yes | — | The expected `aud` claim (busbar's registered client/resource identifier at the IdP). A blank value is refused at load. |
+| `jwks_url` | no | discovered from `issuer` | The IdP's JWKS endpoint. Must be an `https` URL. Plain `http` is accepted only for a loopback host (127.0.0.0/8, `::1`, `localhost`); it loads with a warning, and since the key set is only ever fetched over https, every token is rejected until the URL is https. Anything else is refused at load. When omitted, resolved once at boot via OIDC discovery (`<issuer>/.well-known/openid-configuration`); a discovery failure refuses the boot. |
 | `role_claim` | no | `groups` | The claim mapped onto the resulting `Principal`'s roles; set `roles` to use Entra app-roles instead. |
 | `jwks_min_refetch_secs` | no | `60` | JWKS refetch rate-limit (seconds) — the bound on how often a kid-rotation refetch can occur. |
 | `jwks_ttl_secs` | no | `3600` | JWKS cache TTL (seconds). |
 | `ca_cert_pem` | no | — | An extra root CA (PEM) to trust for the JWKS/discovery HTTPS fetch, in addition to the built-in public (webpki) roots; the OS trust store is not consulted — for a private CA or a test fixture (this is exactly what `tests/e2e.rs` uses to trust its own self-signed local JWKS server). |
 | `client_id` | no | `audience` | The OAuth `client_id` presented on the browser-login authorize URL and token exchange. The client secret is never set here; busbar core holds it. |
 | `scopes` | no | `[]` | Extra OAuth scopes requested at browser login, on top of the always-sent `openid`. |
-| `authorization_endpoint` | no | discovered from `issuer` | The IdP authorize endpoint for browser login. When omitted, taken from the discovery document at `open()`; absent and undiscoverable means browser login is refused (token verification is unaffected). |
+| `authorization_endpoint` | no | discovered from `issuer` | The IdP authorize endpoint for browser login. When omitted, taken from the issuer's discovery document (fetched at boot when `jwks_url` is omitted too, else on the first browser login); absent and undiscoverable means browser login is refused (token verification is unaffected). |
 | `token_endpoint` | no | discovered from `issuer` | The IdP token endpoint for the browser-login code exchange. Discovered like `authorization_endpoint` when omitted. |
 
 Unknown config fields are rejected (`deny_unknown_fields`) — a typo'd or
@@ -136,9 +139,9 @@ in busbar for the full reference. In short:
 BUSBAR_SIGN_KEY=<signing key> busbar-plugin-pack pack \
     --lib target/release/libbusbar_auth_oidc_plugin.so \
     --name busbar-auth-oidc-plugin --alias oidc --kind auth \
-    --version 1.0.0 --publisher busbar \
+    --version 1.6.0 --publisher busbar \
     --license Apache-2.0 \
-    --out busbar-auth-oidc-plugin-1.0.0-x86_64-linux.tar.gz
+    --out busbar-auth-oidc-plugin-1.6.0-x86_64-linux.tar.gz
 ```
 
 For local development without a signing key, `busbar-plugin-pack pack
@@ -177,15 +180,15 @@ for the full `identity-providers:` / `auth.chain` config reference.
 
 ## Tests
 
-`cargo test` runs both `auth-oidc-plugin`'s own hermetic unit tests
-(`auth-oidc-plugin/src/lib.rs` — covering `open()`'s config-parsing
-responsibility: empty/malformed/missing-required-field/unknown-field
-config, and the "explicit `jwks_url` skips discovery" and "malformed
-issuer fails fast" paths, all without any network I/O) and the
-end-to-end test in `auth-oidc-plugin/tests/e2e.rs`. (`auth-oidc/` has
-its own unit tests too — `auth-oidc/src/tests.rs` — covering the JWT/JWKS
-logic itself; both crates' tests run under a workspace-wide `cargo
-test`.)
+`cargo test` runs `auth-oidc/`'s hermetic unit tests (`auth-oidc/src/tests.rs`
+and `auth-oidc/src/tests/` — the JWT/JWKS logic, the settings parsing
+`open` makes (`tests/open_tests.rs`: empty/malformed/missing-required-field/
+unknown-field config, a non-https `jwks_url`), discovery, the caches and the
+door, all without any network I/O) and `auth-oidc-plugin`'s tests: the
+conformance suite (`auth-oidc-plugin/tests/conformance.rs`, the linked and
+the dropped-in door) and the end-to-end test in
+`auth-oidc-plugin/tests/e2e.rs`. Both crates' tests run under a
+workspace-wide `cargo test`.
 
 The end-to-end test is NOT a stub: it stands up a genuine local HTTPS
 JWKS server (a real self-signed certificate minted with `rcgen`, served

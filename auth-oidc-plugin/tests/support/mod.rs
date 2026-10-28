@@ -94,7 +94,9 @@ impl busbar_contract::services::double::ServicesDouble for Clock {
     fn now(&self) -> Reading {
         CLOCK_READS.fetch_add(1, Ordering::SeqCst);
         Reading {
-            wall_ns: 0,
+            wall_ns: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos() as u64),
             mono_ns: now_ns(),
         }
     }
@@ -168,6 +170,8 @@ pub struct Idp {
     reads: Mutex<HashMap<u64, Reply>>,
     next: AtomicU64,
     pended: AtomicU32,
+    /// Reply body bytes handed to the plugin so far, over every request.
+    served: AtomicU64,
     delay: Mutex<Duration>,
 }
 
@@ -185,6 +189,7 @@ impl Idp {
             reads: Mutex::new(HashMap::new()),
             next: AtomicU64::new(1),
             pended: AtomicU32::new(0),
+            served: AtomicU64::new(0),
             delay: Mutex::new(Duration::from_millis(5)),
         });
         let doc = serde_json::json!({
@@ -230,6 +235,11 @@ impl Idp {
     /// How many reads answered PENDING.
     pub fn pended(&self) -> u32 {
         self.pended.load(Ordering::SeqCst)
+    }
+
+    /// How many reply body bytes the plugin has read from this IdP.
+    pub fn served(&self) -> u64 {
+        self.served.load(Ordering::SeqCst)
     }
 
     /// Every need the loader declared, as it declared it, sorted.
@@ -341,6 +351,7 @@ impl Conns for Idp {
                 let n = (r.body.len() - r.at).min(buf.len());
                 buf[..n].copy_from_slice(&r.body[r.at..r.at + n]);
                 r.at += n;
+                self.served.fetch_add(n as u64, Ordering::SeqCst);
                 Ok(piece(PieceKind::Body, n))
             }
             _ => Ok(piece(PieceKind::Completion, 0)),
@@ -651,6 +662,15 @@ impl Bound {
         )
     }
 
+    /// `verify` of `credential` with the request's facts stating `timestamp` (unix seconds).
+    pub fn verify_at(&self, credential: Option<&str>, timestamp: u64) -> String {
+        self.identify(
+            slot::VERIFY,
+            |out_buf| verify_in_at(credential, out_buf, timestamp),
+            (IDENTITY_BUF_BYTES, IDENTITY_GROUPS),
+        )
+    }
+
     /// `begin_login` for the core's `state`, `challenge` and `nonce`: the authorize URL, or the
     /// refusal.
     pub fn begin(&self, redirect: &str, state: &str, challenge: &str, nonce: &str) -> String {
@@ -707,7 +727,17 @@ impl Bound {
 
 /// A `verify` `in` for `credential` over `out_buf`.
 pub fn verify_in(credential: Option<&str>, out_buf: IdentityBuf) -> VerifyIn {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    verify_in_at(credential, out_buf, now)
+}
+
+/// [`verify_in`] with the request's facts stating `timestamp` (unix seconds): the host's clock as
+/// the request arrived, the time a token's expiry is judged at.
+pub fn verify_in_at(credential: Option<&str>, out_buf: IdentityBuf, timestamp: u64) -> VerifyIn {
     let mut i: VerifyIn = z();
+    i.request.timestamp = timestamp;
     i.head = in_head();
     i.credential = credential.map_or(NO_BLOB, |c| blob(c.as_bytes(), BLOB_OCTETS));
     i.out_buf = out_buf;

@@ -6,7 +6,7 @@
 //! fetched at `open`: it runs on no ticket and is handed no connector, so the JWKS and (when a URL
 //! is not configured) the issuer's discovery document are fetched by the first op that needs them.
 
-use crate::{jwks_url_warning, OidcConfig, OidcModule};
+use crate::{check_jwks_url, OidcConfig, OidcModule};
 
 /// The settings, parsed: the check `validate` makes and the first step of `open`. Shape:
 ///
@@ -21,20 +21,32 @@ use crate::{jwks_url_warning, OidcConfig, OidcModule};
 ///
 /// `jwks_url` is optional — when omitted it is discovered from the issuer's OIDC discovery document.
 ///
+/// `issuer` and `audience` must not be blank: an empty one would load and then match no token (or
+/// only a token claiming an empty one), so it is refused here, naming the key.
+///
 /// # Errors
-/// No settings, or settings that are not this module's config.
+/// No settings, settings that are not this module's config, or a blank `issuer`/`audience`.
 pub fn config(cfg: &str) -> Result<OidcConfig, String> {
     if cfg.trim().is_empty() {
         return Err("oidc plugin requires config (issuer, audience); none provided".to_string());
     }
-    serde_json::from_str(cfg).map_err(|e| format!("invalid oidc plugin config: {e}"))
+    let cfg: OidcConfig =
+        serde_json::from_str(cfg).map_err(crate::json_err("invalid oidc plugin config"))?;
+    for (key, value) in [("issuer", &cfg.issuer), ("audience", &cfg.audience)] {
+        if value.trim().is_empty() {
+            return Err(format!(
+                "invalid oidc plugin config: `{key}` is blank; it must name the token {key}"
+            ));
+        }
+    }
+    Ok(cfg)
 }
 
-/// The module `open` builds from the settings: parsed. An explicit `jwks_url` that is not https
-/// loads, as in 1.5.5, with a WARNING naming it ([`jwks_url_warning`]).
+/// The module `open` builds from the settings: parsed, its explicit `jwks_url` held to https, or
+/// plain http to a loopback host, which opens with a WARNING naming it ([`check_jwks_url`]).
 pub(crate) fn module(cfg: &str) -> Result<OidcModule, String> {
     let cfg = config(cfg)?;
-    if let Some(warning) = jwks_url_warning(&cfg) {
+    if let Some(warning) = check_jwks_url(&cfg)? {
         tracing::warn!(module = "oidc", "{warning}");
     }
     Ok(OidcModule::new(&cfg))
