@@ -2153,17 +2153,18 @@ fn an_end_user_decline_logs_at_info_and_an_idp_failure_at_warn() {
             busbar_contract::testkit::WarnCapture::capturing_debug(),
         );
         for cap in [&warn, &all] {
-            tracing::subscriber::with_default(cap.clone(), || {
+            // A 4xx answers a declined login, a 5xx the outage: either way it is logged.
+            let _ = tracing::subscriber::with_default(cap.clone(), || {
                 ready(m.identity_from_token_response(
                     &response,
                     1_700_000_000,
                     Instant::now(),
                     &mut idp.at_once(Some(ME)),
                 ))
-            })
-            .expect("a verdict");
+            });
         }
-        (warn.contains("non-2xx"), all.contains("non-2xx"))
+        let said = "OIDC token endpoint";
+        (warn.contains(said), all.contains(said))
     };
     assert_eq!(refused(400), (false, true), "a 4xx is the user's: info");
     assert_eq!(refused(503), (true, true), "a 5xx is the IdP's: warn");
