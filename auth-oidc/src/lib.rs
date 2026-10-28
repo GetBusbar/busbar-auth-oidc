@@ -571,7 +571,9 @@ impl OidcModule {
     /// signature+claims path (iss/aud/exp) that the verify module already trusts.
     ///
     /// # Errors
-    /// None today: every failure is a `Reject`. The `Result` is the sans-IO step's shape.
+    /// The identity provider could not answer: its token endpoint answered 5xx or 429. That is an
+    /// outage (the host answers 503, retryable; ruling 2026-10-27), never a declined login. Every
+    /// other failure is a `Reject`.
     pub fn identity_from_token_response(
         &self,
         resp: &LoginHttpResponse,
@@ -580,22 +582,26 @@ impl OidcModule {
         io: &mut dyn Fetch,
     ) -> Step<Result<LoginOutcome, String>> {
         // A non-2xx token-endpoint response (e.g. invalid_grant) never carries a usable id_token.
-        // A 4xx refuses the user's code (an end-user decline: info); a 5xx is the IdP failing (the
-        // operator's to see: warn). Both are a declined login.
+        // A 5xx or 429 is the IdP unable to answer: an outage, logged with its status (the
+        // operator's to see: warn). Any other non-2xx refuses the user's code (an end-user
+        // decline: info).
+        if resp.status >= 500 || resp.status == 429 {
+            tracing::warn!(
+                module = "oidc",
+                status = resp.status,
+                "OIDC token endpoint is unavailable; login refused as an outage"
+            );
+            return Step::Ready(Err(format!(
+                "the identity provider is unavailable: its token endpoint answered HTTP {}",
+                resp.status
+            )));
+        }
         if !(200..300).contains(&resp.status) {
-            if resp.status >= 500 {
-                tracing::warn!(
-                    module = "oidc",
-                    status = resp.status,
-                    "OIDC token endpoint answered a non-2xx status; login declined"
-                );
-            } else {
-                tracing::info!(
-                    module = "oidc",
-                    status = resp.status,
-                    "OIDC token endpoint answered a non-2xx status; login declined"
-                );
-            }
+            tracing::info!(
+                module = "oidc",
+                status = resp.status,
+                "OIDC token endpoint answered a non-2xx status; login declined"
+            );
             return Step::Ready(Ok(LoginOutcome::Reject));
         }
         let body = match serde_json::from_str::<Value>(&resp.body) {
