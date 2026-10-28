@@ -80,6 +80,14 @@ fn undefined_symbols(lib: &std::path::Path) -> Option<String> {
 fn the_built_image_imports_no_socket_resolver_or_tls_entry_point() {
     let lib = crate::support::cdylib_path().expect("the busbar-auth-oidc-plugin cdylib is built");
     let Some(listing) = undefined_symbols(&lib) else {
+        if std::env::var_os("CI").is_some() {
+            // Same rule as `plugin_path`: under CI the import ban must never silently go unchecked.
+            panic!(
+                "`nm` is not on the PATH under CI, so the import ban was NOT checked on {}: install \
+                 binutils/Xcode tools so this coverage never silently vanishes",
+                lib.display()
+            );
+        }
         eprintln!(
             "!!! SKIPPED: `nm` is not on the PATH, so the import ban was NOT checked on {} !!!",
             lib.display()

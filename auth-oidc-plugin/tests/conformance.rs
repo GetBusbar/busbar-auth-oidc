@@ -349,9 +349,9 @@ fn the_linked_and_the_dropped_in_oidc_module_are_one_module() {
         "invalid_grant is a bad credential: {text}"
     );
     assert_eq!(
-        a[14], "verdict 2 ",
-        "an IdP 5xx is a declined login, as 1.5.5 answered it (its module read a non-2xx token \
-         response as a rejection): {text}"
+        a[14], "verdict 3 ",
+        "an IdP 5xx is an outage (LOGIN_OUTAGE; the host answers 503, retryable), never a declined \
+         login (ruling 2026-10-27; 1.5.5 declined it): {text}"
     );
     assert_eq!(
         a[15], "verdict 4 ",
@@ -646,6 +646,65 @@ fn cold_verifies(staggered: bool) {
     );
     assert_eq!(idp.sent_to(DISCOVERY_PATH).len(), 1, "{seen}");
     assert_eq!(idp.sent_to("/keys").len(), 1, "{seen}");
+}
+
+/// THE BODY CAP IS ENFORCED WHILE READING: a discovery reply far past the 1 MiB cap is refused in
+/// 1.5.5's words, and the plugin stopped reading at the cap rather than buffering the SDK's
+/// 16 MiB reply ceiling first (1.5.5 read at most cap + 1 bytes).
+#[test]
+fn red_an_oversized_reply_is_cut_off_at_the_cap_not_buffered_whole() {
+    let _one = support::serial();
+    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let token = key.sign(&claims(AUDIENCE));
+    let idp = Idp::new(&key);
+    let huge = "x".repeat(4 * 1024 * 1024);
+    idp.answer(DISCOVERY_PATH, 200, &huge);
+    let b = bind(&Arm::Linked, &idp);
+    open(&b.plugin, &config(AUDIENCE), None).expect("opens");
+
+    let refused = b.verify(Some(&token), None);
+    let url = format!("https://idp.conformance.example{DISCOVERY_PATH}");
+    assert_eq!(
+        refused,
+        format!(
+            "Failed OIDC discovery fetch failed ({url}): {url} JWKS body exceeds the 1048576-byte \
+             cap; set jwks_url explicitly"
+        )
+    );
+    assert!(
+        idp.served() < 2 * 1024 * 1024,
+        "the plugin read {} bytes of a reply capped at 1 MiB",
+        idp.served()
+    );
+}
+
+/// THE STATUS IS JUDGED BEFORE THE BODY, as 1.5.5 judged it: a non-2xx discovery reply with a body
+/// far past the cap is refused naming its status, and is still cut off at the cap while reading.
+#[test]
+fn red_an_oversized_error_reply_names_its_status_and_is_cut_off_at_the_cap() {
+    let _one = support::serial();
+    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let token = key.sign(&claims(AUDIENCE));
+    let idp = Idp::new(&key);
+    let huge = "x".repeat(4 * 1024 * 1024);
+    idp.answer(DISCOVERY_PATH, 500, &huge);
+    let b = bind(&Arm::Linked, &idp);
+    open(&b.plugin, &config(AUDIENCE), None).expect("opens");
+
+    let refused = b.verify(Some(&token), None);
+    let url = format!("https://idp.conformance.example{DISCOVERY_PATH}");
+    assert_eq!(
+        refused,
+        format!(
+            "Failed OIDC discovery fetch failed ({url}): {url} returned HTTP 500 Internal Server \
+             Error; set jwks_url explicitly"
+        )
+    );
+    assert!(
+        idp.served() < 2 * 1024 * 1024,
+        "the plugin read {} bytes of a reply capped at 1 MiB",
+        idp.served()
+    );
 }
 
 /// THE LOGIN WHOSE KEY SET CANNOT BE HAD, through the real dispatcher (ARCHITECT ruling: 1.5.5's
@@ -971,4 +1030,30 @@ fn an_identity_carries_the_credential_it_was_verified_from() {
         token.as_bytes(),
         "the verified credential rides the identity"
     );
+}
+
+/// ONE CLOCK (THE DESIGN §1): a token's expiry is judged at the request's own timestamp, the
+/// host's clock as it arrived, never one the plugin reads; a request stating none (`0`) fails
+/// closed. A token valid for the next hour is refused at a request two hours on. RED before the fix:
+/// the plugin judged expiry on the OS clock, so the late request was identified.
+#[test]
+fn a_token_s_expiry_is_judged_at_the_request_s_timestamp() {
+    let _one = support::serial();
+    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let token = key.sign(&claims(AUDIENCE));
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    for (at, identified) in [(now + 7200, false), (0, false), (now, true)] {
+        let idp = Idp::new(&key);
+        let b = bind(&Arm::Linked, &idp);
+        open(&b.plugin, &config(AUDIENCE), None).expect("opens");
+        let verdict = b.verify_at(Some(&token), at);
+        assert_eq!(
+            verdict.contains("verdict 1 "),
+            identified,
+            "at {at}: {verdict}"
+        );
+    }
 }

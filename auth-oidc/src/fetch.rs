@@ -40,11 +40,14 @@ use busbar_contract::abi::mechanism::call::{AbiStr, Blob};
 use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::sdk::conn::{ConnFailure, Host};
 use busbar_contract::abi::sdk::door::abi_str;
-use busbar_contract::abi::sdk::exchange::{exchange, Exchange, ExchangeResponse, Request};
+use busbar_contract::abi::sdk::exchange::{
+    exchange, Exchange, ExchangeResponse, Request, REPLY_OVER_BOUND,
+};
 use busbar_contract::abi::sdk::net::{
     extract_normalized_host, host_is_private_or_loopback, scheme_is,
 };
 use busbar_contract::auth::{LoginHop, LoginHttpResponse};
+use zeroize::Zeroizing;
 
 /// Upper bound on a JWKS / discovery document, and on a token endpoint's answer. A real JWKS is a
 /// handful of keys — a few KiB; even a tenant rotating aggressively stays well under this. The bound
@@ -71,11 +74,6 @@ const ISSUER_PATH: &str = "settings.issuer";
 /// The setting every need's extra trusted root comes from.
 const CA_CERT_PATH: &str = "settings.ca_cert_pem";
 
-const ABSENT: AbiStr = AbiStr {
-    ptr: std::ptr::null(),
-    len: 0,
-};
-
 /// The egress class of every need: `operator-infrastructure` (ARCHITECT ruling 2026-10-09). 1.5.5
 /// accepted a plaintext token endpoint on a PRIVATE host, not only on loopback (`auth/token.rs`
 /// `vet_hop_url`), which `open-web` (secure only) and `loopback-allowed` (plaintext to loopback
@@ -95,7 +93,7 @@ const fn need(target_from: AbiStr, trust_from: AbiStr) -> Need {
         direction: DIRECTION_OUTBOUND,
         egress_class: EGRESS_CLASS,
         transport: abi_str("http"),
-        auth: ABSENT,
+        auth: AbiStr::ABSENT,
         target_from,
         trust_from,
         details: Blob::ABSENT,
@@ -115,11 +113,11 @@ const fn need(target_from: AbiStr, trust_from: AbiStr) -> Need {
 /// discovered).
 pub const NEEDS: &[Need] = &[
     need(abi_str(ISSUER_PATH), abi_str(CA_CERT_PATH)),
-    need(ABSENT, abi_str(CA_CERT_PATH)),
-    need(ABSENT, abi_str(CA_CERT_PATH)),
-    need(abi_str(ISSUER_PATH), ABSENT),
-    need(ABSENT, ABSENT),
-    need(ABSENT, ABSENT),
+    need(AbiStr::ABSENT, abi_str(CA_CERT_PATH)),
+    need(AbiStr::ABSENT, abi_str(CA_CERT_PATH)),
+    need(abi_str(ISSUER_PATH), AbiStr::ABSENT),
+    need(AbiStr::ABSENT, AbiStr::ABSENT),
+    need(AbiStr::ABSENT, AbiStr::ABSENT),
 ];
 
 /// The need index `need` (an anchored-set index) goes out on: itself for a module that trusts an
@@ -210,11 +208,21 @@ pub fn failed(url: &str, why: impl Display) -> String {
 /// 1.5.5's texts: `"{url} returned HTTP {status}"`, or [`capped`]'s.
 pub fn document(url: &str, status: u16, body: Vec<u8>) -> Result<String, String> {
     if !(200..300).contains(&status) {
-        let shown = http::StatusCode::from_u16(status)
-            .map_or_else(|_| status.to_string(), |s| s.to_string());
-        return Err(format!("{url} returned HTTP {shown}"));
+        return Err(refused_status(url, status));
     }
     capped(url, body, MAX_JWKS_BYTES)
+}
+
+/// 1.5.5's text for a non-2xx `status` from `url`.
+fn refused_status(url: &str, status: u16) -> String {
+    let shown =
+        http::StatusCode::from_u16(status).map_or_else(|_| status.to_string(), |s| s.to_string());
+    format!("{url} returned HTTP {shown}")
+}
+
+/// 1.5.5's text for a body past `cap` bytes.
+fn over_cap(url: &str, cap: usize) -> String {
+    format!("{url} JWKS body exceeds the {cap}-byte cap")
 }
 
 /// `body` as text, refusing anything over `cap` bytes or not UTF-8.
@@ -223,7 +231,7 @@ pub fn document(url: &str, status: u16, body: Vec<u8>) -> Result<String, String>
 /// 1.5.5's texts: `"{url} JWKS body exceeds the {cap}-byte cap"`, `"{url} JWKS body is not UTF-8"`.
 pub fn capped(url: &str, body: Vec<u8>, cap: usize) -> Result<String, String> {
     if body.len() > cap {
-        return Err(format!("{url} JWKS body exceeds the {cap}-byte cap"));
+        return Err(over_cap(url, cap));
     }
     String::from_utf8(body).map_err(|_| format!("{url} JWKS body is not UTF-8"))
 }
@@ -231,8 +239,9 @@ pub fn capped(url: &str, body: Vec<u8>, cap: usize) -> Result<String, String> {
 /// The form `hop` is sent as, as 1.5.5's core sent it, with `secret` filling the field
 /// `hop.secret_form_field` names. With no secret lent, that field is dropped rather than sent empty
 /// (a public client sends none).
-pub fn form(hop: &LoginHop, secret: Option<&str>) -> Vec<(String, String)> {
-    let mut form = hop.form.clone();
+/// The pairs are wiped on drop: they carry the code, the code_verifier and the lent secret.
+pub fn form(hop: &LoginHop, secret: Option<&str>) -> Zeroizing<Vec<(String, String)>> {
+    let mut form = Zeroizing::new(hop.form.clone());
     if let Some(field) = hop.secret_form_field.as_deref() {
         match secret {
             Some(secret) => match form.iter_mut().find(|(k, _)| k == field) {
@@ -243,6 +252,56 @@ pub fn form(hop: &LoginHop, secret: Option<&str>) -> Vec<(String, String)> {
         }
     }
     form
+}
+
+/// Whether `b` is written as itself in an `application/x-www-form-urlencoded` value (the WHATWG
+/// byte serializer the `url` crate writes with: ASCII alphanumerics and `*-._`).
+const fn form_kept(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'*' | b'-' | b'.' | b'_')
+}
+
+/// How many bytes `v` takes form-encoded.
+fn form_len(v: &str) -> usize {
+    v.bytes()
+        .map(|b| if form_kept(b) || b == b' ' { 1 } else { 3 })
+        .sum()
+}
+
+/// THE TOKEN REQUEST BODY: `pairs` as `name=value&...`, byte for byte what the `url` crate's form
+/// serializer wrote for them (space as `+`, every byte but ASCII alphanumerics and `*-._` as an
+/// upper-case `%XX`), built in ONE buffer sized to the exact length first, so no growth frees a
+/// partial copy of the client secret, code or code_verifier the form carries; wiped on drop.
+pub fn form_body(pairs: &[(String, String)]) -> Zeroizing<String> {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let len = pairs
+        .iter()
+        .map(|(n, v)| form_len(n) + 1 + form_len(v))
+        .sum::<usize>()
+        + pairs.len().saturating_sub(1);
+    let mut out = Zeroizing::new(String::with_capacity(len));
+    for (i, (name, value)) in pairs.iter().enumerate() {
+        if i > 0 {
+            out.push('&');
+        }
+        for (j, part) in [name, value].into_iter().enumerate() {
+            if j == 1 {
+                out.push('=');
+            }
+            for b in part.bytes() {
+                if form_kept(b) {
+                    out.push(char::from(b));
+                } else if b == b' ' {
+                    out.push('+');
+                } else {
+                    out.push('%');
+                    out.push(char::from(HEX[usize::from(b >> 4)]));
+                    out.push(char::from(HEX[usize::from(b & 0x0f)]));
+                }
+            }
+        }
+    }
+    debug_assert_eq!(out.len(), len, "the body is sized once");
+    out
 }
 
 /// The path and query a request to `url` names.
@@ -269,18 +328,13 @@ pub fn get_request(url: &url::Url) -> Request {
 /// can carry), the form url-encoded as 1.5.5's client encoded it, then the hop's own fields.
 pub fn post_request(url: &url::Url, hop: &LoginHop, secret: Option<&str>) -> Request {
     let method = http::Method::from_bytes(hop.method.as_bytes()).unwrap_or(http::Method::POST);
-    // The form holds the lent client secret: its pairs are wiped once the body is encoded. The
-    // encoded body itself rides the SDK's `exchange::Request`, whose `body` the plugin cannot
-    // wipe; wiping it on drop is the contract SDK's (asked of the contract PR, busbar
-    // lane-kernel-head-defaults).
-    let mut pairs = form(hop, secret);
-    let body = url::form_urlencoded::Serializer::new(String::new())
-        .extend_pairs(pairs.iter())
-        .finish();
-    for (name, value) in &mut pairs {
-        zeroize::Zeroize::zeroize(name);
-        zeroize::Zeroize::zeroize(value);
-    }
+    // The form holds the lent client secret, the code and the code_verifier: its pairs are wiped
+    // when they drop, once the body is encoded. The body is encoded into one exact-size wiped
+    // buffer, and that buffer itself (no copy) moves into the SDK's `exchange::Request`, whose
+    // holder wipes it.
+    let pairs = form(hop, secret);
+    let mut body = form_body(&pairs);
+    drop(pairs);
     // 1.5.5's order: the form's content-type, then the client's `accept` (the oracle's
     // `egress.auth|login-hop|oidc` cell holds the wire bytes).
     let mut fields = vec![
@@ -299,7 +353,7 @@ pub fn post_request(url: &url::Url, hop: &LoginHop, secret: Option<&str>) -> Req
         method: method.as_str().as_bytes().to_vec(),
         target: head_target(url),
         fields,
-        body: body.into_bytes(),
+        body: std::mem::take(&mut *body).into_bytes(),
         timeout_ms: FETCH_TIMEOUT_MS,
     }
 }
@@ -334,6 +388,21 @@ impl<'h> HostIo<'h> {
             anchored,
             wanted: false,
         }
+    }
+
+    /// THE HOST'S WALL CLOCK, unix seconds (`clock.now`: THE DESIGN §1, one clock), the time a
+    /// login's id_token expiry is judged at; a clock the host cannot answer, or one below the
+    /// sanity floor, fails CLOSED (`i64::MAX`), as [`crate::clock_or_fail_closed`] maps any reading.
+    #[must_use]
+    pub fn wall_now(&self) -> i64 {
+        let read = self.host.map(|h| h.connector(self.ticket).clock_now());
+        let secs = match read {
+            Some(Poll::Ready(Ok(r))) => {
+                i64::try_from(r.wall_ns / 1_000_000_000).unwrap_or(i64::MAX)
+            }
+            _ => i64::MAX,
+        };
+        crate::clock_or_fail_closed(secs)
     }
 
     /// Whether the op asked for a request it could not wait on (it runs on no ticket): whatever it
@@ -376,7 +445,8 @@ impl<'h> HostIo<'h> {
         let mut c = host.connector_from(self.ticket, self.state.issued);
         let mut ex = match self.state.current.take() {
             Some((at, ex)) if at == url => ex,
-            _ => match Exchange::request(request(&parsed)) {
+            _ => match Exchange::request(request(&parsed)).map(|ex| ex.reply_limit(MAX_JWKS_BYTES))
+            {
                 Ok(ex) => ex,
                 Err(e) => return Poll::Ready(Err(failed(url, e))),
             },
@@ -388,7 +458,22 @@ impl<'h> HostIo<'h> {
             }
             Poll::Ready(r) => {
                 self.state.issued = c.issued();
-                Poll::Ready(r.map_err(|e| failed(url, e)))
+                Poll::Ready(r.map_err(|e| {
+                    match e {
+                        // Cut off at the cap while reading (1.5.5 read at most cap + 1 bytes): its
+                        // words, the status judged before the body for a GET.
+                        ConnFailure::Failed(why) if why == REPLY_OVER_BOUND => {
+                            match ex
+                                .head_status()
+                                .filter(|s| need != NEED_TOKEN && !(200..300).contains(s))
+                            {
+                                Some(status) => refused_status(url, status),
+                                None => over_cap(url, MAX_JWKS_BYTES),
+                            }
+                        }
+                        e => failed(url, e),
+                    }
+                }))
             }
         }
     }

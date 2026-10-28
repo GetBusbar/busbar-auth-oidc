@@ -22,7 +22,7 @@ fn an_identity_is_held_for_its_ttl_and_never_past_the_ceiling() {
     c.put("cred-a", &principal(None), t, c.generation());
     assert!(c.get("cred-a", t + 299).is_some(), "the 300 s default");
     assert!(c.get("cred-a", t + 300).is_none(), "expired is a miss");
-    assert!(c.is_empty(), "and goes");
+    assert!(c.lock().entries.is_empty(), "and goes");
 
     c.put("cred-b", &principal(Some(10)), t, c.generation());
     assert!(c.get("cred-b", t + 9).is_some());
@@ -80,7 +80,7 @@ fn the_bound_holds_by_evicting_the_oldest_inserted() {
         );
     }
     c.put("one-more", &principal(Some(300)), t, c.generation());
-    assert_eq!(c.len(), MAX_ENTRIES);
+    assert_eq!(c.lock().entries.len(), MAX_ENTRIES);
     assert!(c.get("cred-0", t + 1).is_none(), "the oldest went");
     assert!(c.get("one-more", t + 1).is_some());
 }

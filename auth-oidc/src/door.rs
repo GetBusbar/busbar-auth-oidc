@@ -62,7 +62,7 @@ use zeroize::Zeroizing;
 use crate::fetch::{Fetch, HostIo, IoState, NEEDS};
 use crate::flight::FLIGHT_MAX;
 use crate::open::{config, module};
-use crate::{now_unix, OidcModule, Step};
+use crate::{OidcModule, Step};
 
 /// The plugin's name: the manifest name its release packs it under.
 pub const NAME: &str = "busbar-auth-oidc";
@@ -84,16 +84,8 @@ const REWRITES: &[Rewrite] = &[Rewrite {
     class: REWRITE_ALIAS,
     _reserved: 0,
     from: abi_str("oidc"),
-    to: AbiStr {
-        ptr: std::ptr::null(),
-        len: 0,
-    },
+    to: AbiStr::ABSENT,
 }];
-
-const ABSENT_STR: AbiStr = AbiStr {
-    ptr: std::ptr::null(),
-    len: 0,
-};
 
 /// The metric families `refresh`'s envelope indexes into: the verdict cache's flush count
 /// (`abi::auth`: "an auth plugin that caches verdicts declares a counter family of this name (no
@@ -101,7 +93,7 @@ const ABSENT_STR: AbiStr = AbiStr {
 const FAMILIES: &[MetricFamily] = &[MetricFamily {
     name: abi_str(METRIC_CACHE_FLUSHED),
     help: abi_str("inbound verdict cache entries dropped by refresh"),
-    unit: ABSENT_STR,
+    unit: AbiStr::ABSENT,
     label_keys: std::ptr::null(),
     label_keys_len: 0,
     kind: FAMILY_COUNTER,
@@ -208,12 +200,16 @@ impl Opened {
             return Step::Ready(Login::Bad);
         };
         if !crate::nonce_binds(&response.body, nonce) {
+            tracing::warn!(
+                module = "oidc",
+                "the IdP's id_token does not carry this login's nonce; login refused"
+            );
             return Step::Ready(Login::SecurityCheck);
         }
         Step::Ready(
             match step!(self
                 .module
-                .identity_from_token_response(response, now_unix(), now, io))
+                .identity_from_token_response(response, io.wall_now(), now, io))
             {
                 Ok(LoginOutcome::Identify(p)) => Login::Identity(p),
                 Ok(_) => Login::Bad,
@@ -235,9 +231,23 @@ enum Login {
 /// An identity `complete_login` reached but could not fit into the host's buffer, kept for the
 /// host's one re-call on the same ticket (the code redeems once): served only to the same callback.
 struct Reached {
+    /// When it was kept: at the cap the oldest goes ([`keep`]).
+    at: Instant,
     state: Vec<u8>,
     code: Zeroizing<Vec<u8>>,
     principal: Principal,
+}
+
+/// Keep `r` for `ticket`'s re-call, at most `max` at once: at the cap the OLDEST entry goes, never
+/// the rest (an in-flight short answer awaiting its re-call must survive).
+fn keep(map: &mut HashMap<Ticket, Reached>, max: usize, ticket: Ticket, r: Reached) {
+    if map.len() >= max && !map.contains_key(&ticket) {
+        let oldest = map.iter().min_by_key(|(_, k)| k.at).map(|(t, _)| *t);
+        if let Some(oldest) = oldest {
+            map.remove(&oldest);
+        }
+    }
+    map.insert(ticket, r);
 }
 
 /// THE INSTANCE: the opened module (replaced whole by a `refresh` with new settings) and the
@@ -307,8 +317,10 @@ impl Life for Oidc {
 
     fn validate(settings: &[u8]) -> Result<(), Refusal> {
         // The checks `open` makes of the settings alone, so a config `--validate` accepts is one
-        // boot opens: parsed (an explicit non-https `jwks_url` loads, as in 1.5.5).
-        config(text(settings)?).map(drop).map_err(Refusal::failed)
+        // boot opens: parsed, and an explicit `jwks_url` held to https (or loopback http).
+        config(text(settings)?)
+            .and_then(|c| crate::check_jwks_url(&c).map(drop))
+            .map_err(Refusal::failed)
     }
 
     fn open(settings: &[u8], secrets: &[&[u8]], _generation: u64) -> Result<Self, Refusal> {
@@ -589,12 +601,16 @@ impl SafeSlot for Verify {
             Some(Ok(token)) => Some(token),
             None => None,
         };
+        // ONE CLOCK (THE DESIGN §1): expiry is judged at the request's own timestamp, the host's
+        // clock as it arrived; a request stating none (`0`) fails closed.
+        let timestamp = input.field(|i| &i.request).timestamp;
+        let request_now = crate::clock_or_fail_closed(i64::try_from(timestamp).unwrap_or(i64::MAX));
         let ticketless = instance.ticket().is_none();
         let (mut io, parked) = resume(&instance, h);
         let opened = h.life().now();
         let verdict = match opened
             .module
-            .verify(token, now_unix(), Instant::now(), &mut io)
+            .verify(token, request_now, Instant::now(), &mut io)
         {
             // ON THE SPOT (no ticket): a verify that needs a fetch, or waits on another call's, may
             // not pend, so it answers REFUSED and the host makes it again on a ticket
@@ -749,12 +765,12 @@ impl SafeSlot for Complete {
         );
         if answered == Outcome::Failed {
             let mut reached = oidc.reached.lock().unwrap_or_else(PoisonError::into_inner);
-            if reached.len() >= REACHED_MAX {
-                reached.clear();
-            }
-            reached.insert(
+            keep(
+                &mut reached,
+                REACHED_MAX,
                 instance.ticket(),
                 Reached {
+                    at: Instant::now(),
                     state: state.to_vec(),
                     code: Zeroizing::new(code_bytes.to_vec()),
                     principal,

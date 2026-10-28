@@ -72,3 +72,86 @@ fn ready_resolves_the_jwks_url_at_boot_and_an_explicit_one_skips_it() {
         "1.5.5's boot refusal: {err}"
     );
 }
+
+/// An op whose fetch answers `Err`, but only after another op has taken over its abandoned flight:
+/// the interleaving a late answer from a flight past `FLIGHT_MAX` produces.
+struct TakenOver<'a> {
+    a: crate::script::Caller<'a>,
+    b: crate::script::Caller<'a>,
+    d: &'a Discovery,
+    c: &'a OidcConfig,
+    at: Instant,
+    taken: bool,
+}
+
+impl Fetch for TakenOver<'_> {
+    fn caller(&self) -> Option<busbar_contract::abi::mechanism::ticket::Ticket> {
+        self.a.caller()
+    }
+
+    fn get(&mut self, _: Doc, _: &str) -> Poll<Result<String, String>> {
+        if !self.taken {
+            self.taken = true;
+            assert_eq!(self.d.document(self.c, self.at, &mut self.b), Step::Pending);
+        }
+        Poll::Ready(Err("connection reset".into()))
+    }
+
+    fn post(
+        &mut self,
+        hop: &busbar_contract::auth::LoginHop,
+        secret: Option<&str>,
+    ) -> Poll<Result<busbar_contract::auth::LoginHttpResponse, String>> {
+        self.a.post(hop, secret)
+    }
+}
+
+#[test]
+fn a_late_failure_from_an_abandoned_flight_does_not_overwrite_the_live_one() {
+    let (c, d) = (cfg(None), Discovery::new(Duration::from_secs(60)));
+    let idp = Idp::new(doc());
+    let t0 = Instant::now();
+    let late = t0 + crate::flight::FLIGHT_MAX + Duration::from_secs(1);
+    let mut a = idp.pending(ticket(1));
+    assert_eq!(d.document(&c, t0, &mut a), Step::Pending);
+    // A re-enters past FLIGHT_MAX; while its fetch answers, B takes over the abandoned flight.
+    let mut a = TakenOver {
+        a,
+        b: idp.pending(ticket(2)),
+        d: &d,
+        c: &c,
+        at: late,
+        taken: false,
+    };
+    let b_caller_err = ready(d.document(&c, late, &mut a));
+    assert!(b_caller_err.is_err(), "A's own answer is its error");
+    let mut b = a.b;
+    let got = ready(d.document(&c, late, &mut b));
+    assert!(
+        got.is_ok(),
+        "B must get its own document, not A's late error: {got:?}"
+    );
+}
+
+#[test]
+fn a_failed_discovery_logs_one_warn_with_the_error() {
+    let (c, d) = (cfg(None), Discovery::new(Duration::from_secs(60)));
+    let idp = Idp::answering(Err("connection refused".into()));
+    let cap = busbar_contract::testkit::WarnCapture::default();
+    tracing::subscriber::with_default(cap.clone(), || {
+        let now = Instant::now();
+        assert!(ready(d.document(&c, now, &mut idp.at_once(Some(ME)))).is_err());
+        assert!(ready(d.document(&c, now, &mut idp.at_once(Some(ME)))).is_err());
+    });
+    assert_eq!(
+        cap.count("OIDC discovery failed"),
+        1,
+        "one warn per attempt; the retry window answers the second silently: {:?}",
+        cap.messages()
+    );
+    assert!(
+        cap.contains("connection refused") && cap.contains(ISSUER),
+        "{:?}",
+        cap.messages()
+    );
+}
