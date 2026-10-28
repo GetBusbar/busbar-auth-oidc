@@ -137,7 +137,7 @@ fn a_late_failure_from_an_abandoned_flight_does_not_overwrite_the_live_one() {
 fn a_failed_discovery_logs_one_warn_with_the_error() {
     let (c, d) = (cfg(None), Discovery::new(Duration::from_secs(60)));
     let idp = Idp::answering(Err("connection refused".into()));
-    let cap = busbar_contract::testkit::WarnCapture::default();
+    let cap = busbar_test_kit::warn_capture::WarnCapture::default();
     tracing::subscriber::with_default(cap.clone(), || {
         let now = Instant::now();
         assert!(ready(d.document(&c, now, &mut idp.at_once(Some(ME)))).is_err());

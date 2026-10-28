@@ -149,7 +149,7 @@ fn a_nonce_mismatch_is_logged() {
         body: serde_json::json!({ "id_token": id_token }).to_string(),
     });
     let mut io = HostIo::new(None, Ticket::NONE, IoState::default(), false);
-    let cap = busbar_contract::testkit::WarnCapture::default();
+    let cap = busbar_test_kit::warn_capture::WarnCapture::default();
     let login = tracing::subscriber::with_default(cap.clone(), || {
         oidc.now()
             .login(None, None, None, "MINE-SECRET", &mut answer, &mut io)
