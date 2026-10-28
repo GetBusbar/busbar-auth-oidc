@@ -162,8 +162,10 @@ fn build_real_binaries() -> (std::path::PathBuf, std::path::PathBuf) {
         &[
             "build",
             "--release",
-            "-p",
-            "busbar",
+            "--manifest-path",
+            "dist/default/Cargo.toml",
+            "--target-dir",
+            "target",
             "--bin",
             "busbar",
             "--features",
@@ -354,7 +356,7 @@ fn install_oidc_plugin_via_admin_api_and_authenticate() {
     let providers = work.join("providers.yaml");
     std::fs::write(
         &providers,
-        "mock:\n  protocol: anthropic\n  base_url: \"http://127.0.0.1:9\"\n  api_key_env: MOCK_KEY\n",
+        "mock:\n  protocol: anthropic\n  base_url: \"http://127.0.0.1:9\"\n",
     )
     .unwrap();
 
