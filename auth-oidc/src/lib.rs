@@ -995,20 +995,18 @@ pub(crate) fn json_err(what: &'static str) -> impl FnOnce(serde_json::Error) -> 
 
 /// The configured `jwks_url`, checked. Absent is fine (discovery names it), and so is `https`.
 ///
-/// Plain `http` is accepted only for a LOOPBACK host ([`is_loopback_host`]: 127.0.0.0/8, `::1`,
-/// `localhost`, `*.localhost`), the local identity-provider rig 1.5.5 booted (1.5.5 returned an
-/// explicit `jwks_url` unchecked). Such a config opens with the warning this returns, which `open`
-/// logs: the key set is still only ever fetched over https ([`fetch::plaintext_allowed`]), as on
-/// 1.5.5, so every token it is asked to verify is rejected until the URL is https. Any other value
-/// (http to a host that is not loopback, another scheme, or no URL at all) is refused at `open`
-/// with an error naming the field and the loopback exception, rather than loading and then
-/// rejecting every token from a remote identity provider.
+/// Plain `http` OPENS, with the warning this returns, which `open` logs: a 1.5.5 config loads
+/// unchanged (owner 2026-10-20; 1.5.5 returned an explicit `jwks_url` unchecked). To a LOOPBACK
+/// host ([`is_loopback_host`]: 127.0.0.0/8, `::1`, `localhost`, `*.localhost`), the local
+/// identity-provider rig, the warning says so; to any other host it is LOUD: a key set over plain
+/// http could be substituted in transit. Either way the key set is fetched only over https
+/// ([`fetch::plaintext_allowed`]), as on 1.5.5, so every token is rejected until the URL is https.
+/// Any other scheme, or no URL at all, is refused at `open`, naming the field.
 ///
 /// # Errors
-/// The URL does not parse, or is neither https nor http to a loopback host.
+/// The URL does not parse, or is neither https nor http.
 pub fn check_jwks_url(cfg: &OidcConfig) -> Result<Option<String>, String> {
-    const ONLY: &str = "it must be an https URL (plain http is accepted only for a loopback host: \
-                        127.0.0.0/8, ::1 or localhost)";
+    const ONLY: &str = "it must be an https URL (plain http loads, with a warning)";
     let Some(url) = &cfg.jwks_url else {
         return Ok(None);
     };
@@ -1022,12 +1020,12 @@ pub fn check_jwks_url(cfg: &OidcConfig) -> Result<Option<String>, String> {
              URL"
             .to_string(),
         )),
-        "http" => Err(
-            "jwks_url must be an https URL (got scheme 'http' for a host that is not loopback); \
-             the JWKS is only ever fetched over https, and plain http is accepted only for a \
-             loopback host (127.0.0.0/8, ::1 or localhost)"
+        "http" => Ok(Some(
+            "jwks_url is plain http on a non-loopback host: signing keys can be substituted in \
+             transit; use https (busbar fetches the key set only over https, so every OIDC token \
+             is rejected until jwks_url is an https URL)"
                 .to_string(),
-        ),
+        )),
         other => Err(format!(
             "jwks_url must be an https URL (got scheme '{}'); {ONLY}",
             other.escape_debug()
