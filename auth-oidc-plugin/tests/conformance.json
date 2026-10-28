@@ -29,7 +29,7 @@
       {
         "issuer": "https://idp.conformance.example/v2.0",
         "audience": "api://busbar-conformance",
-        "jwks_url": "http://idp.conformance.example/keys"
+        "jwks_url": "ftp://idp.conformance.example/keys"
       }
     ],
     "rotated_settings": {

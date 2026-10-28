@@ -149,7 +149,7 @@ impl Module {
     }
 }
 
-/// 1.5.5's `resolve_jwks_url`: the explicit URL (held to https), else discovered.
+/// 1.5.5's `resolve_jwks_url`: the explicit URL (https or http), else discovered.
 fn resolve_jwks_url(c: &OidcConfig, idp: &Idp) -> Result<String, String> {
     check_jwks_url(c)?;
     ready(OidcModule::new(c).jwks_url(Instant::now(), &mut idp.at_once(Some(ME))))
@@ -1923,13 +1923,19 @@ fn a_hostile_discovery_issuer_is_escaped_in_the_mismatch_error() {
     }
 }
 
-/// An explicit `jwks_url` that is not https is refused at resolve time, naming the field: the
-/// fetcher is https-only, so such a config used to load cleanly and then reject every token
-/// (OIDC-5, owner-approved 2026-09-30). An https one still resolves with no fetch at all.
+/// An explicit `jwks_url` that is neither https nor http is refused at resolve time, naming the
+/// field. Plain http resolves (a 1.5.5 config loads unchanged, owner 2026-10-20; `open` warns), and
+/// an https one resolves with no fetch at all.
 #[test]
-fn an_explicit_non_https_jwks_url_is_refused_at_resolve_time() {
+fn an_explicit_non_http_jwks_url_is_refused_at_resolve_time() {
     let fetcher = FixtureFetcher::new(String::new());
-    for bad in ["http://idp.invalid/k", "not a url", "ftp://idp.invalid/k"] {
+    let mut c = cfg("groups");
+    c.jwks_url = Some("http://idp.invalid/k".to_string());
+    assert_eq!(
+        resolve_jwks_url(&c, &fetcher).as_deref(),
+        Ok("http://idp.invalid/k")
+    );
+    for bad in ["not a url", "ftp://idp.invalid/k"] {
         let mut c = cfg("groups");
         c.jwks_url = Some(bad.to_string());
         let err = resolve_jwks_url(&c, &fetcher)

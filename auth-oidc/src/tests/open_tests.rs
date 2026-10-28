@@ -134,11 +134,13 @@ fn a_loopback_http_jwks_url_opens_with_a_warning() {
     assert!(cap.messages().is_empty(), "{:?}", cap.messages());
 }
 
-/// Plain http to any host that is not loopback is refused at open, naming `jwks_url` and saying
-/// why: a private address, a public name, a name that only starts like loopback, and a userinfo
-/// that dresses a remote host as 127.0.0.1 are all remote hosts.
+/// A 1.5.5 CONFIG LOADS UNCHANGED (owner 2026-10-20): plain http to a host that is not loopback
+/// OPENS, as 1.5.5 booted it, and `open` logs a LOUD warning naming `jwks_url`, the non-loopback
+/// host and https. A private address, a public name, a name that only starts like loopback, and a
+/// userinfo that dresses a remote host as 127.0.0.1 are all remote hosts, so each gets the remote
+/// warning, never the loopback one. RED before: each was refused at open.
 #[test]
-fn a_non_loopback_http_jwks_url_is_refused_at_open_with_the_reason() {
+fn a_non_loopback_http_jwks_url_opens_with_a_loud_warning() {
     for url in [
         "http://10.0.0.7/keys",
         "http://192.168.1.2/keys",
@@ -154,29 +156,19 @@ fn a_non_loopback_http_jwks_url_is_refused_at_open_with_the_reason() {
             "jwks_url": url,
         })
         .to_string();
-        let err = expect_err(module(&settings));
-        assert!(err.contains("jwks_url"), "{url}: {err}");
-        assert!(err.contains("https"), "{url}: {err}");
-        assert!(err.contains("loopback"), "{url}: {err}");
+        let cap = busbar_contract::testkit::WarnCapture::default();
+        let opened = tracing::subscriber::with_default(cap.clone(), || module(&settings));
+        assert!(
+            opened.is_ok(),
+            "a non-loopback http jwks_url must open: {url}"
+        );
+        let logged = cap.messages().join("\n");
+        assert!(
+            logged.contains("jwks_url is plain http on a non-loopback host"),
+            "{url}: {logged:?}"
+        );
+        assert!(logged.contains("use https"), "{url}: {logged:?}");
     }
-}
-
-#[test]
-fn an_explicit_http_jwks_url_is_refused_at_open() {
-    // OIDC-5 (owner-approved 2026-09-30): every request is https-only, so an http `jwks_url` would
-    // open and then reject every token. It is refused at open, naming the field.
-    let err = expect_err(module(
-        r#"{"issuer":"https://issuer.invalid.example","audience":"api://busbar-client",
-            "jwks_url":"http://issuer.invalid.example/keys"}"#,
-    ));
-    assert!(
-        err.contains("jwks_url"),
-        "the error must name jwks_url: {err}"
-    );
-    assert!(
-        err.contains("https"),
-        "the error must say https is required: {err}"
-    );
 }
 
 /// THE SEAM, as implemented: `open` runs on no ticket with no connector, so it fetches nothing; a
