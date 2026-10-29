@@ -5,7 +5,7 @@
 
 use super::*;
 use busbar_contract::abi::host::conn::connector::{
-    DIRECTION_OUTBOUND, EGRESS_LOOPBACK_ALLOWED, EGRESS_OPEN_WEB, EGRESS_OPERATOR_INFRASTRUCTURE,
+    DIRECTION_OUTBOUND, EGRESS_DEFAULT, EGRESS_LOOPBACK_ALLOWED, EGRESS_OPEN_WEB,
 };
 use std::net::IpAddr;
 
@@ -167,8 +167,10 @@ fn every_request_is_https_only_and_needs_the_host_connector() {
     );
 }
 
-/// THE NEEDS: three outbound needs — discovery, the JWKS and the token exchange, every one in the
-/// operator-infrastructure class (ARCHITECT ruling 2026-10-09) — stated twice: the ANCHORED set trusting an extra root on top of the public
+/// THE NEEDS: three outbound needs — discovery and the JWKS in the `open-web` class (https only, a
+/// private address refused unless allowlisted, the issuer pin kept), the token exchange in the
+/// connector's default class named per request (a private address refused unless allowlisted,
+/// never lifted to operator infrastructure: security item 3) — stated twice: the ANCHORED set trusting an extra root on top of the public
 /// ones, the PUBLIC set the public roots only (`ca_cert_pem` is optional, and the host refuses a
 /// need whose `trust_from` names nothing); discovery pinned to a setting, the JWKS and the token
 /// endpoint named per request. (Their words are read back from the door's rendered Statement in
@@ -178,7 +180,12 @@ fn the_needs_are_outbound_in_their_class_anchored_then_public() {
     assert_eq!(NEEDS.len(), 2 * PUBLIC as usize);
     for (i, n) in NEEDS.iter().enumerate() {
         assert_eq!(n.direction, DIRECTION_OUTBOUND, "need {i}");
-        assert_eq!(n.egress_class, EGRESS_OPERATOR_INFRASTRUCTURE, "need {i}");
+        let class = if i as u32 % PUBLIC == NEED_TOKEN {
+            EGRESS_DEFAULT
+        } else {
+            EGRESS_OPEN_WEB
+        };
+        assert_eq!(n.egress_class, class, "need {i}");
         assert_eq!(n.transport.len, "http".len(), "need {i}");
         let trust = if (i as u32) < PUBLIC {
             "settings.ca_cert_pem".len()
@@ -410,5 +417,66 @@ fn the_form_body_matches_the_url_form_serializer() {
             .extend_pairs(pairs.iter())
             .finish();
         assert_eq!(form_body(&pairs).as_str(), old, "pairs {case:?}");
+    }
+}
+
+/// `ca_cert_pem` ADDS A ROOT AND NEVER DISABLES VALIDATION (identity-providers.md: "`ca_cert_pem`
+/// never disables validation"; W20): a module whose settings name one goes out on the ANCHORED needs
+/// alone, each trusting `settings.ca_cert_pem` (`trust_from`, which the host's connector layers on
+/// top of the public roots), a module whose settings name none (or an empty one) on the PUBLIC
+/// needs alone, which trust the public roots and nothing else. No source file of the module names
+/// the contract's unverified-handshake opt-in, or asks for a TLS upgrade at all: every request is
+/// one framed exchange whose connection the host secures and verifies.
+#[test]
+fn ca_cert_pem_only_adds_a_trusted_root_and_never_disables_verification() {
+    let settings = |pem: Option<&str>| {
+        let mut s = serde_json::json!({
+            "issuer": "https://idp.corp.example/realms/r",
+            "audience": "api://a",
+        });
+        if let Some(p) = pem {
+            s["ca_cert_pem"] = serde_json::json!(p);
+        }
+        crate::open::config(&s.to_string()).expect("parses")
+    };
+    let pem = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n";
+    assert!(crate::OidcModule::new(&settings(Some(pem))).anchored());
+    assert!(!crate::OidcModule::new(&settings(Some(""))).anchored());
+    assert!(!crate::OidcModule::new(&settings(None)).anchored());
+    for need in [NEED_DISCOVERY, NEED_JWKS, NEED_TOKEN] {
+        let anchored = &NEEDS[on(need, true) as usize];
+        let public = &NEEDS[on(need, false) as usize];
+        assert_eq!(
+            anchored.trust_from.len,
+            "settings.ca_cert_pem".len(),
+            "{need}"
+        );
+        assert_eq!(public.trust_from.len, 0, "{need}: the public roots only");
+        assert_eq!(
+            (anchored.egress_class, anchored.target_from.len),
+            (public.egress_class, public.target_from.len),
+            "{need}: the anchor changes the trust and nothing else"
+        );
+    }
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut stack = vec![dir];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).expect("reads src") {
+            let p = e.expect("an entry").path();
+            if p.is_dir() {
+                if p.file_name().is_some_and(|n| n != "tests") {
+                    stack.push(p);
+                }
+                continue;
+            }
+            let text = std::fs::read_to_string(&p).expect("reads a source file");
+            for banned in ["UPGRADE_VERIFY_OFF", "upgrade_secure", "unverified_client"] {
+                assert!(
+                    !text.contains(banned),
+                    "{} names `{banned}`: the module never weakens verification",
+                    p.display()
+                );
+            }
+        }
     }
 }

@@ -44,7 +44,9 @@ use busbar_contract::abi::auth::{
     LOGIN_IDENTITY, LOGIN_KIND_REDIRECT, LOGIN_OUTAGE, LOGIN_SECURITY_CHECK_FAILED,
     METRIC_CACHE_FLUSHED, SPAN_ABSENT, STRIP_FIELD, VERDICT_IDENTITY, VERDICT_PASS, VERDICT_REJECT,
 };
-use busbar_contract::abi::mechanism::call::{AbiStr, Blob, OutHead, Outcome, Span, BLOB_ABSENT};
+use busbar_contract::abi::mechanism::call::{
+    AbiStr, Blob, OutHead, Outcome, Span, BLOB_ABSENT, SEVERITY_ERROR,
+};
 use busbar_contract::abi::mechanism::door::{
     MarkWord, MetricFamily, Rewrite, Statement, FAMILY_COUNTER,
 };
@@ -98,6 +100,18 @@ const FAMILIES: &[MetricFamily] = &[MetricFamily {
 /// The index of the flush-count family in [`FAMILIES`].
 pub const CACHE_FAMILY: u32 = 0;
 
+/// The diagnostics this plugin declares, in index order: the ids its envelopes report and the host
+/// audits on its behalf.
+pub const DIAG_NAMES: &[&str] = &["OIDC_IDP_DESTINATION_REFUSED"];
+
+/// The declared diagnostic a refused IdP destination raises ([`raise_refusals`]): the module's own
+/// refusal (a discovered `jwks_uri` or `token_endpoint` off the issuer's host, a scheme) or the
+/// host's (the destination guard refusing the address), naming the host and the rule.
+pub const DIAG_DESTINATION_REFUSED: u32 = 0;
+
+/// [`DIAG_NAMES`] as the Statement carries them.
+const DIAG_IDS: &[AbiStr] = &[abi_str(DIAG_NAMES[DIAG_DESTINATION_REFUSED as usize])];
+
 /// This plugin's Statement: its name and alias, its version, the most calls one instance holds in
 /// flight, its one secret reference, its six outbound needs, its one metric family and its auth
 /// tail.
@@ -112,8 +126,24 @@ pub const STATEMENT: Statement = Statement {
     needs_len: NEEDS.len(),
     mark_words: CARRIERS.as_ptr(),
     mark_words_len: CARRIERS.len(),
+    diag_ids: DIAG_IDS.as_ptr(),
+    diag_ids_len: DIAG_IDS.len(),
     ..with_tail(statement(NAME, env!("CARGO_PKG_VERSION"), 64), &TAIL)
 };
+
+/// EVERY REFUSED IdP DESTINATION IS AUDITED: each refusal the op met (`io`'s, [`HostIo::take_refusals`])
+/// that `module` has not raised before is reported in the op's envelope as
+/// [`DIAG_DESTINATION_REFUSED`] at error, the host auditing a declared diagnostic on the plugin's
+/// behalf. Once per module per refusal ([`OidcModule::first_report`]), so a refusal every request
+/// meets is not a flood; the words name the host and the rule, never a URL's path or a secret.
+fn raise_refusals<O: AbiOut>(module: &OidcModule, io: &mut HostIo<'_>, out: &mut Out<'_, O>) {
+    for why in io.take_refusals() {
+        if module.first_report(&why) {
+            tracing::warn!(module = "oidc", "{why}");
+            out.diag(DIAG_DESTINATION_REFUSED, SEVERITY_ERROR, why);
+        }
+    }
+}
 
 /// The most short answers kept for their re-call at once.
 const REACHED_MAX: usize = 1024;
@@ -618,10 +648,11 @@ impl SafeSlot for Verify {
                 VERDICT_IDENTITY,
             );
         }
-        let verdict = match opened
+        let judged = opened
             .module
-            .judge(token, request_now, Instant::now(), &mut io)
-        {
+            .judge(token, request_now, Instant::now(), &mut io);
+        raise_refusals(&opened.module, &mut io, &mut out);
+        let verdict = match judged {
             // ON THE SPOT (no ticket): a verify that needs a fetch, or waits on another call's, may
             // not pend, so it answers REFUSED and the host makes it again on a ticket
             // (`abi::auth`: a plugin whose `verify` must wait on I/O answers REFUSED on the spot).
@@ -692,7 +723,9 @@ impl SafeSlot for Begin {
         };
         let opened = h.life().now();
         let (mut io, parked) = resume(&instance, h, &opened);
-        match opened.module.begin_login(&begin, Instant::now(), &mut io) {
+        let begun = opened.module.begin_login(&begin, Instant::now(), &mut io);
+        raise_refusals(&opened.module, &mut io, &mut out);
+        match begun {
             Step::Ready(Ok(LoginOutcome::Authorize(url))) => {
                 out.set(|o| &o.shape, BEGIN_AUTHORIZE);
                 out.lease_str(|o| &o.authorize_url, h.leases(), url);
@@ -746,6 +779,7 @@ impl SafeSlot for Complete {
                     &mut parked.answer,
                     &mut io,
                 );
+                raise_refusals(&opened.module, &mut io, &mut out);
                 match login {
                     Step::Ready(Login::Identity(p)) => p,
                     Step::Ready(Login::Bad) => {
