@@ -1013,10 +1013,16 @@ fn discovery_cfg() -> OidcConfig {
 
 #[test]
 fn discovery_with_matching_issuer_resolves_jwks_uri() {
-    let doc = serde_json::json!({ "issuer": ISSUER, "jwks_uri": "https://issuer.test/keys" });
+    let doc = serde_json::json!({
+        "issuer": ISSUER,
+        "jwks_uri": "https://login.microsoftonline.com/tenant-guid/discovery/v2.0/keys"
+    });
     let fetcher = FixtureFetcher::new(doc.to_string());
     let url = resolve_jwks_url(&discovery_cfg(), &fetcher).expect("matching issuer must resolve");
-    assert_eq!(url, "https://issuer.test/keys");
+    assert_eq!(
+        url,
+        "https://login.microsoftonline.com/tenant-guid/discovery/v2.0/keys"
+    );
 }
 
 /// Without an issuer check, a discovery document resolves `jwks_uri` regardless of which host served
@@ -1595,15 +1601,21 @@ fn login_id_token_audience_is_the_client_id_not_the_bearer_audience() {
 fn discovery_populates_authorization_and_token_endpoints() {
     let doc = serde_json::json!({
         "issuer": ISSUER,
-        "jwks_uri": "https://issuer.test/keys",
-        "authorization_endpoint": "https://issuer.test/authorize",
-        "token_endpoint": "https://issuer.test/token",
+        "jwks_uri": "https://login.microsoftonline.com/keys",
+        "authorization_endpoint": "https://login.microsoftonline.com/authorize",
+        "token_endpoint": "https://login.microsoftonline.com/token",
     });
     let fetcher = FixtureFetcher::new(doc.to_string());
     let (auth_ep, tok_ep) = resolve_login_endpoints(&discovery_cfg(), &fetcher)
         .expect("discovery must resolve the login endpoints");
-    assert_eq!(auth_ep.as_deref(), Some("https://issuer.test/authorize"));
-    assert_eq!(tok_ep.as_deref(), Some("https://issuer.test/token"));
+    assert_eq!(
+        auth_ep.as_deref(),
+        Some("https://login.microsoftonline.com/authorize")
+    );
+    assert_eq!(
+        tok_ep.as_deref(),
+        Some("https://login.microsoftonline.com/token")
+    );
 
     // A poisoned discovery doc (issuer mismatch) is refused for login endpoints too.
     let evil = serde_json::json!({
@@ -1621,8 +1633,8 @@ fn discovery_populates_authorization_and_token_endpoints() {
 fn explicit_login_endpoints_win_and_both_explicit_skip_discovery() {
     let doc = serde_json::json!({
         "issuer": ISSUER,
-        "authorization_endpoint": "https://issuer.test/discovered/authorize",
-        "token_endpoint": "https://issuer.test/discovered/token",
+        "authorization_endpoint": "https://login.microsoftonline.com/discovered/authorize",
+        "token_endpoint": "https://login.microsoftonline.com/discovered/token",
     });
 
     // (a) one explicit: it wins, the other is discovered.
@@ -1633,7 +1645,7 @@ fn explicit_login_endpoints_win_and_both_explicit_skip_discovery() {
     assert_eq!(auth_ep.as_deref(), Some("https://explicit.test/authorize"));
     assert_eq!(
         tok_ep.as_deref(),
-        Some("https://issuer.test/discovered/token")
+        Some("https://login.microsoftonline.com/discovered/token")
     );
     assert_eq!(fetcher.calls(), 1);
 
@@ -1925,18 +1937,19 @@ fn a_hostile_discovery_issuer_is_escaped_in_the_mismatch_error() {
 }
 
 /// An explicit `jwks_url` that is neither https nor http is refused at resolve time, naming the
-/// field. Plain http resolves (a 1.5.5 config loads unchanged, owner 2026-10-20; `open` warns), and
-/// an https one resolves with no fetch at all.
+/// field, and so is plain http to a host that is not loopback (plain http only for loopback,
+/// security item 3). Plain http to loopback resolves (`open` warns), and an https one resolves with
+/// no fetch at all.
 #[test]
 fn an_explicit_non_http_jwks_url_is_refused_at_resolve_time() {
     let fetcher = FixtureFetcher::new(String::new());
     let mut c = cfg("groups");
-    c.jwks_url = Some("http://idp.invalid/k".to_string());
+    c.jwks_url = Some("http://127.0.0.1:8080/k".to_string());
     assert_eq!(
         resolve_jwks_url(&c, &fetcher).as_deref(),
-        Ok("http://idp.invalid/k")
+        Ok("http://127.0.0.1:8080/k")
     );
-    for bad in ["not a url", "ftp://idp.invalid/k"] {
+    for bad in ["not a url", "ftp://idp.invalid/k", "http://idp.invalid/k"] {
         let mut c = cfg("groups");
         c.jwks_url = Some(bad.to_string());
         let err = resolve_jwks_url(&c, &fetcher)
