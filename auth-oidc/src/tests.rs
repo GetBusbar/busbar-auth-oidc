@@ -2273,7 +2273,7 @@ fn a_token_of_the_second_provider_passes_the_first_and_is_admitted_by_the_second
     let (key_a, a, key_b, b) = two_providers();
     let now = 1_700_000_000;
     let token = key_b.mint(&claims_of(ISSUER_B, AUDIENCE_B, now));
-    let cap = busbar_contract::testkit::WarnCapture::capturing_debug();
+    let cap = busbar_test_kit::warn_capture::WarnCapture::capturing_debug();
     let walked = tracing::subscriber::with_default(cap.clone(), || chain(&[&a, &b], &token, now));
     assert_eq!(walked, Walked::Admitted(1, "oidc:object-guid".to_string()));
     assert_eq!(
@@ -2302,7 +2302,7 @@ fn a_token_claiming_the_first_providers_issuer_with_a_bad_signature_is_refused_b
     let (key_a, a, key_b, b) = two_providers();
     let now = 1_700_000_000;
     let forged = key_b.mint(&claims_of(ISSUER, AUDIENCE, now));
-    let cap = busbar_contract::testkit::WarnCapture::default();
+    let cap = busbar_test_kit::warn_capture::WarnCapture::default();
     let walked = tracing::subscriber::with_default(cap.clone(), || chain(&[&a, &b], &forged, now));
     assert_eq!(walked, Walked::Refused(0));
     assert_eq!(b.idp.calls(), 0, "B never judged it");
