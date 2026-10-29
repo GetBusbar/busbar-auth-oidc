@@ -38,7 +38,7 @@ mod support;
 // crate's cdylib through the one loader, driven by the auth kind's script (verify, the login
 // family, the far ends the module's needs reach: `conformance.json`), exact crossings, both folds
 // equal, its RED arms kept.
-busbar_plugin_loader::conformance_suite! {
+busbar_test_kit::conformance_suite! {
     door: busbar_auth_oidc::door::door,
     cdylib: "busbar_auth_oidc_plugin",
     inputs: include_str!("conformance.json"),
