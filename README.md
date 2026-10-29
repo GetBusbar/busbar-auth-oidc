@@ -53,6 +53,18 @@ explicitly in production; do not assume they move together.
   request's bearer token is verified
   against the IdP's live JWKS — the plugin never trusts an unsigned
   claim.
+- **Several identity providers in one chain** (`auth.chain` or
+  `auth.admin_auth`): each token is routed by its issuer, as a
+  multi-issuer OIDC resource server routes it. A bearer that is not a JWT,
+  or a JWT whose `iss` is not this provider's `issuer` (or names none), is
+  not this provider's: it passes to the next auth in the chain, logged
+  (the unverified `iss` only picks which provider judges the token, and no
+  key is fetched for it). A JWT naming this provider's `issuer` is this
+  provider's alone: verified in full (signature against its JWKS, the
+  RS256/ES256 allow-list, `aud`, `exp`/`nbf` with 60 s skew), and any
+  failure refuses it, logged with the reason, and stops the chain; it
+  never falls through to another provider. A token no provider claims is
+  refused at the chain's end.
 - **Mapping claims to busbar identity**: the configured role claim (e.g.
   `groups`) becomes the `Principal`'s roles, which busbar's virtual-key
   and policy layer can then gate on — so an operator's existing IdP
@@ -84,7 +96,7 @@ the first request.
 
 | Setting | Required | Default | Notes |
 |---|---|---|---|
-| `issuer` | yes | — | The IdP's OIDC issuer URL. Checked against the JWT's `iss` claim. A blank value is refused at load. |
+| `issuer` | yes | — | The IdP's OIDC issuer URL, exact-matched against the JWT's `iss` claim: a token naming another issuer passes to the next auth in the chain, a token naming this one is verified in full. A blank value is refused at load. |
 | `audience` | yes | — | The expected `aud` claim (busbar's registered client/resource identifier at the IdP). A blank value is refused at load. |
 | `jwks_url` | no | discovered from `issuer` | The IdP's JWKS endpoint. Must be an `https` URL. Plain `http` is accepted only for a loopback host (127.0.0.0/8, `::1`, `localhost`); it loads with a warning, and since the key set is only ever fetched over https, every token is rejected until the URL is https. Anything else is refused at load. When omitted, resolved once at boot via OIDC discovery (`<issuer>/.well-known/openid-configuration`); a discovery failure refuses the boot. |
 | `role_claim` | no | `groups` | The claim mapped onto the resulting `Principal`'s roles; set `roles` to use Entra app-roles instead. |
