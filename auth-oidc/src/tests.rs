@@ -1521,7 +1521,7 @@ fn a_key_set_that_cannot_be_had_at_login_is_a_declined_login_as_in_1_5_5() {
     ] {
         let m = OidcModule::new(&c);
         let down = Idp::answering(Err(cause.to_string()));
-        let cap = busbar_contract::testkit::WarnCapture::default();
+        let cap = busbar_test_kit::warn_capture::WarnCapture::default();
         let outcome = tracing::subscriber::with_default(cap.clone(), || {
             ready(m.identity_from_token_response(
                 &response,
@@ -2051,7 +2051,7 @@ fn a_refused_token_response_is_logged_with_its_reason() {
             status,
             body: body.to_string(),
         };
-        let cap = busbar_contract::testkit::WarnCapture::capturing_debug();
+        let cap = busbar_test_kit::warn_capture::WarnCapture::capturing_debug();
         let outcome = tracing::subscriber::with_default(cap.clone(), || {
             ready(m.identity_from_token_response(
                 &response,
@@ -2077,7 +2077,7 @@ fn a_refused_token_exchange_is_logged_with_its_reason() {
     c.token_endpoint = Some("https://idp.test/token".to_string());
     let idp = Idp::new(String::new());
     let run = |m: &OidcModule, code: Option<&str>| {
-        let cap = busbar_contract::testkit::WarnCapture::capturing_debug();
+        let cap = busbar_test_kit::warn_capture::WarnCapture::capturing_debug();
         let out = tracing::subscriber::with_default(cap.clone(), || {
             ready(m.token_exchange(
                 code,
@@ -2100,7 +2100,7 @@ fn a_refused_token_exchange_is_logged_with_its_reason() {
     none.token_endpoint = None;
     idp.set_body(serde_json::json!({ "issuer": ISSUER }).to_string());
     let mut io = idp.at_once(Some(ME));
-    let cap = busbar_contract::testkit::WarnCapture::default();
+    let cap = busbar_test_kit::warn_capture::WarnCapture::default();
     let out = tracing::subscriber::with_default(cap.clone(), || {
         ready(OidcModule::new(&none).token_exchange(
             Some("c"),
@@ -2169,8 +2169,8 @@ fn an_end_user_decline_logs_at_info_and_an_idp_failure_at_warn() {
             body: r#"{"error":"invalid_grant"}"#.to_string(),
         };
         let (warn, all) = (
-            busbar_contract::testkit::WarnCapture::default(),
-            busbar_contract::testkit::WarnCapture::capturing_debug(),
+            busbar_test_kit::warn_capture::WarnCapture::default(),
+            busbar_test_kit::warn_capture::WarnCapture::capturing_debug(),
         );
         for cap in [&warn, &all] {
             // A 4xx answers a declined login, a 5xx the outage: either way it is logged.
@@ -2190,8 +2190,8 @@ fn an_end_user_decline_logs_at_info_and_an_idp_failure_at_warn() {
     assert_eq!(refused(503), (true, true), "a 5xx is the IdP's: warn");
 
     let (warn, all) = (
-        busbar_contract::testkit::WarnCapture::default(),
-        busbar_contract::testkit::WarnCapture::capturing_debug(),
+        busbar_test_kit::warn_capture::WarnCapture::default(),
+        busbar_test_kit::warn_capture::WarnCapture::capturing_debug(),
     );
     for cap in [&warn, &all] {
         tracing::subscriber::with_default(cap.clone(), || {
@@ -2273,7 +2273,7 @@ fn a_token_of_the_second_provider_passes_the_first_and_is_admitted_by_the_second
     let (key_a, a, key_b, b) = two_providers();
     let now = 1_700_000_000;
     let token = key_b.mint(&claims_of(ISSUER_B, AUDIENCE_B, now));
-    let cap = busbar_contract::testkit::WarnCapture::capturing_debug();
+    let cap = busbar_test_kit::warn_capture::WarnCapture::capturing_debug();
     let walked = tracing::subscriber::with_default(cap.clone(), || chain(&[&a, &b], &token, now));
     assert_eq!(walked, Walked::Admitted(1, "oidc:object-guid".to_string()));
     assert_eq!(
@@ -2302,7 +2302,7 @@ fn a_token_claiming_the_first_providers_issuer_with_a_bad_signature_is_refused_b
     let (key_a, a, key_b, b) = two_providers();
     let now = 1_700_000_000;
     let forged = key_b.mint(&claims_of(ISSUER, AUDIENCE, now));
-    let cap = busbar_contract::testkit::WarnCapture::default();
+    let cap = busbar_test_kit::warn_capture::WarnCapture::default();
     let walked = tracing::subscriber::with_default(cap.clone(), || chain(&[&a, &b], &forged, now));
     assert_eq!(walked, Walked::Refused(0));
     assert_eq!(b.idp.calls(), 0, "B never judged it");
