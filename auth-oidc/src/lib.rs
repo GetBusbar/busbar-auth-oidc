@@ -426,6 +426,9 @@ pub struct OidcModule {
     /// The config, retained so the browser-login path can read the client-id, scopes, and the
     /// authorize/token endpoints, and the JWKS url when it is configured.
     cfg: OidcConfig,
+    /// The destination refusals already raised as the door's declared diagnostic
+    /// ([`Self::first_report`]): each is raised once per module, not once per request.
+    reported: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
 impl OidcModule {
@@ -447,7 +450,19 @@ impl OidcModule {
             discovery: Discovery::new(Duration::from_secs(cfg.jwks_min_refetch_secs)),
             verdicts: verdicts::VerdictCache::default(),
             cfg: cfg.clone(),
+            reported: std::sync::Mutex::default(),
         }
+    }
+
+    /// Whether the destination refusal `why` is met for the first time by this module: the door
+    /// raises it as its declared diagnostic (which the host audits) only then, so a refusal every
+    /// request meets is audited once, not per request. A new module (a `refresh` with new
+    /// settings) reports afresh.
+    pub fn first_report(&self, why: &str) -> bool {
+        self.reported
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(why.to_string())
     }
 
     /// Drop every cached verdict (`refresh`, the admin cache flush): how many there were.
@@ -527,10 +542,18 @@ impl OidcModule {
             return Step::Ready(Ok(Some(Cow::Borrowed(url))));
         }
         let doc = step_ok!(self.discovery.document(&self.cfg, now, io));
-        Step::Ready(Ok(doc
-            .get(field)
-            .and_then(Value::as_str)
-            .map(|s| Cow::Owned(s.to_string()))))
+        let Some(url) = doc.get(field).and_then(Value::as_str) else {
+            return Step::Ready(Ok(None));
+        };
+        // A key set or a token exchange the DOCUMENT names is taken on the issuer's own host only:
+        // the authorize URL is a browser redirect, never fetched.
+        if let Some(setting) = tied_setting(field) {
+            if let Err(why) = tied(&self.cfg.issuer, field, setting, url) {
+                io.refused(&why);
+                return Step::Ready(Err(why));
+            }
+        }
+        Step::Ready(Ok(Some(Cow::Owned(url.to_string()))))
     }
 
     /// The IdP `authorization_endpoint`: configured, or discovered.
@@ -1009,20 +1032,72 @@ pub(crate) fn json_err(what: &'static str) -> impl FnOnce(serde_json::Error) -> 
     }
 }
 
-/// The configured `jwks_url`, checked. Absent is fine (discovery names it), and so is `https`.
-///
-/// Plain `http` OPENS, with the warning this returns, which `open` logs: an existing config
-/// loads unchanged. To a LOOPBACK
-/// host ([`is_loopback_host`]: 127.0.0.0/8, `::1`, `localhost`, `*.localhost`), the local
-/// identity-provider rig, the warning says so; to any other host it is LOUD: a key set over plain
-/// http could be substituted in transit. Either way the key set is fetched only over https
-/// ([`fetch::plaintext_allowed`]), so every token is rejected until the URL is https.
-/// Any other scheme, or no URL at all, is refused at `open`, naming the field.
+/// The setting an operator configures to name a discovered endpoint's URL themselves: the discovery
+/// fields whose URL the module FETCHES (`jwks_uri`, `token_endpoint`), and so ties to the issuer's
+/// host ([`tied`]). `None` for any other field.
+fn tied_setting(field: &str) -> Option<&'static str> {
+    match field {
+        "jwks_uri" => Some("jwks_url"),
+        "token_endpoint" => Some("token_endpoint"),
+        _ => None,
+    }
+}
+
+/// THE HOST TIE (RFC 8414 §3.3, OIDC Discovery 1.0 §4.3, RFC 9700 §4): a `field` URL the issuer's
+/// discovery document names is taken only when it is https on the issuer's own host and port
+/// (plain http only to a loopback host). The document is the issuer's, fetched from the issuer's
+/// host, but a URL in it is remote input: without the tie a document can point the key fetch or the
+/// login's code and client secret at any host, an internal one included. An operator who means
+/// another host names it in `setting`.
 ///
 /// # Errors
-/// The URL does not parse, or is neither https nor http.
+/// The refusal ([`fetch::refusal`]): the URL's host and the rule, never its path or query.
+pub fn tied(issuer: &str, field: &str, setting: &str, url: &str) -> Result<(), String> {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return Err(fetch::refusal(
+            "?",
+            &format!("cannot be read: the discovery document's {field} is not a URL"),
+        ));
+    };
+    let host = parsed.host_str().unwrap_or("?").to_string();
+    let issuer = url::Url::parse(issuer).ok();
+    let issuer_host = issuer.as_ref().and_then(url::Url::host_str);
+    let same_host = issuer_host.is_some_and(|h| h.eq_ignore_ascii_case(&host))
+        && issuer.as_ref().and_then(url::Url::port_or_known_default)
+            == parsed.port_or_known_default();
+    let secure =
+        parsed.scheme() == "https" || (parsed.scheme() == "http" && is_loopback_host(&parsed));
+    if same_host && secure {
+        return Ok(());
+    }
+    Err(fetch::refusal(
+        &host,
+        &format!(
+            "is not the issuer's host '{}' over https: a {field} the discovery document names \
+             must be https (plain http only to loopback) on the issuer's host and port; set \
+             {setting} to use another host (and list a private one in \
+             advanced.allow_destinations)",
+            issuer_host.unwrap_or("?").escape_debug()
+        ),
+    ))
+}
+
+/// The configured `jwks_url`, checked. Absent is fine (discovery names it), and so is `https`.
+///
+/// PLAIN HTTP ONLY FOR LOOPBACK (identity-providers.md; RFC 8414 / OIDC Discovery: key material
+/// over TLS): to a LOOPBACK host ([`is_loopback_host`]: 127.0.0.0/8, `::1`, `localhost`,
+/// `*.localhost`), the local identity-provider rig, it OPENS with the warning this returns, which
+/// `open` logs (the key set is fetched only over https, [`fetch::plaintext_allowed`], so every
+/// token is rejected until the URL is https). To any other host it is REFUSED at `open` (so at
+/// `--validate` and boot), naming the field, the host and the rule: a key set over plain http could
+/// be substituted in transit. Any other scheme, or no URL at all, is refused at `open`, naming the
+/// field.
+///
+/// # Errors
+/// The URL does not parse, is neither https nor http, or is plain http to a host that is not
+/// loopback.
 pub fn check_jwks_url(cfg: &OidcConfig) -> Result<Option<String>, String> {
-    const ONLY: &str = "it must be an https URL (plain http loads, with a warning)";
+    const ONLY: &str = "it must be an https URL (plain http only to a loopback host)";
     let Some(url) = &cfg.jwks_url else {
         return Ok(None);
     };
@@ -1036,11 +1111,11 @@ pub fn check_jwks_url(cfg: &OidcConfig) -> Result<Option<String>, String> {
              URL"
             .to_string(),
         )),
-        "http" => Ok(Some(
-            "jwks_url is plain http on a non-loopback host: signing keys can be substituted in \
-             transit; use https (busbar fetches the key set only over https, so every OIDC token \
-             is rejected until jwks_url is an https URL)"
-                .to_string(),
+        "http" => Err(format!(
+            "jwks_url is plain http to the host '{}', which is not loopback: signing keys over \
+             plain http can be substituted in transit, so it is refused; use https (plain http \
+             only to a loopback host)",
+            parsed.host_str().unwrap_or("?").escape_debug()
         )),
         other => Err(format!(
             "jwks_url must be an https URL (got scheme '{}'); {ONLY}",
@@ -1072,3 +1147,7 @@ mod tests;
 #[cfg(test)]
 #[path = "tests/script.rs"]
 mod script;
+
+#[cfg(test)]
+#[path = "tests/destination_tests.rs"]
+mod destination_tests;

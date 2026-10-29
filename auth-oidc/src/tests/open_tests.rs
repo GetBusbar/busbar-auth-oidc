@@ -134,21 +134,29 @@ fn a_loopback_http_jwks_url_opens_with_a_warning() {
     assert!(cap.messages().is_empty(), "{:?}", cap.messages());
 }
 
-/// A 1.5.5 CONFIG LOADS UNCHANGED (owner 2026-10-20): plain http to a host that is not loopback
-/// OPENS, as 1.5.5 booted it, and `open` logs a LOUD warning naming `jwks_url`, the non-loopback
-/// host and https. A private address, a public name, a name that only starts like loopback, and a
-/// userinfo that dresses a remote host as 127.0.0.1 are all remote hosts, so each gets the remote
-/// warning, never the loopback one. RED before: each was refused at open.
+/// RED: PLAIN HTTP ONLY FOR LOOPBACK (identity-providers.md: "plain http only for loopback"; RFC
+/// 8414 / OIDC Discovery: the key set is fetched over TLS). A plain http `jwks_url` to a host that
+/// is not loopback is REFUSED at `open` (and so at `--validate` and boot), naming `jwks_url`, the
+/// host and the rule: signing keys over plain http can be substituted in transit. A private
+/// address, a public name, a name that only starts like loopback, and a userinfo that dresses a
+/// remote host as 127.0.0.1 are all remote hosts. Before: each opened with a warning (owner
+/// 2026-10-20), superseded by the 1.6.0 security brief (item 3).
 #[test]
-fn a_non_loopback_http_jwks_url_opens_with_a_loud_warning() {
-    for url in [
-        "http://10.0.0.7/keys",
-        "http://192.168.1.2/keys",
-        "http://idp.example/keys",
-        "http://127.0.0.1.evil.example/keys",
-        "http://localhost.evil.example/keys",
-        "http://127.0.0.1@evil.example/keys",
-        "http://[::ffff:7f00:1]/keys",
+fn a_non_loopback_http_jwks_url_is_refused() {
+    for (url, host) in [
+        ("http://10.0.0.7/keys", "10.0.0.7"),
+        ("http://192.168.1.2/keys", "192.168.1.2"),
+        ("http://idp.example/keys", "idp.example"),
+        (
+            "http://127.0.0.1.evil.example/keys",
+            "127.0.0.1.evil.example",
+        ),
+        (
+            "http://localhost.evil.example/keys",
+            "localhost.evil.example",
+        ),
+        ("http://127.0.0.1@evil.example/keys", "evil.example"),
+        ("http://[::ffff:7f00:1]/keys", "[::ffff:7f00:1]"),
     ] {
         let settings = serde_json::json!({
             "issuer": "https://issuer.invalid.example",
@@ -156,18 +164,14 @@ fn a_non_loopback_http_jwks_url_opens_with_a_loud_warning() {
             "jwks_url": url,
         })
         .to_string();
-        let cap = busbar_contract::testkit::WarnCapture::default();
-        let opened = tracing::subscriber::with_default(cap.clone(), || module(&settings));
+        let err = expect_err(module(&settings));
+        assert!(err.contains("jwks_url"), "{url}: {err}");
+        assert!(err.contains(host), "{url}: names the host: {err}");
+        assert!(err.contains("loopback"), "{url}: names the rule: {err}");
         assert!(
-            opened.is_ok(),
-            "a non-loopback http jwks_url must open: {url}"
+            !err.contains("/keys"),
+            "{url}: the URL's path is never repeated: {err}"
         );
-        let logged = cap.messages().join("\n");
-        assert!(
-            logged.contains("jwks_url is plain http on a non-loopback host"),
-            "{url}: {logged:?}"
-        );
-        assert!(logged.contains("use https"), "{url}: {logged:?}");
     }
 }
 
