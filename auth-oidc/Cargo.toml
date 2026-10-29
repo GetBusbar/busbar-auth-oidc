@@ -33,9 +33,10 @@ zeroize = { workspace = true }
 
 
 [dev-dependencies]
-# The contract's test kit (`busbar_contract::testkit::WarnCapture`) for the cache's warning tests: it
-# is compiled only under the dev-only `test-seal` feature, which no non-dev edge enables.
+# The cache's warning tests take `busbar_test_kit::warn_capture::WarnCapture`; `test-seal` stays for the
+# tests that seal values.
 busbar-contract = { workspace = true, features = ["test-seal"] }
+busbar-test-kit = { workspace = true }
 # ring's ECDSA keygen/signing lets the tests mint real ES256 tokens + a matching JWKS fixture with no
 # network — the full signature path is exercised in-process.
 ring = { workspace = true, features = ["std"] }
