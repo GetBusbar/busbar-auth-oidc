@@ -570,10 +570,11 @@ impl OidcModule {
         let Some(url) = doc.get(field).and_then(Value::as_str) else {
             return Step::Ready(Ok(None));
         };
-        // A key set or a token exchange the DOCUMENT names is taken on the issuer's own host only:
-        // the authorize URL is a browser redirect, never fetched.
-        if let Some(setting) = tied_setting(field) {
-            if let Err(why) = tied(&self.cfg.issuer, field, setting, url) {
+        // A key set or a token exchange the DOCUMENT names, on any host, is taken over https only;
+        // WHERE it goes is the destination guard's (the needs' classes). The authorize URL is a
+        // browser redirect, never fetched.
+        if let Some(setting) = fetched_setting(field) {
+            if let Err(why) = discovered_secure(field, setting, url) {
                 io.refused(&why);
                 return Step::Ready(Err(why));
             }
@@ -1093,9 +1094,9 @@ pub(crate) fn json_err(what: &'static str) -> impl FnOnce(serde_json::Error) -> 
 }
 
 /// The setting an operator configures to name a discovered endpoint's URL themselves: the discovery
-/// fields whose URL the module FETCHES (`jwks_uri`, `token_endpoint`), and so ties to the issuer's
-/// host ([`tied`]). `None` for any other field.
-fn tied_setting(field: &str) -> Option<&'static str> {
+/// fields whose URL the module FETCHES (`jwks_uri`, `token_endpoint`), and so holds to https
+/// ([`discovered_secure`]). `None` for any other field.
+fn fetched_setting(field: &str) -> Option<&'static str> {
     match field {
         "jwks_uri" => Some("jwks_url"),
         "token_endpoint" => Some("token_endpoint"),
@@ -1103,41 +1104,31 @@ fn tied_setting(field: &str) -> Option<&'static str> {
     }
 }
 
-/// THE HOST TIE (RFC 8414 §3.3, OIDC Discovery 1.0 §4.3, RFC 9700 §4): a `field` URL the issuer's
-/// discovery document names is taken only when it is https on the issuer's own host and port
-/// (plain http only to a loopback host). The document is the issuer's, fetched from the issuer's
-/// host, but a URL in it is remote input: without the tie a document can point the key fetch or the
-/// login's code and client secret at any host, an internal one included. An operator who means
-/// another host names it in `setting`.
+/// A DISCOVERED ENDPOINT'S SCHEME (OIDC Discovery 1.0 §3, RFC 9700 §4): a `field` URL the issuer's
+/// discovery document names is taken on ANY host (the discovery spec ties the document's `issuer`,
+/// not its endpoints: Google serves its keys from `www.googleapis.com`), but only over https (plain
+/// http only to a loopback host). WHERE it may go is the destination guard's: the needs it goes out
+/// on refuse a private, loopback, link-local or metadata address unless
+/// `advanced.allow_destinations` names it ([`fetch::DOCUMENT_CLASS`], [`fetch::TOKEN_CLASS`]).
 ///
 /// # Errors
 /// The refusal ([`fetch::refusal`]): the URL's host and the rule, never its path or query.
-pub fn tied(issuer: &str, field: &str, setting: &str, url: &str) -> Result<(), String> {
+pub fn discovered_secure(field: &str, setting: &str, url: &str) -> Result<(), String> {
     let Ok(parsed) = url::Url::parse(url) else {
         return Err(fetch::refusal(
             "?",
             &format!("cannot be read: the discovery document's {field} is not a URL"),
         ));
     };
-    let host = parsed.host_str().unwrap_or("?").to_string();
-    let issuer = url::Url::parse(issuer).ok();
-    let issuer_host = issuer.as_ref().and_then(url::Url::host_str);
-    let same_host = issuer_host.is_some_and(|h| h.eq_ignore_ascii_case(&host))
-        && issuer.as_ref().and_then(url::Url::port_or_known_default)
-            == parsed.port_or_known_default();
-    let secure =
-        parsed.scheme() == "https" || (parsed.scheme() == "http" && is_loopback_host(&parsed));
-    if same_host && secure {
+    if parsed.scheme() == "https" || (parsed.scheme() == "http" && is_loopback_host(&parsed)) {
         return Ok(());
     }
     Err(fetch::refusal(
-        &host,
+        parsed.host_str().unwrap_or("?"),
         &format!(
-            "is not the issuer's host '{}' over https: a {field} the discovery document names \
-             must be https (plain http only to loopback) on the issuer's host and port; set \
-             {setting} to use another host (and list a private one in \
-             advanced.allow_destinations)",
-            issuer_host.unwrap_or("?").escape_debug()
+            "is named over {}: a {field} the discovery document names must be https (plain http \
+             only to loopback); set {setting} to name another URL",
+            parsed.scheme().escape_debug()
         ),
     ))
 }
