@@ -156,7 +156,7 @@ fn a_non_loopback_http_jwks_url_is_refused() {
             "localhost.evil.example",
         ),
         ("http://127.0.0.1@evil.example/keys", "evil.example"),
-        ("http://[::ffff:7f00:1]/keys", "[::ffff:127.0.0.1]"),
+        ("http://[::ffff:7f00:1]/keys", "[::ffff:7f00:1]"),
     ] {
         let settings = serde_json::json!({
             "issuer": "https://issuer.invalid.example",
