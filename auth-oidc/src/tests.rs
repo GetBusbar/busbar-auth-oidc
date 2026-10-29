@@ -1013,10 +1013,16 @@ fn discovery_cfg() -> OidcConfig {
 
 #[test]
 fn discovery_with_matching_issuer_resolves_jwks_uri() {
-    let doc = serde_json::json!({ "issuer": ISSUER, "jwks_uri": "https://issuer.test/keys" });
+    let doc = serde_json::json!({
+        "issuer": ISSUER,
+        "jwks_uri": "https://login.microsoftonline.com/tenant-guid/discovery/v2.0/keys"
+    });
     let fetcher = FixtureFetcher::new(doc.to_string());
     let url = resolve_jwks_url(&discovery_cfg(), &fetcher).expect("matching issuer must resolve");
-    assert_eq!(url, "https://issuer.test/keys");
+    assert_eq!(
+        url,
+        "https://login.microsoftonline.com/tenant-guid/discovery/v2.0/keys"
+    );
 }
 
 /// Without an issuer check, a discovery document resolves `jwks_uri` regardless of which host served
@@ -1595,15 +1601,21 @@ fn login_id_token_audience_is_the_client_id_not_the_bearer_audience() {
 fn discovery_populates_authorization_and_token_endpoints() {
     let doc = serde_json::json!({
         "issuer": ISSUER,
-        "jwks_uri": "https://issuer.test/keys",
-        "authorization_endpoint": "https://issuer.test/authorize",
-        "token_endpoint": "https://issuer.test/token",
+        "jwks_uri": "https://login.microsoftonline.com/keys",
+        "authorization_endpoint": "https://login.microsoftonline.com/authorize",
+        "token_endpoint": "https://login.microsoftonline.com/token",
     });
     let fetcher = FixtureFetcher::new(doc.to_string());
     let (auth_ep, tok_ep) = resolve_login_endpoints(&discovery_cfg(), &fetcher)
         .expect("discovery must resolve the login endpoints");
-    assert_eq!(auth_ep.as_deref(), Some("https://issuer.test/authorize"));
-    assert_eq!(tok_ep.as_deref(), Some("https://issuer.test/token"));
+    assert_eq!(
+        auth_ep.as_deref(),
+        Some("https://login.microsoftonline.com/authorize")
+    );
+    assert_eq!(
+        tok_ep.as_deref(),
+        Some("https://login.microsoftonline.com/token")
+    );
 
     // A poisoned discovery doc (issuer mismatch) is refused for login endpoints too.
     let evil = serde_json::json!({
@@ -1621,8 +1633,8 @@ fn discovery_populates_authorization_and_token_endpoints() {
 fn explicit_login_endpoints_win_and_both_explicit_skip_discovery() {
     let doc = serde_json::json!({
         "issuer": ISSUER,
-        "authorization_endpoint": "https://issuer.test/discovered/authorize",
-        "token_endpoint": "https://issuer.test/discovered/token",
+        "authorization_endpoint": "https://login.microsoftonline.com/discovered/authorize",
+        "token_endpoint": "https://login.microsoftonline.com/discovered/token",
     });
 
     // (a) one explicit: it wins, the other is discovered.
@@ -1633,7 +1645,7 @@ fn explicit_login_endpoints_win_and_both_explicit_skip_discovery() {
     assert_eq!(auth_ep.as_deref(), Some("https://explicit.test/authorize"));
     assert_eq!(
         tok_ep.as_deref(),
-        Some("https://issuer.test/discovered/token")
+        Some("https://login.microsoftonline.com/discovered/token")
     );
     assert_eq!(fetcher.calls(), 1);
 
@@ -1925,18 +1937,19 @@ fn a_hostile_discovery_issuer_is_escaped_in_the_mismatch_error() {
 }
 
 /// An explicit `jwks_url` that is neither https nor http is refused at resolve time, naming the
-/// field. Plain http resolves (a 1.5.5 config loads unchanged, owner 2026-10-20; `open` warns), and
-/// an https one resolves with no fetch at all.
+/// field, and so is plain http to a host that is not loopback (plain http only for loopback,
+/// security item 3). Plain http to loopback resolves (`open` warns), and an https one resolves with
+/// no fetch at all.
 #[test]
 fn an_explicit_non_http_jwks_url_is_refused_at_resolve_time() {
     let fetcher = FixtureFetcher::new(String::new());
     let mut c = cfg("groups");
-    c.jwks_url = Some("http://idp.invalid/k".to_string());
+    c.jwks_url = Some("http://127.0.0.1:8080/k".to_string());
     assert_eq!(
         resolve_jwks_url(&c, &fetcher).as_deref(),
-        Ok("http://idp.invalid/k")
+        Ok("http://127.0.0.1:8080/k")
     );
-    for bad in ["not a url", "ftp://idp.invalid/k"] {
+    for bad in ["not a url", "ftp://idp.invalid/k", "http://idp.invalid/k"] {
         let mut c = cfg("groups");
         c.jwks_url = Some(bad.to_string());
         let err = resolve_jwks_url(&c, &fetcher)
@@ -2197,4 +2210,137 @@ fn an_end_user_decline_logs_at_info_and_an_idp_failure_at_warn() {
         "a bare callback is the user's: info"
     );
     assert!(all.contains("lacks fields"), "and it is still recorded");
+}
+
+// ── issuer routing: two OIDC providers in one chain ─────────────────────────────────────────────
+//
+// A chain (`auth.chain`, `admin_auth`) that lists two OIDC providers routes each token by its
+// issuer, as a multi-issuer OAuth/OIDC resource server does: a token that is not a JWT, or whose
+// (unverified) `iss` is not this provider's, is not this provider's credential and PASSES to the
+// next position; a token naming this provider's issuer is this provider's to judge in full, and any
+// failure REJECTS it, stopping the chain. [`chain`] walks positions the way the kernel's chain walk
+// does: the first Identify admits, a Reject denies, and a chain that ends all-Pass denies.
+
+const ISSUER_B: &str = "https://idp-b.example/realms/b";
+const AUDIENCE_B: &str = "busbar-b";
+
+/// How a chain of modules ended: admitted by position `i`, denied by position `i`'s Reject, or
+/// denied at the chain's end with no position claiming the token.
+#[derive(Debug, PartialEq)]
+enum Walked {
+    Admitted(usize, String),
+    Refused(usize),
+    Unclaimed,
+}
+
+/// The kernel's chain walk over `modules`, each judging `token` in turn.
+fn chain(modules: &[&Module], token: &str, now: i64) -> Walked {
+    for (i, m) in modules.iter().enumerate() {
+        match m.verify(token, now, Instant::now()) {
+            AuthVerdict::Identify(p) => return Walked::Admitted(i, p.id),
+            AuthVerdict::Reject => return Walked::Refused(i),
+            AuthVerdict::Pass => {}
+        }
+    }
+    Walked::Unclaimed
+}
+
+/// Provider A (the Entra fixture issuer) and provider B (a second issuer, its own key and
+/// audience), each over its own scripted IdP.
+fn two_providers() -> (TestKey, Module, TestKey, Module) {
+    let key_a = TestKey::generate("kid-a");
+    let key_b = TestKey::generate("kid-b");
+    let a = Module::new(&cfg("groups"), FixtureFetcher::new(key_a.jwks()));
+    let mut cfg_b = cfg("groups");
+    cfg_b.issuer = ISSUER_B.to_string();
+    cfg_b.audience = AUDIENCE_B.to_string();
+    cfg_b.jwks_url = Some("https://idp-b.example/keys".to_string());
+    let b = Module::new(&cfg_b, FixtureFetcher::new(key_b.jwks()));
+    (key_a, a, key_b, b)
+}
+
+fn claims_of(issuer: &str, audience: &str, now: i64) -> Value {
+    let mut c = base_claims(now);
+    c["iss"] = serde_json::json!(issuer);
+    c["aud"] = serde_json::json!(audience);
+    c
+}
+
+/// A token provider B minted passes provider A (another issuer's: not A's credential, and A
+/// fetches nothing for it) and is admitted by B.
+#[test]
+fn a_token_of_the_second_provider_passes_the_first_and_is_admitted_by_the_second() {
+    let (key_a, a, key_b, b) = two_providers();
+    let now = 1_700_000_000;
+    let token = key_b.mint(&claims_of(ISSUER_B, AUDIENCE_B, now));
+    let cap = busbar_contract::testkit::WarnCapture::capturing_debug();
+    let walked = tracing::subscriber::with_default(cap.clone(), || chain(&[&a, &b], &token, now));
+    assert_eq!(walked, Walked::Admitted(1, "oidc:object-guid".to_string()));
+    assert_eq!(
+        a.idp.calls(),
+        0,
+        "A judges another issuer's token without fetching its keys"
+    );
+    assert!(
+        cap.contains("not this provider's issuer"),
+        "A's pass is logged, not silent"
+    );
+    // The other order: B passes A's own token, A admits it.
+    let token_a = key_a.mint(&base_claims(now));
+    assert_eq!(
+        chain(&[&b, &a], &token_a, now),
+        Walked::Admitted(1, "oidc:object-guid".to_string())
+    );
+}
+
+/// A token CLAIMING provider A's issuer but not signed by A's key is A's to judge: A refuses it
+/// (logged with the reason) and the chain stops there, so provider B never sees it, even though
+/// B's own key signed it.
+#[test]
+fn a_token_claiming_the_first_providers_issuer_with_a_bad_signature_is_refused_by_it_and_never_reaches_the_second(
+) {
+    let (key_a, a, key_b, b) = two_providers();
+    let now = 1_700_000_000;
+    let forged = key_b.mint(&claims_of(ISSUER, AUDIENCE, now));
+    let cap = busbar_contract::testkit::WarnCapture::default();
+    let walked = tracing::subscriber::with_default(cap.clone(), || chain(&[&a, &b], &forged, now));
+    assert_eq!(walked, Walked::Refused(0));
+    assert_eq!(b.idp.calls(), 0, "B never judged it");
+    assert!(
+        cap.contains("signature verification failed"),
+        "A's refusal names its reason"
+    );
+    // Our issuer with a wrong audience, or expired, is refused by A too: never handed on.
+    for c in [
+        claims_of(ISSUER, AUDIENCE_B, now),
+        claims_of(ISSUER, AUDIENCE, now - 7200),
+    ] {
+        assert_eq!(chain(&[&a, &b], &key_a.mint(&c), now), Walked::Refused(0));
+    }
+}
+
+/// A token naming an issuer neither provider is passes both, and the chain's end refuses it.
+#[test]
+fn a_token_of_an_unknown_issuer_is_refused_at_the_chains_end() {
+    let (_, a, key_b, b) = two_providers();
+    let now = 1_700_000_000;
+    let stranger = TestKey::generate("kid-c");
+    for token in [
+        stranger.mint(&claims_of("https://idp-c.example", AUDIENCE, now)),
+        // Signed by B's own key, but naming a third issuer: still not B's.
+        key_b.mint(&claims_of("https://idp-c.example", AUDIENCE_B, now)),
+        // No issuer at all: nobody's.
+        {
+            let mut c = base_claims(now);
+            c.as_object_mut().unwrap().remove("iss");
+            stranger.mint(&c)
+        },
+    ] {
+        assert_eq!(chain(&[&a, &b], &token, now), Walked::Unclaimed);
+    }
+    assert_eq!(
+        a.idp.calls() + b.idp.calls(),
+        0,
+        "no keys fetched for a stranger"
+    );
 }

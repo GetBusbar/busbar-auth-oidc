@@ -105,8 +105,8 @@ fn refresh_drops_the_verdict_cache_and_reports_its_count() {
 }
 
 /// `validate` ANSWERS AS `open` DOES (Q128 auth-oidc LOW, reader r82 on 59293c0): a plain http
-/// `jwks_url` on a remote host, which a 1.5.5 config carried and boot opens with a warning
-/// (owner 2026-10-20), validates; one that is not a URL at all is refused by both.
+/// `jwks_url` on a remote host is refused by both (plain http only for loopback, security item 3),
+/// and so is one that is not a URL at all.
 #[test]
 fn validate_answers_a_jwks_url_as_open_does() {
     let plaintext = serde_json::json!({
@@ -115,8 +115,8 @@ fn validate_answers_a_jwks_url_as_open_does() {
         "jwks_url": "http://jwks.test/keys",
     })
     .to_string();
-    assert!(<Oidc as Life>::validate(plaintext.as_bytes()).is_ok());
-    assert!(Oidc::open(plaintext.as_bytes(), &lent(b""), 1).is_ok());
+    assert!(<Oidc as Life>::validate(plaintext.as_bytes()).is_err());
+    assert!(Oidc::open(plaintext.as_bytes(), &lent(b""), 1).is_err());
     let other = serde_json::json!({
         "issuer": ISSUER,
         "audience": AUDIENCE,
