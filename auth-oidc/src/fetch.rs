@@ -21,10 +21,11 @@
 //! https). Every need rides the `http` transport, its connections secured by the target's `https`
 //! scheme (the connector's TLS). The discovery need is pinned to the `issuer` setting's target
 //! (`target_from`); the JWKS and token endpoints may be discovered, so the module names them per
-//! request, and a discovered one is taken only on the issuer's own host ([`crate::tied`]).
+//! request, and a discovered one is taken on any host over https ([`crate::discovered_secure`]),
+//! where it may go being the destination guard's.
 //!
 //! EVERY REFUSAL IS REPORTED ([`Fetch::refused`]): the module's own (a scheme, a discovered endpoint
-//! off the issuer's host) and the host's (the destination guard refusing the address), in words
+//! over plain http) and the host's (the destination guard refusing the address, [`guard_refusal`]), in words
 //! that name the host and the rule and never the URL's path or query ([`refusal`]); the door raises
 //! each, once, as its declared diagnostic, which the host audits.
 //!
@@ -235,6 +236,12 @@ pub fn host_of(url: &str) -> String {
 const GUARD_RULE: &str = "was refused by the destination guard: an identity provider on a \
      private, loopback, link-local, CGNAT or unique-local address is refused unless \
      advanced.allow_destinations names it, and cloud metadata is refused always";
+
+/// The words of the destination guard's refusal of a request to `url` (the connector answered
+/// REFUSED): its host and the guard's rule, never its path or query.
+pub fn guard_refusal(url: &str) -> String {
+    refusal(&host_of(url), GUARD_RULE)
+}
 
 /// A request to `url` that got no answer: a fixed prefix, then why.
 pub fn failed(url: &str, why: impl Display) -> String {
@@ -511,7 +518,7 @@ impl<'h> HostIo<'h> {
             Poll::Ready(r) => {
                 self.state.issued = c.issued();
                 if let Err(ConnFailure::Refused(_)) = &r {
-                    self.refusals.push(refusal(&host_of(url), GUARD_RULE));
+                    self.refusals.push(guard_refusal(url));
                 }
                 Poll::Ready(r.map_err(|e| {
                     match e {

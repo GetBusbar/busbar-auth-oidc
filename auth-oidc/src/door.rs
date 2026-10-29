@@ -105,7 +105,7 @@ pub const CACHE_FAMILY: u32 = 0;
 pub const DIAG_NAMES: &[&str] = &["OIDC_IDP_DESTINATION_REFUSED"];
 
 /// The declared diagnostic a refused IdP destination raises ([`raise_refusals`]): the module's own
-/// refusal (a discovered `jwks_uri` or `token_endpoint` off the issuer's host, a scheme) or the
+/// refusal (a discovered `jwks_uri` or `token_endpoint` over plain http, a scheme) or the
 /// host's (the destination guard refusing the address), naming the host and the rule.
 pub const DIAG_DESTINATION_REFUSED: u32 = 0;
 
