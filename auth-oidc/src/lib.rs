@@ -1072,3 +1072,7 @@ mod tests;
 #[cfg(test)]
 #[path = "tests/script.rs"]
 mod script;
+
+#[cfg(test)]
+#[path = "tests/destination_tests.rs"]
+mod destination_tests;

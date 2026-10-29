@@ -5,7 +5,7 @@
 
 use super::*;
 use busbar_contract::abi::host::conn::connector::{
-    DIRECTION_OUTBOUND, EGRESS_LOOPBACK_ALLOWED, EGRESS_OPEN_WEB, EGRESS_OPERATOR_INFRASTRUCTURE,
+    DIRECTION_OUTBOUND, EGRESS_DEFAULT, EGRESS_LOOPBACK_ALLOWED, EGRESS_OPEN_WEB,
 };
 use std::net::IpAddr;
 
@@ -167,8 +167,10 @@ fn every_request_is_https_only_and_needs_the_host_connector() {
     );
 }
 
-/// THE NEEDS: three outbound needs — discovery, the JWKS and the token exchange, every one in the
-/// operator-infrastructure class (ARCHITECT ruling 2026-10-09) — stated twice: the ANCHORED set trusting an extra root on top of the public
+/// THE NEEDS: three outbound needs — discovery and the JWKS in the `open-web` class (https only, a
+/// private address refused unless allowlisted, the issuer pin kept), the token exchange in the
+/// connector's default class named per request (a private address refused unless allowlisted,
+/// never lifted to operator infrastructure: security item 3) — stated twice: the ANCHORED set trusting an extra root on top of the public
 /// ones, the PUBLIC set the public roots only (`ca_cert_pem` is optional, and the host refuses a
 /// need whose `trust_from` names nothing); discovery pinned to a setting, the JWKS and the token
 /// endpoint named per request. (Their words are read back from the door's rendered Statement in
@@ -178,7 +180,12 @@ fn the_needs_are_outbound_in_their_class_anchored_then_public() {
     assert_eq!(NEEDS.len(), 2 * PUBLIC as usize);
     for (i, n) in NEEDS.iter().enumerate() {
         assert_eq!(n.direction, DIRECTION_OUTBOUND, "need {i}");
-        assert_eq!(n.egress_class, EGRESS_OPERATOR_INFRASTRUCTURE, "need {i}");
+        let class = if i as u32 % PUBLIC == NEED_TOKEN {
+            EGRESS_DEFAULT
+        } else {
+            EGRESS_OPEN_WEB
+        };
+        assert_eq!(n.egress_class, class, "need {i}");
         assert_eq!(n.transport.len, "http".len(), "need {i}");
         let trust = if (i as u32) < PUBLIC {
             "settings.ca_cert_pem".len()
