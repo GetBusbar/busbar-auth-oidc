@@ -351,6 +351,31 @@ impl OidcVerifier {
     }
 }
 
+/// The longest token issuer a log line repeats: the claim is unverified caller input.
+const ISSUER_LOG_MAX: usize = 128;
+
+/// Issuer routing: `None` when the (UNVERIFIED) claims `payload` names exactly `issuer` as its
+/// `iss`, so the token is this provider's to verify; otherwise the issuer it names instead, as a
+/// log may print it (escaped, bounded), `<none>` for a payload with no string `iss` or no JSON
+/// object at all. The signature is not checked here: this only decides WHO judges the token.
+fn foreign_issuer(payload: &[u8], issuer: &str) -> Option<String> {
+    let claims = serde_json::from_slice::<Value>(payload).ok();
+    match claims
+        .as_ref()
+        .and_then(|c| c.get("iss"))
+        .and_then(Value::as_str)
+    {
+        Some(iss) if iss == issuer => None,
+        Some(iss) => Some(
+            iss.chars()
+                .take(ISSUER_LOG_MAX)
+                .flat_map(char::escape_debug)
+                .collect(),
+        ),
+        None => Some("<none>".to_string()),
+    }
+}
+
 /// Detect the Entra groups-overage markers. Present ⇒ the token deliberately omitted the groups claim.
 fn is_groups_overage(claims: &Value) -> bool {
     let names_has_groups = claims
@@ -659,12 +684,21 @@ impl OidcModule {
             // A non-JWT / bad-sig / bad-claim id_token in a login callback is a hard failure —
             // unlike the verify chain, there is no "next module" to defer a `Pass` to. Enumerated
             // (not `_`) so a future `AuthVerdict` variant is a compile error here.
-            AuthVerdict::Reject | AuthVerdict::Pass => LoginOutcome::Reject,
+            AuthVerdict::Reject => LoginOutcome::Reject,
+            AuthVerdict::Pass => {
+                tracing::warn!(
+                    module = "oidc",
+                    "the IdP's id_token is not a JWT naming this provider's issuer; login declined"
+                );
+                LoginOutcome::Reject
+            }
         }))
     }
 
     /// The full verification of one presented bearer credential → an [`AuthVerdict`]: none
-    /// presented, or one that is not a JWT, is not ours (`Pass`). An identity is cached for its TTL
+    /// presented, one that is not a JWT, or a JWT whose (unverified) `iss` is not this provider's
+    /// issuer, is not ours (`Pass`, to the next auth in the chain); a JWT naming this provider's
+    /// issuer is verified in full, and any failure is a `Reject`. An identity is cached for its TTL
     /// and answered from the cache until it expires or a `refresh` drops it; a REJECT or a PASS is
     /// never cached.
     ///
@@ -701,6 +735,10 @@ impl OidcModule {
         io: &mut dyn Fetch,
     ) -> Step<Result<AuthVerdict, String>> {
         let Some(token) = token else {
+            tracing::debug!(
+                module = "oidc",
+                "no bearer presented: nothing for this provider; passed to the next auth"
+            );
             return Step::Ready(Ok(AuthVerdict::Pass));
         };
         let generation = self.verdicts.generation();
@@ -725,8 +763,30 @@ impl OidcModule {
             Ok(p) => p,
             // Not a well-formed JWT ⇒ not our credential shape. `Pass` so a later chain module (or
             // the mode default) can handle it — a random opaque bearer is not an OIDC failure.
-            Err(_) => return Step::Ready(Ok(AuthVerdict::Pass)),
+            Err(_) => {
+                tracing::debug!(
+                    module = "oidc",
+                    "bearer is not a JWT: not this provider's credential; passed to the next auth"
+                );
+                return Step::Ready(Ok(AuthVerdict::Pass));
+            }
         };
+        // ISSUER ROUTING (multi-issuer resource servers): the token's UNVERIFIED `iss` routes it.
+        // One naming another issuer, or none, is not this provider's credential: `Pass`, so a
+        // second identity provider later in the chain can judge it, and the chain's end refuses a
+        // token no provider claims. Nothing is fetched for it. One naming THIS issuer is this
+        // provider's alone and is verified in full below; any failure is a `Reject` that stops the
+        // chain, never a fall-through. The unverified claim only ever narrows: it selects which
+        // provider judges, never what that provider accepts.
+        if let Some(other) = foreign_issuer(&parts.payload, &verifier.issuer) {
+            tracing::info!(
+                module = "oidc",
+                token_issuer = %other,
+                "OIDC token names an issuer that is not this provider's issuer: not this \
+                 provider's credential; passed to the next auth"
+            );
+            return Step::Ready(Ok(AuthVerdict::Pass));
+        }
         let kid = parts.header.kid.as_deref().unwrap_or_default();
         let url = step_ok!(self.jwks_url(now_mono, io));
 
