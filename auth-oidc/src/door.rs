@@ -46,13 +46,13 @@ use busbar_contract::abi::auth::{
 };
 use busbar_contract::abi::mechanism::call::{AbiStr, Blob, OutHead, Outcome, Span, BLOB_ABSENT};
 use busbar_contract::abi::mechanism::door::{
-    MarkWord, MetricFamily, Rewrite, Statement, FAMILY_COUNTER, REWRITE_ALIAS,
+    MarkWord, MetricFamily, Rewrite, Statement, FAMILY_COUNTER,
 };
 use busbar_contract::abi::mechanism::lifecycle::{DriveIn, TickIn, TickOut};
 use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::sdk::auth_door::{carrier, verify_tail, with_tail};
 use busbar_contract::abi::sdk::conn::{ConnFailure, Host};
-use busbar_contract::abi::sdk::door::{abi_str, statement, AbiIn, AbiOut};
+use busbar_contract::abi::sdk::door::{abi_str, alias, statement, AbiIn, AbiOut};
 use busbar_contract::abi::sdk::lent::HostBuf;
 use busbar_contract::abi::sdk::life::{Counted, Held, Life, Refreshed, Refusal};
 use busbar_contract::abi::sdk::{Instance, Lent, Out, Safe, SafeSlot};
@@ -80,12 +80,7 @@ const TAIL: AuthTail = AuthTail {
 const SECRET_REFS: &[AbiStr] = &[abi_str("client_secret")];
 
 /// The name an operator's config calls the module by.
-const REWRITES: &[Rewrite] = &[Rewrite {
-    class: REWRITE_ALIAS,
-    _reserved: 0,
-    from: abi_str("oidc"),
-    to: AbiStr::ABSENT,
-}];
+const REWRITES: &[Rewrite] = &[alias("oidc")];
 
 /// The metric families `refresh`'s envelope indexes into: the verdict cache's flush count
 /// (`abi::auth`: "an auth plugin that caches verdicts declares a counter family of this name (no

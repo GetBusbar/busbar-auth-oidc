@@ -156,7 +156,7 @@ fn a_non_loopback_http_jwks_url_opens_with_a_loud_warning() {
             "jwks_url": url,
         })
         .to_string();
-        let cap = busbar_contract::testkit::WarnCapture::default();
+        let cap = busbar_test_kit::warn_capture::WarnCapture::default();
         let opened = tracing::subscriber::with_default(cap.clone(), || module(&settings));
         assert!(
             opened.is_ok(),
