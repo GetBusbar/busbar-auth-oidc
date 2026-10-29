@@ -279,7 +279,7 @@ impl Conns for Idp {
             target: desc.target.to_owned(),
             method: String::from_utf8_lossy(desc.method).into_owned(),
             path: path.clone(),
-            body: String::from_utf8_lossy(desc.body).into_owned(),
+            body: String::from_utf8_lossy(&desc.body).into_owned(),
         });
         let (status, body) = self
             .answers
