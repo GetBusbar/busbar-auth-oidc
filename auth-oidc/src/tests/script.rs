@@ -47,6 +47,7 @@ pub struct Idp {
     calls: AtomicUsize,
     reply: Mutex<Result<LoginHttpResponse, String>>,
     woken: Mutex<Vec<Ticket>>,
+    refusals: Mutex<Vec<String>>,
 }
 
 impl Idp {
@@ -65,7 +66,13 @@ impl Idp {
                 body: "{}".to_string(),
             })),
             woken: Mutex::new(Vec::new()),
+            refusals: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Every refusal an op reported through [`Fetch::refused`], in order.
+    pub fn refusals(&self) -> Vec<String> {
+        self.refusals.lock().unwrap().clone()
     }
 
     /// Every ticket a landed fetch woke, in order.
@@ -153,6 +160,10 @@ impl Fetch for Caller<'_> {
 
     fn wake(&self, waiters: &[Ticket]) {
         self.idp.woken.lock().unwrap().extend_from_slice(waiters);
+    }
+
+    fn refused(&mut self, why: &str) {
+        self.idp.refusals.lock().unwrap().push(why.to_string());
     }
 
     fn post(&mut self, hop: &LoginHop, _: Option<&str>) -> Poll<Result<LoginHttpResponse, String>> {

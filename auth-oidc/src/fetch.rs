@@ -7,14 +7,26 @@
 //! JWKS, and the login's code-for-token POST. Each answers PENDING while it is in flight and is
 //! re-asked when the op re-enters on its wake (the replay rule, `abi::sdk::conn`).
 //!
-//! Every need is `operator-infrastructure` (the class the oauth plugin's mint needs take): private
-//! and loopback destinations allowed, plaintext allowed by the class, cloud metadata refused, the
-//! destination guard applying. The module narrows the scheme ([`plaintext_allowed`]): discovery and
-//! the JWKS https only; the token exchange https, or plaintext to a private or loopback host only (a
-//! public host must use https). Every need rides the `http`
-//! transport, its connections secured by the target's `https` scheme (the connector's TLS). The
-//! discovery need is pinned to the `issuer` setting's target (`target_from`); the JWKS and token
-//! endpoints may be discovered, so the module names them per request.
+//! THE CLASSES (security.md, "The destination guard": an identity provider is refused a private,
+//! loopback, link-local, CGNAT or unique-local address unless `advanced.allow_destinations` names
+//! it; cloud metadata is refused for every destination). Discovery and the JWKS go out in the
+//! `open-web` class ([`DOCUMENT_CLASS`]: over TLS only, the guard refusing a private address unless
+//! allowlisted; a configured target keeps the class); the token exchange in the connector's default
+//! class ([`TOKEN_CLASS`]: the guard refusing a private address unless allowlisted, the scheme the
+//! target's own, so 1.5.5's plaintext to a private token endpoint still goes once that address is
+//! allowlisted). Neither is ever `operator-infrastructure`, which admits a private address with no
+//! entry: a discovery document could otherwise steer a key or token fetch to any internal address.
+//! The module narrows the scheme ([`plaintext_allowed`]): discovery and the JWKS https only; the
+//! token exchange https, or plaintext to a private or loopback host only (a public host must use
+//! https). Every need rides the `http` transport, its connections secured by the target's `https`
+//! scheme (the connector's TLS). The discovery need is pinned to the `issuer` setting's target
+//! (`target_from`); the JWKS and token endpoints may be discovered, so the module names them per
+//! request, and a discovered one is taken only on the issuer's own host ([`crate::tied`]).
+//!
+//! EVERY REFUSAL IS REPORTED ([`Fetch::refused`]): the module's own (a scheme, a discovered endpoint
+//! off the issuer's host) and the host's (the destination guard refusing the address), in words
+//! that name the host and the rule and never the URL's path or query ([`refusal`]); the door raises
+//! each, once, as its declared diagnostic, which the host audits.
 //!
 //! `ca_cert_pem` is OPTIONAL (an extra root on top of the public ones, never a
 //! replacement). The host's connector refuses a need whose `trust_from` resolves to nothing, so
@@ -32,7 +44,7 @@ use std::fmt::Display;
 use std::task::Poll;
 
 use busbar_contract::abi::host::conn::connector::{
-    Need, DIRECTION_OUTBOUND, EGRESS_OPERATOR_INFRASTRUCTURE, KEEP_NAMED,
+    Need, DIRECTION_OUTBOUND, EGRESS_DEFAULT, EGRESS_OPEN_WEB, KEEP_NAMED,
 };
 use busbar_contract::abi::mechanism::call::{AbiStr, Blob};
 use busbar_contract::abi::mechanism::ticket::Ticket;
@@ -72,21 +84,25 @@ const ISSUER_PATH: &str = "settings.issuer";
 /// The setting every need's extra trusted root comes from.
 const CA_CERT_PATH: &str = "settings.ca_cert_pem";
 
-/// The egress class of every need: `operator-infrastructure`. A plaintext token endpoint on a
-/// PRIVATE host, not only on loopback, is accepted, which `open-web` (secure only) and
-/// `loopback-allowed` (plaintext to loopback only) would both refuse at the connector. The discovery
-/// and JWKS fetches need it too: the `ca_cert_pem` setting exists for an on-prem IdP on an internal
-/// host (an internal-CA Keycloak), so an IdP on a private address, a discovered `jwks_uri` among
-/// them, must be served. The guarded `open-web` class would refuse it.
-pub const EGRESS_CLASS: u32 = EGRESS_OPERATOR_INFRASTRUCTURE;
+/// The egress class of the discovery and JWKS needs: `open-web`, over TLS only, a private, loopback
+/// or link-local address refused unless `advanced.allow_destinations` names it (an on-prem IdP on
+/// an internal host, an internal-CA Keycloak, is one allow entry away), cloud metadata refused. The
+/// class is kept when the need's config names its target, so the issuer pin does not lift it.
+pub const DOCUMENT_CLASS: u32 = EGRESS_OPEN_WEB;
 
-/// One outbound need over the `http` transport (the scheme the http framer claims) in
-/// [`EGRESS_CLASS`], trusting the root `trust_from` names beside the public roots (`ABSENT`: the
-/// public roots only).
-const fn need(target_from: AbiStr, trust_from: AbiStr) -> Need {
+/// The egress class of the token exchange's need: the connector's default class, a private,
+/// loopback or link-local address refused unless `advanced.allow_destinations` names it, cloud
+/// metadata refused, the scheme the target's own: 1.5.5's plaintext to a private token endpoint
+/// (`plaintext_allowed`) goes once that address is allowlisted. Its target is named per request
+/// (never `target_from`), so the guard never lifts it to operator infrastructure.
+pub const TOKEN_CLASS: u32 = EGRESS_DEFAULT;
+
+/// One outbound need over the `http` transport (the scheme the http framer claims) in `class`,
+/// trusting the root `trust_from` names beside the public roots (`ABSENT`: the public roots only).
+const fn need(class: u32, target_from: AbiStr, trust_from: AbiStr) -> Need {
     Need {
         direction: DIRECTION_OUTBOUND,
-        egress_class: EGRESS_CLASS,
+        egress_class: class,
         transport: abi_str("http"),
         auth: AbiStr::ABSENT,
         target_from,
@@ -107,12 +123,12 @@ const fn need(target_from: AbiStr, trust_from: AbiStr) -> Need {
 /// setting's target), the JWKS and the token endpoint (named per request: either may be
 /// discovered).
 pub const NEEDS: &[Need] = &[
-    need(abi_str(ISSUER_PATH), abi_str(CA_CERT_PATH)),
-    need(AbiStr::ABSENT, abi_str(CA_CERT_PATH)),
-    need(AbiStr::ABSENT, abi_str(CA_CERT_PATH)),
-    need(abi_str(ISSUER_PATH), AbiStr::ABSENT),
-    need(AbiStr::ABSENT, AbiStr::ABSENT),
-    need(AbiStr::ABSENT, AbiStr::ABSENT),
+    need(DOCUMENT_CLASS, abi_str(ISSUER_PATH), abi_str(CA_CERT_PATH)),
+    need(DOCUMENT_CLASS, AbiStr::ABSENT, abi_str(CA_CERT_PATH)),
+    need(TOKEN_CLASS, AbiStr::ABSENT, abi_str(CA_CERT_PATH)),
+    need(DOCUMENT_CLASS, abi_str(ISSUER_PATH), AbiStr::ABSENT),
+    need(DOCUMENT_CLASS, AbiStr::ABSENT, AbiStr::ABSENT),
+    need(TOKEN_CLASS, AbiStr::ABSENT, AbiStr::ABSENT),
 ];
 
 /// The need index `need` (an anchored-set index) goes out on: itself for a module that trusts an
@@ -170,6 +186,13 @@ pub trait Fetch {
         let _ = waiters;
     }
 
+    /// A request this op would make was REFUSED, `why` naming the host and the rule ([`refusal`]):
+    /// the module's own refusal or the host's. A host-backed `Fetch` keeps it for the door to raise
+    /// as the declared diagnostic the host audits; the default keeps nothing.
+    fn refused(&mut self, why: &str) {
+        let _ = why;
+    }
+
     /// The login token exchange, made by the plugin itself (an IdP login holds its own client
     /// secret and makes its own token exchange): `hop` sent as a form ([`form`]). The
     /// answer is the status and the body, whatever the status; a request that got no answer is
@@ -189,6 +212,29 @@ pub fn plaintext_allowed(need: u32, url: &str) -> bool {
         && scheme_is(url, "http")
         && extract_normalized_host(url).is_some_and(|h| host_is_private_or_loopback(&h))
 }
+
+/// The words every refused IdP destination starts with: what the door finds a refusal by.
+pub const REFUSED: &str = "oidc: IdP destination refused";
+
+/// THE REFUSAL'S WORDS: the fixed prefix, the URL's host and the rule. Never the URL's path or query
+/// (a discovered URL is remote input, and a URL may carry a tenant or a token in either).
+pub fn refusal(host: &str, rule: &str) -> String {
+    format!("{REFUSED}: host '{}' {rule}", host.escape_debug())
+}
+
+/// The host `url` names, as the URL client reads it (brackets kept on an IPv6 literal); `?` when it
+/// names none.
+pub fn host_of(url: &str) -> String {
+    url::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string))
+        .unwrap_or_else(|| "?".to_string())
+}
+
+/// The rule the destination guard holds an IdP dial to, as a refusal names it.
+const GUARD_RULE: &str = "was refused by the destination guard: an identity provider on a \
+     private, loopback, link-local, CGNAT or unique-local address is refused unless \
+     advanced.allow_destinations names it, and cloud metadata is refused always";
 
 /// A request to `url` that got no answer: a fixed prefix, then why.
 pub fn failed(url: &str, why: impl Display) -> String {
@@ -367,6 +413,7 @@ pub struct HostIo<'h> {
     state: IoState,
     anchored: bool,
     wanted: bool,
+    refusals: Vec<String>,
 }
 
 impl<'h> HostIo<'h> {
@@ -380,7 +427,14 @@ impl<'h> HostIo<'h> {
             state,
             anchored,
             wanted: false,
+            refusals: Vec::new(),
         }
+    }
+
+    /// The refusals this op met ([`Fetch::refused`]), taken: the door raises each it has not yet
+    /// raised as its declared diagnostic.
+    pub fn take_refusals(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.refusals)
     }
 
     /// The host's wall clock, unix seconds (`clock.now`), the time a
@@ -426,6 +480,11 @@ impl<'h> HostIo<'h> {
         // plaintext through to any address, so a public host's https is held HERE, before the host
         // is asked and before the secret is in any request.
         if parsed.scheme() != "https" && !plaintext_allowed(need, url) {
+            self.refusals.push(refusal(
+                &host_of(url),
+                "is named over plain http: an identity provider is reached over https (plain http \
+                 only to a private or loopback token endpoint)",
+            ));
             return Poll::Ready(Err(failed(url, "URL scheme is not allowed")));
         }
         let Some(host) = self.host else {
@@ -451,6 +510,9 @@ impl<'h> HostIo<'h> {
             }
             Poll::Ready(r) => {
                 self.state.issued = c.issued();
+                if let Err(ConnFailure::Refused(_)) = &r {
+                    self.refusals.push(refusal(&host_of(url), GUARD_RULE));
+                }
                 Poll::Ready(r.map_err(|e| {
                     match e {
                         // Cut off at the cap while reading (at most cap + 1 bytes): the status is
@@ -480,6 +542,10 @@ impl Fetch for HostIo<'_> {
     fn cannot_pend(&mut self, url: &str) -> String {
         self.wanted = true;
         failed(url, ConnFailure::NoTicket)
+    }
+
+    fn refused(&mut self, why: &str) {
+        self.refusals.push(why.to_string());
     }
 
     fn wake(&self, waiters: &[Ticket]) {
