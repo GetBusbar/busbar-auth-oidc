@@ -2364,3 +2364,33 @@ fn a_token_of_an_unknown_issuer_is_refused_at_the_chains_end() {
         "no keys fetched for a stranger"
     );
 }
+
+/// S5: a browser login this provider cannot begin (no `authorization_endpoint` configured or
+/// discovered) is refused with a line in the plugin's log naming why, at info.
+#[test]
+fn a_begin_login_with_no_authorize_endpoint_is_logged() {
+    let mut none = cfg("groups");
+    none.authorization_endpoint = None;
+    let idp = Idp::new(serde_json::json!({ "issuer": ISSUER }).to_string());
+    let begin = BeginLogin {
+        redirect_uri: "https://busbar.test/auth/token".to_string(),
+        state: "st".to_string(),
+        code_challenge: "ch".to_string(),
+        nonce: None,
+        scopes: Vec::new(),
+    };
+    let cap = busbar_test_kit::warn_capture::WarnCapture::capturing_debug();
+    let out = tracing::subscriber::with_default(cap.clone(), || {
+        ready(OidcModule::new(&none).begin_login(
+            &begin,
+            Instant::now(),
+            &mut idp.at_once(Some(ME)),
+        ))
+    });
+    assert!(matches!(out, Ok(LoginOutcome::Reject)));
+    let logged = cap.messages().join("\n");
+    assert!(
+        logged.contains("authorization_endpoint") && logged.contains("module=oidc"),
+        "the refusal is explained: {logged:?}"
+    );
+}
