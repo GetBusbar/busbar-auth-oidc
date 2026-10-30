@@ -31,6 +31,7 @@
 //!   operator at **app-roles** (`role_claim: roles`), whose count is bounded.
 
 #![forbid(unsafe_code)]
+#![deny(missing_docs)]
 
 use busbar_contract::auth::{
     AuthVerdict, BeginLogin, LoginHop, LoginHttpResponse, LoginOutcome, Principal,
@@ -164,6 +165,7 @@ pub struct OidcVerifier {
 /// The result of validating a token's CLAIMS (post-signature): the resolved principal, or a denial
 /// reason. Kept separate from the signature step so tests can exercise claim policy directly.
 impl OidcVerifier {
+    /// The verifier requiring `issuer` and `audience` exactly, reading roles from `role_claim`.
     pub fn new(
         issuer: impl Into<String>,
         audience: impl Into<String>,
