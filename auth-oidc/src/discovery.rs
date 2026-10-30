@@ -45,8 +45,9 @@ pub fn check_document(
     let body = fetched.map_err(|e| {
         format!("OIDC discovery fetch failed ({url}): {e}; set jwks_url explicitly")
     })?;
-    let doc: Value = serde_json::from_str(&body)
-        .map_err(|e| format!("OIDC discovery document is not JSON: {e}"))?;
+    let doc: Value = serde_json::from_str(&body).map_err(
+        busbar_contract::abi::sdk::auth_kit::json_error("OIDC discovery document is not JSON"),
+    )?;
     match doc.get("issuer").and_then(Value::as_str) {
         Some(doc_issuer) if doc_issuer == cfg.issuer => Ok(doc),
         Some(other) => Err(format!(

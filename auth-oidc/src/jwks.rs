@@ -160,8 +160,9 @@ impl JwkSet {
     /// empty body does. The caller's error path already preserves the previous keys; this makes the
     /// degenerate document take that path instead of the success path.
     pub fn parse(body: &str) -> Result<Self, String> {
-        let set: Self =
-            serde_json::from_str(body).map_err(|e| format!("invalid JWKS document: {e}"))?;
+        let set: Self = serde_json::from_str(body).map_err(
+            busbar_contract::abi::sdk::auth_kit::json_error("invalid JWKS document"),
+        )?;
         if set.keys.is_empty() {
             return Err(
                 "JWKS document contains no keys; refusing to replace the cached key set with an \
