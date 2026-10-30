@@ -2542,6 +2542,30 @@ fn a_logged_idp_url_drops_its_userinfo() {
     assert!(!logged.contains("SECRETPW"), "a URL's userinfo is logged: {logged}");
 }
 
+/// L14: the JWKS entries a fetch skips as unusable are not dropped silently: one warn per fetch
+/// names how many (and never their content); a set with none skipped says nothing.
+#[test]
+fn skipped_jwks_entries_are_counted_in_one_warn() {
+    let key = TestKey::generate(KID);
+    let good = serde_json::from_str::<Value>(&key.jwks()).unwrap()["keys"][0].clone();
+    let body = serde_json::json!({
+        "keys": [good, {"kid": "no-kty-SECRET"}, {"kty": 7}],
+    })
+    .to_string();
+    let cap = busbar_test_kit::warn_capture::WarnCapture::default();
+    let set = tracing::subscriber::with_default(cap.clone(), || jwks::JwkSet::parse(&body))
+        .expect("the usable key parses");
+    assert_eq!(set.keys.len(), 1);
+    assert_eq!(cap.messages().len(), 1, "one warn: {:?}", cap.messages());
+    assert!(cap.contains("skipped=2"), "{:?}", cap.messages());
+    assert!(!cap.contains("SECRET"), "{:?}", cap.messages());
+
+    let quiet = busbar_test_kit::warn_capture::WarnCapture::default();
+    tracing::subscriber::with_default(quiet.clone(), || jwks::JwkSet::parse(&key.jwks()))
+        .expect("parses");
+    assert!(quiet.messages().is_empty(), "{:?}", quiet.messages());
+}
+
 /// Every refusal of the browser login's token response is explained in the plugin's log, by status
 /// or by kind, and never with the body.
 #[test]
