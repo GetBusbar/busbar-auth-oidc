@@ -155,7 +155,7 @@ fn admitted(registry: &PluginRegistry) -> (Vec<u8>, Vec<u8>) {
         .stated_rendering()
         .expect("the manifest's statement is hex")
         .expect("the signed manifest states the door's Statement");
-    (p.lib_bytes.clone(), stated)
+    (p.lib_bytes.to_vec(), stated)
 }
 
 /// The operator config: only the issuer and the audience (the JWKS url and both login endpoints
