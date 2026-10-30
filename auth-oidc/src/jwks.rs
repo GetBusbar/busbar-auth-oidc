@@ -153,32 +153,26 @@ impl Jwk {
 }
 
 /// A parsed JWKS: the provider's current set of signing keys.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct JwkSet {
-    /// The keys. Deserialized from the top-level `keys` array of a JWKS document. An entry that is
-    /// not a usable [`Jwk`] (no `kty`, a non-string member, …) is SKIPPED rather than failing the
-    /// whole document: RFC 7517 §5 says a JWK Set consumer SHOULD ignore keys it cannot use, and
-    /// one odd entry must not take every other key (and so every token) down with it.
-    #[serde(deserialize_with = "skip_unusable_keys")]
+    /// The keys, from the top-level `keys` array of a JWKS document. An entry that is not a usable
+    /// [`Jwk`] (no `kty`, a non-string member, …) is SKIPPED rather than failing the whole
+    /// document: RFC 7517 §5 says a JWK Set consumer SHOULD ignore keys it cannot use, and one odd
+    /// entry must not take every other key (and so every token) down with it. How many were
+    /// skipped is said once per document, at warn ([`JwkSet::parse`]).
     pub keys: Vec<Jwk>,
 }
 
-/// Deserialize the `keys` array entry by entry, keeping only the entries that deserialize as a
-/// [`Jwk`]. The array itself must still be present and be an array.
-fn skip_unusable_keys<'de, D>(d: D) -> Result<Vec<Jwk>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let raw: Vec<serde_json::Value> = Deserialize::deserialize(d)?;
-    Ok(raw
-        .into_iter()
-        .filter_map(|v| serde_json::from_value::<Jwk>(v).ok())
-        .collect())
+/// A JWKS document as it arrives: its `keys` array, each entry not yet read as a [`Jwk`]. The
+/// array itself must be present and be an array.
+#[derive(Deserialize)]
+struct RawSet {
+    keys: Vec<serde_json::Value>,
 }
 
 impl JwkSet {
     /// Parse a JWKS document (the body of a `jwks_uri` GET). Entries that are not usable JWKs are
-    /// skipped (see [`JwkSet::keys`]).
+    /// skipped (see [`JwkSet::keys`]), one warn naming how many.
     ///
     /// A document that parses but carries ZERO usable keys is an ERROR, not an empty success. An
     /// identity provider that can sign tokens always publishes at least one key, so `{"keys":[]}` is a
@@ -189,9 +183,26 @@ impl JwkSet {
     /// empty body does. The caller's error path already preserves the previous keys; this makes the
     /// degenerate document take that path instead of the success path.
     pub fn parse(body: &str) -> Result<Self, String> {
-        let set: Self = serde_json::from_str(body).map_err(
+        let raw: RawSet = serde_json::from_str(body).map_err(
             busbar_contract::abi::sdk::auth_kit::json_error("invalid JWKS document"),
         )?;
+        let entries = raw.keys.len();
+        let set = Self {
+            keys: raw
+                .keys
+                .into_iter()
+                .filter_map(|v| serde_json::from_value::<Jwk>(v).ok())
+                .collect(),
+        };
+        let skipped = entries - set.keys.len();
+        if skipped > 0 {
+            // Once per fetched document, the count only: an entry's content is far-end input.
+            tracing::warn!(
+                module = "oidc",
+                skipped,
+                "JWKS document carries entries that are not usable keys; they are skipped"
+            );
+        }
         if set.keys.is_empty() {
             return Err(
                 "JWKS document contains no keys; refusing to replace the cached key set with an \
