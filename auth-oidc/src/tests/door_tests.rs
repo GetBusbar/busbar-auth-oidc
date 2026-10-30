@@ -225,6 +225,30 @@ fn a_ticket_kept_again_does_not_evict() {
     assert!(map.contains_key(&ticket(1)));
 }
 
+/// L16: an identity kept for a short-buffer re-call (it carries the callback's state and code)
+/// is not held forever: an entry older than 10 minutes goes on the next access of the map, a
+/// newer one stays.
+#[test]
+fn a_kept_identity_older_than_ten_minutes_goes() {
+    let t0 = Instant::now();
+    let mut map = HashMap::new();
+    keep(&mut map, REACHED_MAX, ticket(1), kept_for(1, t0));
+    keep(
+        &mut map,
+        REACHED_MAX,
+        ticket(2),
+        kept_for(2, t0 + std::time::Duration::from_secs(9 * 60)),
+    );
+    keep(
+        &mut map,
+        REACHED_MAX,
+        ticket(3),
+        kept_for(3, t0 + std::time::Duration::from_secs(10 * 60 + 1)),
+    );
+    assert!(!map.contains_key(&ticket(1)), "older than 10 minutes: gone");
+    assert!(map.contains_key(&ticket(2)) && map.contains_key(&ticket(3)));
+}
+
 /// A blank `issuer` or `audience` is REFUSED at `validate` and at `open`, FAILED and naming the
 /// key: an empty issuer/audience would load and then match no token (or a token claiming an empty
 /// one), so it is refused rather than opened.
