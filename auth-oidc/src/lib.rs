@@ -678,16 +678,14 @@ impl OidcModule {
                 resp.status
             )));
         }
-        let body = match serde_json::from_str::<Value>(&resp.body).map_err(
-            busbar_contract::abi::sdk::auth_kit::json_error("token response"),
-        ) {
+        let body = match TokenResponse::parse(&resp.body) {
             Ok(b) => b,
             Err(e) => {
                 tracing::warn!(module = "oidc", error = %e, "OIDC token endpoint response is not JSON; login declined");
                 return Step::Ready(Ok(LoginOutcome::Reject));
             }
         };
-        let Some(id_token) = body.get("id_token").and_then(Value::as_str) else {
+        let Some(id_token) = body.id_token.as_deref().map(String::as_str) else {
             tracing::warn!(
                 module = "oidc",
                 "OIDC token endpoint response carries no id_token; login declined"
@@ -941,17 +939,47 @@ pub struct TokenRequest {
     pub form: FormBody,
 }
 
+/// THE TOKEN ENDPOINT'S ANSWER (RFC 6749 §5.1, OIDC Core §3.1.3.3), typed: the issued tokens are
+/// held in wiped holders, so no plain copy of one outlives its use; every other member is ignored.
+/// No `Debug`: it holds credentials.
+#[derive(Deserialize)]
+pub(crate) struct TokenResponse {
+    /// The OIDC identity token, the one member the login reads.
+    #[serde(default, deserialize_with = "wiped")]
+    pub(crate) id_token: Option<zeroize::Zeroizing<String>>,
+    /// The access token: never read, but parsed into a wiped holder rather than left to a scratch
+    /// buffer.
+    #[serde(default, deserialize_with = "wiped")]
+    #[allow(dead_code)]
+    access_token: Option<zeroize::Zeroizing<String>>,
+    /// The refresh token: as `access_token`.
+    #[serde(default, deserialize_with = "wiped")]
+    #[allow(dead_code)]
+    refresh_token: Option<zeroize::Zeroizing<String>>,
+}
+
+impl TokenResponse {
+    /// `body` parsed; the error never echoes it.
+    pub(crate) fn parse(body: &str) -> Result<Self, String> {
+        serde_json::from_str(body)
+            .map_err(busbar_contract::abi::sdk::auth_kit::json_error("token response"))
+    }
+}
+
+/// A token member deserialized straight into a wiped holder.
+fn wiped<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<zeroize::Zeroizing<String>>, D::Error> {
+    Ok(Option::<String>::deserialize(d)?.map(zeroize::Zeroizing::new))
+}
+
 /// The nonce binding: `true` when the token endpoint's `body`
 /// carries no `id_token`, or carries one whose (unverified) payload names `nonce` as its `nonce`
 /// claim, compared in constant time. An `id_token` with no readable `nonce` claim does not bind.
 /// The signature, issuer and audience are checked afterwards, by the verifier.
 pub(crate) fn nonce_binds(body: &str, nonce: &str) -> bool {
     use base64::Engine as _;
-    let Some(id_token) = serde_json::from_str::<Value>(body).ok().and_then(|v| {
-        v.get("id_token")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-    }) else {
+    let Some(id_token) = TokenResponse::parse(body).ok().and_then(|r| r.id_token) else {
         return true;
     };
     let claimed = id_token
