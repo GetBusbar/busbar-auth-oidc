@@ -1939,6 +1939,81 @@ fn an_idp_5xx_or_429_at_the_token_endpoint_is_an_outage_not_a_decline() {
     assert!(matches!(answered(400), Ok(LoginOutcome::Reject)));
 }
 
+/// O4 (OWNER-SIGNED 2026-10-30: only RFC 6749 §5.2 credential errors answer 401): a 400 or 401
+/// from the token endpoint carrying a §5.2 JSON `error` is a declined login, logged with the
+/// allow-listed code — `invalid_client`/`unauthorized_client` at warn (the operator's client is
+/// misconfigured), `invalid_grant` and the rest at info — and an unlisted code never echoed. Any
+/// other non-2xx (a redirect, 403, 404, 408, a 4xx with no §5.2 body) is the IdP not answering the
+/// exchange: an OUTAGE naming the status.
+#[test]
+fn only_an_rfc_6749_credential_error_at_the_token_endpoint_is_a_decline() {
+    let m = OidcModule::new(&cfg("groups"));
+    let idp = Idp::new(String::new());
+    let answered = |status: u16, body: &str| {
+        let response = LoginHttpResponse {
+            status,
+            body: body.to_string(),
+        };
+        let (warn, all) = (
+            busbar_test_kit::warn_capture::WarnCapture::default(),
+            busbar_test_kit::warn_capture::WarnCapture::capturing_debug(),
+        );
+        let mut outcome = None;
+        for cap in [&warn, &all] {
+            outcome = Some(tracing::subscriber::with_default(cap.clone(), || {
+                ready(m.identity_from_token_response(
+                    &response,
+                    1_700_000_000,
+                    Instant::now(),
+                    &mut idp.at_once(Some(ME)),
+                ))
+            }));
+        }
+        (outcome.expect("answered"), warn, all)
+    };
+    for (status, code, at_warn) in [
+        (400, "invalid_grant", false),
+        (400, "invalid_request", false),
+        (401, "invalid_client", true),
+        (400, "unauthorized_client", true),
+    ] {
+        let (outcome, warn, all) = answered(status, &format!(r#"{{"error":"{code}"}}"#));
+        assert!(
+            matches!(outcome, Ok(LoginOutcome::Reject)),
+            "{status} {code}: declined, got {outcome:?}"
+        );
+        assert!(all.contains(code), "{code} is logged: {:?}", all.messages());
+        assert_eq!(warn.contains(code), at_warn, "{code}: {:?}", warn.messages());
+    }
+    let (outcome, _, all) = answered(400, r#"{"error":"SECRET-made-up"}"#);
+    assert!(matches!(outcome, Ok(LoginOutcome::Reject)), "{outcome:?}");
+    assert!(
+        !all.contains("SECRET"),
+        "an unlisted code is not echoed: {:?}",
+        all.messages()
+    );
+    for (status, body) in [
+        (302, ""),
+        (403, r#"{"error":"invalid_grant"}"#),
+        (404, "{}"),
+        (408, ""),
+        (400, "<html>bad gateway</html>"),
+        (401, "{}"),
+        (400, r#"{"error":42}"#),
+    ] {
+        let (outcome, warn, _) = answered(status, body);
+        let Err(cause) = outcome else {
+            panic!("{status} {body:?} is not a credential error: an outage, got {outcome:?}");
+        };
+        assert!(cause.contains(&status.to_string()), "{cause}");
+        assert!(
+            warn.contains(&status.to_string()),
+            "{status}: logged at warn: {:?}",
+            warn.messages()
+        );
+    }
+}
+
 /// Fail-closed: a module with no login endpoints configured whose issuer's discovery document names
 /// none either (a verify-only deployment) rejects both login steps rather than emitting a malformed
 /// authorize URL or exchange.
