@@ -455,3 +455,11 @@ fn ca_cert_pem_only_adds_a_trusted_root_and_never_disables_verification() {
         }
     }
 }
+
+/// S6: a token endpoint's answer is bounded at 256 KiB; discovery and the JWKS at 1 MiB.
+#[test]
+fn each_need_bounds_its_reply() {
+    assert_eq!(reply_cap(NEED_TOKEN), 256 * 1024);
+    assert_eq!(reply_cap(NEED_DISCOVERY), 1024 * 1024);
+    assert_eq!(reply_cap(NEED_JWKS), 1024 * 1024);
+}

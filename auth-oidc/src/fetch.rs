@@ -66,6 +66,12 @@ use busbar_contract::auth::LoginHttpResponse;
 /// discovery document.
 pub const MAX_JWKS_BYTES: usize = 1024 * 1024;
 
+/// The most bytes of an answer read on `need`.
+pub const fn reply_cap(need: u32) -> usize {
+    let _ = need;
+    MAX_JWKS_BYTES
+}
+
 /// The bound on one request, milliseconds: 10s. Generous enough for a cold
 /// DNS + TLS handshake to a public IdP, short enough that a hung endpoint cannot hold an op.
 pub const FETCH_TIMEOUT_MS: u64 = 10_000;
