@@ -155,3 +155,35 @@ fn a_failed_discovery_logs_one_warn_with_the_error() {
         cap.messages()
     );
 }
+
+/// L15: the discovery document is not held for the module's life: 24 h after it was fetched the
+/// issuer is asked again (an IdP that moved its keys or endpoints is followed), and while that
+/// re-discovery is in flight or has failed, the previous document keeps serving (a re-discovery
+/// that fails is asked again after the retry bound, not a day later).
+#[test]
+fn the_document_is_rediscovered_after_a_day_serving_the_previous_one_meanwhile() {
+    let (c, d) = (cfg(None), Discovery::new(Duration::from_secs(60)));
+    let idp = Idp::new(doc());
+    let t0 = Instant::now();
+    assert!(matches!(ready(d.document(&c, t0, &mut idp.at_once(Some(ME)))), Ok(_)));
+    let within = t0 + Duration::from_secs(24 * 3600 - 1);
+    assert!(matches!(ready(d.document(&c, within, &mut idp.at_once(Some(ME)))), Ok(_)));
+    assert_eq!(idp.calls(), 1, "held within the day");
+
+    let day = t0 + Duration::from_secs(24 * 3600);
+    let mut claimer = idp.pending(ticket(1));
+    assert_eq!(d.document(&c, day, &mut claimer), Step::Pending, "asked again");
+    assert!(
+        matches!(ready(d.document(&c, day, &mut idp.at_once(Some(ticket(2))))), Ok(_)),
+        "another caller is served the previous document meanwhile"
+    );
+    idp.set_answer(Err("down".to_string()));
+    assert!(
+        matches!(ready(d.document(&c, day, &mut claimer)), Ok(_)),
+        "a failed re-discovery keeps the previous document"
+    );
+    assert_eq!(idp.calls(), 2);
+    let retry = day + Duration::from_secs(60);
+    let _ = ready(d.document(&c, retry, &mut idp.at_once(Some(ME))));
+    assert_eq!(idp.calls(), 3, "asked again after the retry bound");
+}
