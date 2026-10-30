@@ -1514,13 +1514,12 @@ fn identity_from_token_response_verifies_id_token() {
     ));
 }
 
-/// A KEY SET THAT CANNOT BE HAD AT LOGIN is a declined login, as in 1.5.5 (ARCHITECT ruling: v1.0.6
-/// `identity_from_token_response` answered `Reject` for a key set it could not fetch; v1.5.5
-/// `auth/token.rs:543-549` rendered that 401 "Sign-in was declined", 502 being only for a token
-/// hop that failed). Both ways it cannot be had: the JWKS fetch fails, or (no `jwks_url`) the
-/// discovery naming it fails. Each logs 1.5.5's warn with the cause.
+/// O1 (OWNER-SIGNED 2026-10-30: an IdP outage is never a 401): A KEY SET THAT CANNOT BE HAD AT
+/// LOGIN is an OUTAGE, not a declined login. Both ways it cannot be had: the JWKS fetch fails, or
+/// (no `jwks_url`) the discovery naming it fails. The module answers the error (the door's
+/// `LOGIN_OUTAGE`), naming the cause, and logs it at warn; it never answers `Reject`.
 #[test]
-fn a_key_set_that_cannot_be_had_at_login_is_a_declined_login_as_in_1_5_5() {
+fn a_key_set_that_cannot_be_had_at_login_is_an_outage_not_a_decline() {
     let key = TestKey::generate(KID);
     let now = now_unix();
     let response = LoginHttpResponse {
@@ -1544,22 +1543,72 @@ fn a_key_set_that_cannot_be_had_at_login_is_a_declined_login_as_in_1_5_5() {
                 &mut down.at_once(Some(ME)),
             ))
         });
-        assert!(
-            matches!(outcome, Ok(LoginOutcome::Reject)),
-            "{cause}: a declined login, never an outage: {outcome:?}"
-        );
-        assert_eq!(
-            cap.count("OIDC token signature verification failed"),
-            1,
-            "{cause}: 1.5.5's warn: {:?}",
-            cap.messages()
-        );
+        match outcome {
+            Err(e) => assert!(e.contains(cause), "{cause}: the error names why: {e}"),
+            other => panic!("{cause}: an outage, never a declined login: {other:?}"),
+        }
         assert!(
             cap.contains(cause),
-            "{cause}: the warn names why: {:?}",
+            "{cause}: a warn names why: {:?}",
             cap.messages()
         );
     }
+}
+
+/// O1 (OWNER-SIGNED 2026-10-30): on the BEARER path a key set that cannot be had is an outage —
+/// the verify answers its error (the door's FAILED with a reason line), never `Reject` — however it
+/// cannot be had: a cold-cache fetch failure, the same caller again while the rate limit holds the
+/// next attempt off, and a rotation refetch that fails while older keys are still held. A key
+/// MISMATCH stays a `Reject`: a bad signature, and a kid absent from a FRESHLY fetched set.
+#[test]
+fn a_key_set_that_cannot_be_had_fails_a_bearer_verify_and_a_mismatch_rejects_it() {
+    let key = TestKey::generate(KID);
+    let now = 1_700_000_000;
+    let token = key.mint(&base_claims(now));
+    let verify = |m: &OidcModule, idp: &Idp, token: &str, at: Instant| {
+        ready(m.verify(Some(token), now, at, &mut idp.at_once(Some(ME))))
+    };
+    let t0 = Instant::now();
+
+    // Cold cache, the IdP down: an outage, and again while the rate limit holds the retry off.
+    let m = OidcModule::new(&cfg("groups"));
+    let down = Idp::answering(Err("jwks unreachable".to_string()));
+    for at in [t0, t0 + Duration::from_secs(1)] {
+        match verify(&m, &down, &token, at) {
+            Err(e) => assert!(!e.is_empty()),
+            other => panic!("a key set that cannot be had is an outage: {other:?}"),
+        }
+    }
+
+    // Keys held, then the provider rotates while it is down: the rotation refetch fails, so a
+    // token naming the new kid cannot be judged — an outage, not "unknown kid".
+    let idp = Idp::new(key.jwks());
+    let m = OidcModule::new(&cfg("groups"));
+    assert!(matches!(
+        verify(&m, &idp, &token, t0),
+        Ok(AuthVerdict::Identify(_))
+    ));
+    idp.set_answer(Err("jwks unreachable".to_string()));
+    let rotated = TestKey::generate("rotated-kid").mint(&base_claims(now));
+    match verify(&m, &idp, &rotated, t0 + Duration::from_secs(61)) {
+        Err(e) => assert!(!e.is_empty()),
+        other => panic!("a failed rotation refetch is an outage: {other:?}"),
+    }
+
+    // The provider is up: a kid absent from the set it has just answered is a mismatch, and so
+    // is a signature that does not verify.
+    let idp = Idp::new(key.jwks());
+    let m = OidcModule::new(&cfg("groups"));
+    let ghost = TestKey::generate("ghost-kid").mint(&base_claims(now));
+    assert!(matches!(
+        verify(&m, &idp, &ghost, t0),
+        Ok(AuthVerdict::Reject)
+    ));
+    let forged = TestKey::generate(KID).mint(&base_claims(now));
+    assert!(matches!(
+        verify(&m, &idp, &forged, t0),
+        Ok(AuthVerdict::Reject)
+    ));
 }
 
 /// OIDC-1 (OIDC Core 1.0 §3.1.3.7 step 3): the browser-login `id_token`'s `aud` must contain
