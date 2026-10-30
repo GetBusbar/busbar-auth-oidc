@@ -159,12 +159,17 @@ pub struct OidcVerifier {
     issuer: String,
     audience: String,
     role_claim: String,
+    /// Whether this verifier judges a browser-login `id_token` (OIDC Core 1.0 §3.1.3.7's
+    /// authorized-party rules against `audience`, the client_id) rather than a bearer access token
+    /// (RFC 9068 §4: `aud` contains the resource audience, no `azp` rule).
+    id_token: bool,
 }
 
 /// The result of validating a token's CLAIMS (post-signature): the resolved principal, or a denial
 /// reason. Kept separate from the signature step so tests can exercise claim policy directly.
 impl OidcVerifier {
-    /// The verifier requiring `issuer` and `audience` exactly, reading roles from `role_claim`.
+    /// The BEARER verifier: `issuer` exactly, an `aud` containing `audience` (RFC 7519 §4.1.3,
+    /// RFC 9068 §4), roles from `role_claim`.
     pub fn new(
         issuer: impl Into<String>,
         audience: impl Into<String>,
@@ -174,6 +179,20 @@ impl OidcVerifier {
             issuer: issuer.into(),
             audience: audience.into(),
             role_claim: role_claim.into(),
+            id_token: false,
+        }
+    }
+
+    /// The browser-login `id_token` verifier: as [`Self::new`] with the OAuth `client_id` as the
+    /// audience, plus OIDC Core 1.0 §3.1.3.7's authorized-party rules against it.
+    pub fn for_id_token(
+        issuer: impl Into<String>,
+        client_id: impl Into<String>,
+        role_claim: impl Into<String>,
+    ) -> Self {
+        Self {
+            id_token: true,
+            ..Self::new(issuer, client_id, role_claim)
         }
     }
 
@@ -199,29 +218,24 @@ impl OidcVerifier {
         }
 
         // aud — `aud` may be a single string or an array of strings (RFC 7519). The configured
-        // audience MUST be present. For the MULTI-VALUED array form, OIDC Core 1.0 §3.1.3.7 is
-        // stricter than "any match": a token that also lists audiences the client does not trust MUST
-        // be rejected UNLESS an `azp` (authorized party) claim is present and equals the trusted
-        // client — the `.any(trusted)` shortcut would otherwise wave through a token minted for the
-        // trusted client AND some attacker-controlled app. A single-string `aud`, or an array whose
-        // only value is the trusted audience, needs no `azp`.
+        // audience MUST be present (RFC 7519 §4.1.3). A BEARER needs nothing more (RFC 9068 §4: an
+        // access token may name several resource audiences, and its `azp` is the client that asked
+        // for it, never the resource). An ID TOKEN follows OIDC Core 1.0 §3.1.3.7 against the
+        // client_id: a multi-valued `aud` that also lists audiences the client does not trust is
+        // rejected UNLESS `azp` names the client (step 4) — the `.any(trusted)` shortcut would wave
+        // through a token minted for the client AND an attacker-controlled app — and an `azp` that
+        // is present must name the client whatever the `aud` (step 5).
         let trusted = self.audience.as_str();
+        let azp = claims.get("azp").and_then(Value::as_str);
         let aud_ok = match claims.get("aud") {
             Some(Value::String(s)) => s == trusted,
             Some(Value::Array(a)) => {
                 let trusted_present = a.iter().any(|v| v.as_str() == Some(trusted));
                 let has_untrusted_extra = a.iter().any(|v| v.as_str() != Some(trusted));
-                if !trusted_present {
-                    false
-                } else if has_untrusted_extra {
-                    // Multiple audiences, at least one untrusted: require azp == the trusted client.
-                    claims.get("azp").and_then(Value::as_str) == Some(trusted)
-                } else {
-                    true
-                }
+                trusted_present && !(self.id_token && has_untrusted_extra && azp != Some(trusted))
             }
             _ => false,
-        };
+        } && !(self.id_token && claims.get("azp").is_some() && azp != Some(trusted));
         if !aud_ok {
             return Err(
                 "token audience does not match the configured audience (or lists an untrusted \
@@ -464,7 +478,7 @@ impl OidcModule {
     pub fn new(cfg: &OidcConfig) -> Self {
         Self {
             verifier: OidcVerifier::new(&cfg.issuer, &cfg.audience, &cfg.role_claim),
-            login_verifier: OidcVerifier::new(
+            login_verifier: OidcVerifier::for_id_token(
                 &cfg.issuer,
                 resolved_client_id(cfg),
                 &cfg.role_claim,
