@@ -765,6 +765,41 @@ fn a_cache_hit_answers_the_remaining_ttl() {
     assert_eq!(m.m.cached(&token, now + 299).map(|h| h.ttl_secs), Some(Some(1)));
 }
 
+/// L12 (S5): a rejected token is the caller's, not the operator's: logged ONCE at info with a
+/// reason word, never at warn — a token that fails its claims (expired) as one that fails its
+/// signature.
+#[test]
+fn a_rejected_token_is_logged_at_info_with_a_reason() {
+    let key = TestKey::generate(KID);
+    let m = module_with(&key, "groups");
+    let now = 1_700_000_000;
+    let mut expired = base_claims(now);
+    expired["exp"] = serde_json::json!(now - 3600);
+    let forged = TestKey::generate(KID).mint(&base_claims(now));
+    for (what, token, reason) in [
+        ("expired", key.mint(&expired), "reason=claims"),
+        ("forged", forged, "reason=signature"),
+    ] {
+        let (warn, all) = (
+            busbar_test_kit::warn_capture::WarnCapture::default(),
+            busbar_test_kit::warn_capture::WarnCapture::capturing_debug(),
+        );
+        for cap in [&warn, &all] {
+            let verdict = tracing::subscriber::with_default(cap.clone(), || {
+                m.verify(&token, now, Instant::now())
+            });
+            assert!(matches!(verdict, AuthVerdict::Reject), "{what}");
+        }
+        assert!(warn.messages().is_empty(), "{what}: not at warn: {:?}", warn.messages());
+        assert_eq!(
+            all.count(reason),
+            1,
+            "{what}: once, with its reason: {:?}",
+            all.messages()
+        );
+    }
+}
+
 #[test]
 fn unknown_kid_after_refetch_is_rejected() {
     let key = TestKey::generate("real-kid");
