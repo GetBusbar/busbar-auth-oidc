@@ -65,7 +65,10 @@ impl KeyMaterial {
                 point.extend_from_slice(&y);
                 Self::Ec { point }
             }
-            other => Self::Unusable(format!("JWKS key has unsupported kty {other}")),
+            other => Self::Unusable(format!(
+                "JWKS key has unsupported kty {}",
+                crate::untrusted(other)
+            )),
         }
     }
 }

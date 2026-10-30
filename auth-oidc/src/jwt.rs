@@ -95,9 +95,11 @@ pub fn verify_signature(parts: &Parts, key: &Jwk) -> Result<(), String> {
     // be processed.
     if let Some(crit) = &parts.header.crit {
         if !crit.is_empty() {
+            let named: Vec<String> = crit.iter().map(|c| crate::untrusted(c)).collect();
             return Err(format!(
-                "JWT header names critical extension(s) {crit:?} (RFC 7515 §4.1.11) that this \
-                 verifier does not implement; refusing to process the token"
+                "JWT header names critical extension(s) [{}] (RFC 7515 §4.1.11) that this \
+                 verifier does not implement; refusing to process the token",
+                named.join(", ")
             ));
         }
     }
@@ -113,7 +115,7 @@ pub fn verify_signature(parts: &Parts, key: &Jwk) -> Result<(), String> {
         if key.kty != "RSA" {
             return Err(format!(
                 "token alg {ALG_RS256} but JWKS key kty is {} (alg/key-type mismatch)",
-                key.kty
+                crate::untrusted(&key.kty)
             ));
         }
         // Key material is base64url-decoded ONCE and memoised on the key (see `Jwk::material`), so
@@ -138,13 +140,13 @@ pub fn verify_signature(parts: &Parts, key: &Jwk) -> Result<(), String> {
         if key.kty != "EC" {
             return Err(format!(
                 "token alg {ALG_ES256} but JWKS key kty is {} (alg/key-type mismatch)",
-                key.kty
+                crate::untrusted(&key.kty)
             ));
         }
         if key.crv.as_deref() != Some("P-256") {
             return Err(format!(
-                "{ALG_ES256} requires curve P-256, JWKS key has crv {:?}",
-                key.crv
+                "{ALG_ES256} requires curve P-256, JWKS key has crv {}",
+                key.crv.as_deref().map_or("(none)".to_string(), crate::untrusted)
             ));
         }
         // Point decoded ONCE and memoised (see `Jwk::material`) — no per-request re-decode/alloc.
@@ -168,7 +170,7 @@ pub fn verify_signature(parts: &Parts, key: &Jwk) -> Result<(), String> {
         // unsigned header of an untrusted bearer and this error is logged, so it is escaped.
         Err(format!(
             "unsupported/forbidden JWT alg '{}': only {ALG_RS256} and {ALG_ES256} are accepted",
-            alg.escape_debug()
+            crate::untrusted(alg)
         ))
     }
 }
