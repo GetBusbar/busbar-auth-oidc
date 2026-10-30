@@ -83,6 +83,10 @@ const MAX_CACHE_TTL_SECS: i64 = 300;
 /// fine; it only needs to stay behind "now".
 const CLOCK_SANITY_FLOOR_UNIX: i64 = 1_767_225_600; // 2026-01-01T00:00:00Z
 
+/// Why no token can be judged while the host clock reads `i64::MAX` ([`clock_or_fail_closed`]).
+const CLOCK_UNREADABLE: &str = "the host clock is unreadable or reads before 2026-01-01 (the clock \
+     sanity floor), so no token can be judged; fix the host clock";
+
 /// The operator's `identity-providers:` settings for this module, deserialized from the JSON the engine passes to
 /// the plugin's `open`.
 #[derive(Debug, Clone, Deserialize)]
@@ -204,7 +208,7 @@ impl OidcVerifier {
         // `now_unix()`'s broken-clock sentinel: refused outright, so an `exp` that saturates cannot
         // pass it, and the refusal names the clock rather than the token.
         if now_unix == i64::MAX {
-            return Err("the host clock is unreadable or reads before 2026-01-01 (the clock sanity floor), so every token is treated as expired; fix the host clock".to_string());
+            return Err(CLOCK_UNREADABLE.to_string());
         }
         // iss — exact match. A wrong issuer is a different tenant / a token minted elsewhere.
         match claims.get("iss").and_then(Value::as_str) {
@@ -824,6 +828,13 @@ impl OidcModule {
                  provider's credential; passed to the next auth"
             );
             return Step::Ready(Ok(AuthVerdict::Pass));
+        }
+        // Ours, and the host's clock cannot be read (`clock_or_fail_closed`'s sentinel): no token
+        // can be judged, and that is the host's fault, not the caller's — a FAILURE (the login's
+        // outage), never a reject.
+        if now_unix == i64::MAX {
+            tracing::warn!(module = "oidc", "the host clock is unreadable; the token cannot be judged");
+            return Step::Ready(Err(CLOCK_UNREADABLE.to_string()));
         }
         // Ours: a header that does not decode is this provider's to refuse.
         let parts = match jwt::split(token) {
