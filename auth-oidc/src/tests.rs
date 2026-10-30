@@ -531,6 +531,36 @@ fn malformed_but_dotted_bearers_pass() {
     }
 }
 
+/// L4: issuer routing reads the payload's `iss` BEFORE the header is decoded: a three-segment
+/// token whose payload names THIS issuer is this provider's to judge, so a malformed header
+/// (not base64url, not JSON, a mistyped member) is a REJECT, not a Pass to the next auth. One whose
+/// payload names another issuer, or cannot be read, still passes.
+#[test]
+fn a_token_naming_this_issuer_with_a_malformed_header_is_rejected_not_passed() {
+    let key = TestKey::generate(KID);
+    let m = module_with(&key, "groups");
+    let now = 1_700_000_000;
+    let payload = |iss: &str| {
+        let mut c = base_claims(now);
+        c["iss"] = serde_json::json!(iss);
+        URL_SAFE_NO_PAD.encode(serde_json::to_vec(&c).unwrap())
+    };
+    let mistyped = URL_SAFE_NO_PAD.encode(br#"{"alg":"ES256","kid":12345}"#);
+    let not_json = URL_SAFE_NO_PAD.encode(b"not json");
+    for header in ["!!not-base64!!", not_json.as_str(), mistyped.as_str()] {
+        let ours = format!("{header}.{}.c2ln", payload(ISSUER));
+        assert!(
+            matches!(m.verify(&ours, now, Instant::now()), AuthVerdict::Reject),
+            "{header:?}: a token naming this issuer is ours to refuse"
+        );
+        let theirs = format!("{header}.{}.c2ln", payload("https://other.example"));
+        assert!(
+            matches!(m.verify(&theirs, now, Instant::now()), AuthVerdict::Pass),
+            "{header:?}: a token naming another issuer passes"
+        );
+    }
+}
+
 #[test]
 fn no_credential_passes() {
     let key = TestKey::generate(KID);
