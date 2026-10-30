@@ -115,6 +115,10 @@ impl VerdictCache {
             .ttl_secs
             .unwrap_or(DEFAULT_TTL_SECS)
             .min(MAX_TTL_SECS);
+        // A zero TTL could never be served: it would only hold a slot.
+        if ttl == 0 {
+            return;
+        }
         let k = key(credential);
         let mut state = self.lock();
         if state.flushes != generation.0 {
