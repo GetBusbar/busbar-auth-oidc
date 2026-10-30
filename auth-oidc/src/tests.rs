@@ -765,48 +765,77 @@ fn audience_array_form_accepted() {
     assert!(verifier("groups").validate_claims(&c, now).is_ok());
 }
 
-// ── multi-valued aud + azp (OIDC Core 1.0 §3.1.3.7) ────────────────────────────────────────────────
+// ── aud on the two paths: RFC 9068 access tokens, OIDC Core 1.0 §3.1.3.7 id_tokens ─────────────
 
-/// A multi-valued `aud` that lists an audience the client does NOT trust is accepted ONLY when an
-/// `azp` claim names the trusted client. This is the spec's authorized-party gate.
+/// O2: a BEARER (an RFC 9068 access token) is accepted when its `aud` CONTAINS the configured
+/// audience (RFC 7519 §4.1.3, RFC 9068 §4), however many other audiences it lists and whatever its
+/// `azp` names: `azp` is the client that asked for the token, never the resource audience, and the
+/// OIDC multi-audience rule is the id_token's (Keycloak access tokens carry
+/// `aud: ["busbar-api", "account"]`, `azp: "web-frontend"`). An `aud` not containing it is refused.
 #[test]
-fn multivalued_aud_with_untrusted_extra_is_accepted_when_azp_names_the_trusted_client() {
+fn a_bearer_aud_must_contain_the_audience_and_needs_no_azp() {
     let now = 1_700_000_000;
     let mut c = base_claims(now);
-    c["aud"] = serde_json::json!([AUDIENCE, "api://some-other-app"]);
-    c["azp"] = serde_json::json!(AUDIENCE);
+    c["aud"] = serde_json::json!([AUDIENCE, "account"]);
     assert!(
         verifier("groups").validate_claims(&c, now).is_ok(),
-        "a multi-aud token whose azp is the trusted client must be accepted"
+        "a multi-audience access token containing the audience, no azp"
     );
-}
-
-/// Under a bare `.any(trusted)` check, a token minted for the trusted client AND an
-/// attacker-controlled app sails through on the mere presence of the trusted audience. As
-/// implemented, an untrusted extra audience with NO `azp` is rejected.
-#[test]
-fn multivalued_aud_with_untrusted_extra_and_no_azp_is_rejected() {
-    let now = 1_700_000_000;
-    let mut c = base_claims(now);
-    c["aud"] = serde_json::json!([AUDIENCE, "api://attacker-app"]);
-    // no azp
+    c["azp"] = serde_json::json!("web-frontend");
+    assert!(
+        verifier("groups").validate_claims(&c, now).is_ok(),
+        "a multi-audience access token whose azp is the requesting client"
+    );
+    c["aud"] = serde_json::json!(["api://some-other-app", "account"]);
     let err = verifier("groups")
         .validate_claims(&c, now)
-        .expect_err("a multi-aud token with an untrusted extra and no azp must be rejected");
+        .expect_err("an aud not containing the audience");
     assert!(err.contains("audience"), "got: {err}");
 }
 
-/// The `azp` must equal the TRUSTED client, not merely be present: an `azp` naming the attacker app
-/// must not authorize the extra audience.
+/// O2: the browser-login `id_token` keeps OIDC Core 1.0 §3.1.3.7 against the `client_id`: a
+/// multi-valued `aud` with an audience the client does not trust needs an `azp` naming the client
+/// (step 4), and an `azp` that is PRESENT must name the client whatever the `aud` (step 5).
 #[test]
-fn multivalued_aud_with_wrong_azp_is_rejected() {
+fn an_id_token_aud_follows_the_oidc_azp_rules_against_the_client_id() {
+    let key = TestKey::generate(KID);
+    let mut c = cfg("groups");
+    c.audience = "api://x".to_string();
+    c.client_id = Some("cid".to_string());
+    let m = Module::new(&c, FixtureFetcher::new(key.jwks()));
     let now = 1_700_000_000;
-    let mut c = base_claims(now);
-    c["aud"] = serde_json::json!([AUDIENCE, "api://attacker-app"]);
-    c["azp"] = serde_json::json!("api://attacker-app");
+    let login = |aud: Value, azp: Option<&str>| {
+        let mut claims = base_claims(now);
+        claims["aud"] = aud;
+        if let Some(azp) = azp {
+            claims["azp"] = serde_json::json!(azp);
+        }
+        let resp = LoginHttpResponse {
+            status: 200,
+            body: serde_json::json!({ "id_token": key.mint(&claims) }).to_string(),
+        };
+        m.identity_from_token_response(&resp, now, Instant::now())
+    };
+    let multi = || serde_json::json!(["cid", "api://attacker-app"]);
+    assert!(matches!(
+        login(multi(), Some("cid")),
+        LoginOutcome::Identify(_)
+    ));
+    assert!(matches!(login(multi(), None), LoginOutcome::Reject));
+    assert!(matches!(
+        login(multi(), Some("api://attacker-app")),
+        LoginOutcome::Reject
+    ));
+    assert!(matches!(
+        login(serde_json::json!("cid"), Some("cid")),
+        LoginOutcome::Identify(_)
+    ));
     assert!(
-        verifier("groups").validate_claims(&c, now).is_err(),
-        "an azp that is not the trusted client must not authorize the untrusted extra audience"
+        matches!(
+            login(serde_json::json!("cid"), Some("someone-else")),
+            LoginOutcome::Reject
+        ),
+        "an azp present with a single aud must name the client (§3.1.3.7 step 5)"
     );
 }
 
