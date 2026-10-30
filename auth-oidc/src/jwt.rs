@@ -123,6 +123,33 @@ pub fn verify_signature(parts: &Parts, key: &Jwk) -> Result<(), String> {
         );
     }
     let alg = parts.header.alg.as_str();
+    // RFC 7517 §4.4 `alg`: a key published for one algorithm never verifies a token signed with
+    // another. (An alg this verifier does not accept at all is refused as such, below.)
+    let accepted = alg == ALG_RS256 || alg == ALG_ES256;
+    if let Some(key_alg) = key.alg.as_deref().filter(|_| accepted) {
+        if key_alg != alg {
+            return Err(format!(
+                "JWKS key is for alg {} but the token is signed {} (RFC 7517 §4.4); it must not \
+                 verify this token",
+                crate::untrusted(key_alg),
+                crate::untrusted(alg)
+            ));
+        }
+    }
+    // RFC 7517 §4.3 `key_ops`: a key whose permitted operations do not include `verify` never
+    // verifies a signature.
+    if accepted
+        && key
+            .key_ops
+            .as_ref()
+            .is_some_and(|ops| !ops.iter().any(|op| op == "verify"))
+    {
+        return Err(
+            "JWKS key's key_ops does not name \"verify\" (RFC 7517 §4.3); it must not verify \
+             signatures"
+                .to_string(),
+        );
+    }
     if alg == ALG_RS256 {
         if key.kty != "RSA" {
             return Err(format!(
@@ -235,6 +262,8 @@ mod tests {
             x: None,
             y: None,
             key_use: Some("enc".to_string()),
+            alg: None,
+            key_ops: None,
             decoded: std::sync::OnceLock::new(),
         };
         let parts = Parts {
@@ -276,6 +305,8 @@ mod tests {
             x: None,
             y: None,
             key_use: Some("sig".to_string()),
+            alg: None,
+            key_ops: None,
             decoded: std::sync::OnceLock::new(),
         };
         let parts = Parts {
@@ -314,6 +345,8 @@ mod tests {
             x: None,
             y: None,
             key_use: Some("sig".to_string()),
+            alg: None,
+            key_ops: None,
             decoded: std::sync::OnceLock::new(),
         };
         let parts = Parts {

@@ -2206,6 +2206,7 @@ fn far_end_and_attacker_strings_are_escaped_and_capped_in_errors() {
     );
     let mut odd = jwk.clone();
     odd.kty = hostile.clone();
+    odd.alg = None;
     check(
         "kty",
         &jwt::verify_signature(&parts_with("RS256", None), &odd).unwrap_err(),
