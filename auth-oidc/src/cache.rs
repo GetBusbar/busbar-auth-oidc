@@ -482,7 +482,7 @@ impl JwksCache {
             // The error names the URL and the cause only.
             tracing::warn!(
                 module = "oidc",
-                url = %url,
+                url = %crate::fetch::shown(url),
                 error = %e,
                 "JWKS refresh failed; serving the previous key set"
             );
@@ -492,7 +492,7 @@ impl JwksCache {
             // discard it, which would leave a cold-cache failure unlogged.
             tracing::warn!(
                 module = "oidc",
-                url = %url,
+                url = %crate::fetch::shown(url),
                 error = %e,
                 "JWKS fetch failed; no key set to serve"
             );
