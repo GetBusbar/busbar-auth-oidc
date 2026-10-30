@@ -194,7 +194,7 @@ impl Opened {
         // token exchange then sends no secret field, as 1.5.5's core sent none.
         let secret = lent_secret(secrets);
         if secret.as_ref().is_some_and(|s| !s.is_text()) {
-            return Err(Refusal::failed("oidc: the lent client secret is not UTF-8"));
+            return Err(Refusal::failed("secrets: `client_secret` is not UTF-8"));
         }
         Ok(Self {
             module,
@@ -362,8 +362,7 @@ impl Oidc {
 
 /// The settings blob as the JSON text it must be.
 fn text(settings: &[u8]) -> Result<&str, Refusal> {
-    std::str::from_utf8(settings)
-        .map_err(|_| Refusal::failed("invalid oidc plugin config: the settings are not UTF-8"))
+    std::str::from_utf8(settings).map_err(|_| Refusal::failed("settings: not UTF-8 text"))
 }
 
 impl Life for Oidc {

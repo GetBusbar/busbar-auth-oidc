@@ -583,7 +583,7 @@ fn load_and_exercise_auth_oidc_plugin_bad_config_fails_over_abi() {
     let err = support::open(&dropped().plugin, "", None)
         .expect_err("empty config must fail to open, not silently succeed");
     assert!(
-        err.contains("config"),
+        err.contains("settings: none provided"),
         "the plugin's own error message should survive the door intact: {err}"
     );
 
@@ -593,5 +593,8 @@ fn load_and_exercise_auth_oidc_plugin_bad_config_fails_over_abi() {
         None,
     )
     .expect_err("config missing a required field must fail to open");
-    assert!(err.contains("invalid oidc plugin config"), "got: {err}");
+    assert!(
+        err.contains("settings: missing field `audience`"),
+        "got: {err}"
+    );
 }

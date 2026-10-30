@@ -1109,8 +1109,8 @@ pub fn check_jwks_url(cfg: &OidcConfig) -> Result<Option<String>, String> {
     let Some(url) = &cfg.jwks_url else {
         return Ok(None);
     };
-    let parsed =
-        url::Url::parse(url).map_err(|e| format!("jwks_url is not a valid URL ({e}); {ONLY}"))?;
+    let parsed = url::Url::parse(url)
+        .map_err(|e| format!("settings.jwks_url: is not a valid URL ({e}); {ONLY}"))?;
     match parsed.scheme() {
         "https" => Ok(None),
         "http" if is_loopback_host(&parsed) => Ok(Some(
@@ -1120,13 +1120,13 @@ pub fn check_jwks_url(cfg: &OidcConfig) -> Result<Option<String>, String> {
             .to_string(),
         )),
         "http" => Err(format!(
-            "jwks_url is plain http to the host '{}', which is not loopback: signing keys over \
+            "settings.jwks_url: is plain http to the host '{}', which is not loopback: signing keys over \
              plain http can be substituted in transit, so it is refused; use https (plain http \
              only to a loopback host)",
             parsed.host_str().unwrap_or("?").escape_debug()
         )),
         other => Err(format!(
-            "jwks_url must be an https URL (got scheme '{}'); {ONLY}",
+            "settings.jwks_url: must be an https URL (got scheme '{}'); {ONLY}",
             other.escape_debug()
         )),
     }
