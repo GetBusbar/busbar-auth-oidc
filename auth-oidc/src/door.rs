@@ -158,6 +158,15 @@ fn raise_refusals<O: AbiOut>(module: &OidcModule, io: &mut HostIo<'_>, out: &mut
 /// The most short answers kept for their re-call at once.
 const REACHED_MAX: usize = 1024;
 
+/// How long a short answer is kept for its re-call: an older one (its host never came back for
+/// it) goes on the next access of the map.
+const REACHED_TTL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// Drop every kept answer older than [`REACHED_TTL`] at `now`.
+fn expire(map: &mut HashMap<Ticket, Reached>, now: Instant) {
+    map.retain(|_, r| now.saturating_duration_since(r.at) <= REACHED_TTL);
+}
+
 /// The BACKSTOP of an op waiting on another op's fetch, nanoseconds on the host's monotonic clock:
 /// it is woken when that fetch lands ([`Fetch::wake`]), and asks again after this long only if the
 /// fetch never settles — the fetch's own bound, after which its flight may be taken over.
@@ -295,9 +304,11 @@ impl Reached {
     }
 }
 
-/// Keep `r` for `ticket`'s re-call, at most `max` at once: at the cap the OLDEST entry goes, never
-/// the rest (an in-flight short answer awaiting its re-call must survive).
+/// Keep `r` for `ticket`'s re-call, at most `max` at once: entries past [`REACHED_TTL`] go, and at
+/// the cap the OLDEST entry goes, never the rest (an in-flight short answer awaiting its re-call
+/// must survive).
 fn keep(map: &mut HashMap<Ticket, Reached>, max: usize, ticket: Ticket, r: Reached) {
+    expire(map, r.at);
     if map.len() >= max && !map.contains_key(&ticket) {
         let oldest = map.iter().min_by_key(|(_, k)| k.at).map(|(t, _)| *t);
         if let Some(oldest) = oldest {
@@ -810,6 +821,7 @@ impl SafeSlot for Complete {
         let code = blob_text(input.field(|i| &i.code));
         let code_bytes = code.map_or(&[][..], str::as_bytes);
         let mut reached = oidc.reached.lock().unwrap_or_else(PoisonError::into_inner);
+        expire(&mut reached, Instant::now());
         let kept = reached
             .remove(&instance.ticket())
             .filter(|r| r.serves(state, code_bytes));
