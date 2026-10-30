@@ -669,6 +669,46 @@ fn a_verified_identity_is_answered_from_the_verdict_cache_for_its_ttl() {
     ));
 }
 
+/// L8 (RFC 7517 §4.3, §4.4): a JWK whose `alg` is present and is not the token's, or whose
+/// `key_ops` is present without `verify`, is never used to verify a signature; the matching key
+/// with `alg` equal to the token's, or `key_ops` naming `verify`, still verifies.
+#[test]
+fn a_jwk_whose_alg_or_key_ops_forbid_it_does_not_verify() {
+    let key = TestKey::generate(KID);
+    let now = 1_700_000_000;
+    let token = key.mint(&base_claims(now));
+    let with = |member: &str, value: Value| {
+        let mut set: Value = serde_json::from_str(&key.jwks()).unwrap();
+        set["keys"][0][member] = value;
+        Module::new(&cfg("groups"), FixtureFetcher::new(set.to_string()))
+    };
+    for (member, value) in [
+        ("alg", serde_json::json!("ES384")),
+        ("key_ops", serde_json::json!(["encrypt"])),
+        ("key_ops", serde_json::json!([])),
+    ] {
+        assert!(
+            matches!(
+                with(member, value.clone()).verify(&token, now, Instant::now()),
+                AuthVerdict::Reject
+            ),
+            "{member}: {value} must not verify an ES256 signature"
+        );
+    }
+    for (member, value) in [
+        ("alg", serde_json::json!("ES256")),
+        ("key_ops", serde_json::json!(["verify"])),
+    ] {
+        assert!(
+            matches!(
+                with(member, value.clone()).verify(&token, now, Instant::now()),
+                AuthVerdict::Identify(_)
+            ),
+            "{member}: {value} verifies"
+        );
+    }
+}
+
 #[test]
 fn unknown_kid_after_refetch_is_rejected() {
     let key = TestKey::generate("real-kid");
