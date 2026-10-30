@@ -30,23 +30,23 @@ fn begin() -> BeginLogin {
 fn empty_config_is_rejected() {
     let err = expect_err(module(""));
     assert!(
-        err.contains("config"),
-        "error should name that config is required: {err}"
+        err.starts_with("settings: none provided"),
+        "error should name that settings are required: {err}"
     );
 }
 
 #[test]
 fn whitespace_only_config_is_rejected() {
     let err = expect_err(module("   \n\t  "));
-    assert!(err.contains("config"), "got: {err}");
+    assert!(err.starts_with("settings: none provided"), "got: {err}");
 }
 
 #[test]
 fn malformed_json_is_rejected() {
     let err = expect_err(module("{ this is not json"));
     assert!(
-        err.contains("invalid oidc plugin config"),
-        "error should name the config as invalid: {err}"
+        err.starts_with("settings: "),
+        "error should name the settings as invalid: {err}"
     );
 }
 
@@ -55,13 +55,13 @@ fn config_missing_issuer_is_rejected() {
     // `issuer` has no `#[serde(default)]` in `OidcConfig` — it is required. `deny_unknown_fields`
     // is also on, so this proves the missing-required-field path specifically, not a stray typo.
     let err = expect_err(module(r#"{"audience":"api://busbar"}"#));
-    assert!(err.contains("invalid oidc plugin config"), "got: {err}");
+    assert!(err.starts_with("settings: "), "got: {err}");
 }
 
 #[test]
 fn config_missing_audience_is_rejected() {
     let err = expect_err(module(r#"{"issuer":"https://idp.example/v2.0"}"#));
-    assert!(err.contains("invalid oidc plugin config"), "got: {err}");
+    assert!(err.starts_with("settings: "), "got: {err}");
 }
 
 #[test]
@@ -71,7 +71,7 @@ fn unknown_config_field_is_rejected() {
     let err = expect_err(module(
         r#"{"issuer":"https://idp.example/v2.0","audience":"a","jwks_url":"https://idp.example/keys","bogus_field":true}"#,
     ));
-    assert!(err.contains("invalid oidc plugin config"), "got: {err}");
+    assert!(err.starts_with("settings: "), "got: {err}");
 }
 
 #[test]
@@ -239,11 +239,12 @@ fn the_discovered_login_endpoints_reach_both_login_steps_from_one_document() {
         Some("code"),
         Some("https://busbar.test/auth/token"),
         Some("verifier"),
+        None,
         now,
         &mut idp.at_once(Some(ME)),
     ))
     .expect("discovered")
-    .expect("a hop");
+    .expect("a token request");
     assert_eq!(
         hop.url, "https://issuer.invalid.example/discovered/token",
         "the token exchange must target the DISCOVERED token endpoint"
@@ -276,7 +277,7 @@ fn a_mistyped_settings_value_is_refused_without_echoing_it() {
     let err = expect_err(module(
         r#"{"issuer":"https://i.test","audience":"a","jwks_ttl_secs":"Zq7distinctiveValue"}"#,
     ));
-    assert!(err.contains("invalid oidc plugin config"), "got: {err}");
+    assert!(err.starts_with("settings: "), "got: {err}");
     assert!(
         !err.contains("Zq7distinctiveValue"),
         "the value is echoed: {err}"

@@ -41,11 +41,11 @@ use busbar_contract::abi::auth::{
     IdentifyOut, IdentityBuf, OpenOutboundIn, OpenOutboundOut, OutboundReadyIn, OutboundReadyOut,
     StripName, VerifyIn, BEGIN_AUTHORIZE, CANCEL_ABANDONED, CAP_INBOUND, CAP_LOGIN,
     DECISION_CONTINUE, DECISION_STOP, FACT_CACHEABLE, IDENTITY_HAS_TTL, LOGIN_BAD_CREDENTIAL,
-    LOGIN_IDENTITY, LOGIN_KIND_REDIRECT, LOGIN_OUTAGE, LOGIN_SECURITY_CHECK_FAILED,
-    METRIC_CACHE_FLUSHED, SPAN_ABSENT, STRIP_FIELD, VERDICT_IDENTITY, VERDICT_PASS, VERDICT_REJECT,
+    LOGIN_KIND_REDIRECT, LOGIN_OUTAGE, LOGIN_SECURITY_CHECK_FAILED, METRIC_CACHE_FLUSHED,
+    SPAN_ABSENT, STRIP_FIELD, VERDICT_IDENTITY, VERDICT_PASS, VERDICT_REJECT,
 };
 use busbar_contract::abi::mechanism::call::{
-    AbiStr, Blob, OutHead, Outcome, Span, BLOB_ABSENT, SEVERITY_ERROR,
+    AbiStr, Blob, OutHead, Outcome, Span, BLOB_ABSENT, SEVERITY_ERROR, SEVERITY_WARN,
 };
 use busbar_contract::abi::mechanism::door::{
     MarkWord, MetricFamily, Rewrite, Statement, FAMILY_COUNTER,
@@ -53,10 +53,12 @@ use busbar_contract::abi::mechanism::door::{
 use busbar_contract::abi::mechanism::lifecycle::{DriveIn, TickIn, TickOut};
 use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::sdk::auth_door::{carrier, verify_tail, with_tail};
+use busbar_contract::abi::sdk::auth_kit::login_identity;
 use busbar_contract::abi::sdk::conn::{ConnFailure, Host};
+use busbar_contract::abi::sdk::cred::{self, Cred};
 use busbar_contract::abi::sdk::door::{abi_str, alias, statement, AbiIn, AbiOut};
 use busbar_contract::abi::sdk::lent::HostBuf;
-use busbar_contract::abi::sdk::life::{Counted, Held, Life, Refreshed, Refusal};
+use busbar_contract::abi::sdk::life::{Counted, Flagged, Held, Life, Refreshed, Refusal};
 use busbar_contract::abi::sdk::{Instance, Lent, Out, Safe, SafeSlot};
 use busbar_contract::auth::{AuthVerdict, BeginLogin, LoginHttpResponse, LoginOutcome, Principal};
 use zeroize::Zeroizing;
@@ -102,15 +104,23 @@ pub const CACHE_FAMILY: u32 = 0;
 
 /// The diagnostics this plugin declares, in index order: the ids its envelopes report and the host
 /// audits on its behalf.
-pub const DIAG_NAMES: &[&str] = &["OIDC_IDP_DESTINATION_REFUSED"];
+pub const DIAG_NAMES: &[&str] = &["OIDC_IDP_DESTINATION_REFUSED", "OIDC_JWKS_PLAIN_HTTP"];
 
 /// The declared diagnostic a refused IdP destination raises ([`raise_refusals`]): the module's own
 /// refusal (a discovered `jwks_uri` or `token_endpoint` over plain http, a scheme) or the
 /// host's (the destination guard refusing the address), naming the host and the rule.
 pub const DIAG_DESTINATION_REFUSED: u32 = 0;
 
+/// The declared diagnostic a plain http `jwks_url` raises at warn on the `open` or `refresh` that
+/// built the module ([`crate::check_jwks_url`], [`Life::flagged`]), in the words `open` logs: the
+/// host audits the loaded but flagged instance on the plugin's behalf (`plugin.open`, `degraded`).
+pub const DIAG_JWKS_PLAIN_HTTP: u32 = 1;
+
 /// [`DIAG_NAMES`] as the Statement carries them.
-const DIAG_IDS: &[AbiStr] = &[abi_str(DIAG_NAMES[DIAG_DESTINATION_REFUSED as usize])];
+const DIAG_IDS: &[AbiStr] = &[
+    abi_str(DIAG_NAMES[DIAG_DESTINATION_REFUSED as usize]),
+    abi_str(DIAG_NAMES[DIAG_JWKS_PLAIN_HTTP as usize]),
+];
 
 /// This plugin's Statement: its name and alias, its version, the most calls one instance holds in
 /// flight, its one secret reference, its six outbound needs, its one metric family and its auth
@@ -155,35 +165,42 @@ const WAIT_NS: u64 = FLIGHT_MAX.as_nanos() as u64;
 
 /// The client secret `secrets` lends: its first entry, an empty one being none (the host lends an
 /// empty entry for a provider with no `browser_login.client_secret`).
-fn lent_secret<'a>(secrets: &[&'a [u8]]) -> Option<&'a [u8]> {
-    secrets.first().copied().filter(|s| !s.is_empty())
+fn lent_secret(secrets: &[&[u8]]) -> Option<Cred> {
+    secrets
+        .first()
+        .filter(|s| !s.is_empty())
+        .map(|s| Cred::captured(Zeroizing::new(s.to_vec())))
 }
 
 /// One opened module: what `open` built from one settings blob and its lent secrets.
 struct Opened {
     module: OidcModule,
     /// The confidential-client secret the host lent, if any.
-    secret: Option<Zeroizing<String>>,
+    secret: Option<Cred>,
     /// The settings and secret it was opened with: a `refresh` with the same ones keeps it.
     settings: Vec<u8>,
+    /// The warning its settings raise ([`crate::check_jwks_url`]), in the words `open` logs.
+    flagged: Option<String>,
 }
 
 impl Opened {
     fn new(settings: &[u8], secrets: &[&[u8]]) -> Result<Self, Refusal> {
         let module = module(text(settings)?).map_err(Refusal::failed)?;
+        // `module` opened these settings, so they parse and their `jwks_url` checks.
+        let flagged = config(text(settings)?)
+            .ok()
+            .and_then(|c| crate::check_jwks_url(&c).ok().flatten());
         // An empty lent secret is none (a provider with no `browser_login.client_secret`): the
         // token exchange then sends no secret field, as 1.5.5's core sent none.
-        let secret = lent_secret(secrets)
-            .map(|s| {
-                std::str::from_utf8(s)
-                    .map(|s| Zeroizing::new(s.to_string()))
-                    .map_err(|_| Refusal::failed("oidc: the lent client secret is not UTF-8"))
-            })
-            .transpose()?;
+        let secret = lent_secret(secrets);
+        if secret.as_ref().is_some_and(|s| !s.is_text()) {
+            return Err(Refusal::failed("secrets: `client_secret` is not UTF-8"));
+        }
         Ok(Self {
             module,
             secret,
             settings: settings.to_vec(),
+            flagged,
         })
     }
 
@@ -207,15 +224,20 @@ impl Opened {
     ) -> Step<Login> {
         let now = Instant::now();
         if answer.is_none() {
-            let hop = match step!(self
-                .module
-                .token_exchange(code, redirect_uri, verifier, now, io))
-            {
-                Ok(Some(hop)) => hop,
+            let secret = self.secret.as_ref();
+            let request = match step!(self.module.token_exchange(
+                code,
+                redirect_uri,
+                verifier,
+                secret,
+                now,
+                io
+            )) {
+                Ok(Some(request)) => request,
                 Ok(None) => return Step::Ready(Login::Bad),
                 Err(e) => return Step::Ready(Login::Outage(e)),
             };
-            match io.post(&hop, self.secret.as_deref().map(String::as_str)) {
+            match io.post(&request.url, &request.form) {
                 Poll::Pending => return Step::Pending,
                 Poll::Ready(Ok(r)) => *answer = Some(r),
                 Poll::Ready(Err(e)) => return Step::Ready(Login::Outage(e)),
@@ -258,9 +280,19 @@ enum Login {
 struct Reached {
     /// When it was kept: at the cap the oldest goes ([`keep`]).
     at: Instant,
-    state: Vec<u8>,
-    code: Zeroizing<Vec<u8>>,
+    state: cred::Held<Vec<u8>>,
+    code: cred::Held<Vec<u8>>,
     principal: Principal,
+}
+
+impl Reached {
+    /// Whether it was kept for the callback naming `state` and `code`: both compared in constant
+    /// time, and both always compared.
+    fn serves(&self, state: &[u8], code: &[u8]) -> bool {
+        let state = self.state == cred::Held::new(state.to_vec());
+        let code = self.code == cred::Held::new(code.to_vec());
+        state & code
+    }
 }
 
 /// Keep `r` for `ticket`'s re-call, at most `max` at once: at the cap the OLDEST entry goes, never
@@ -330,8 +362,7 @@ impl Oidc {
 
 /// The settings blob as the JSON text it must be.
 fn text(settings: &[u8]) -> Result<&str, Refusal> {
-    std::str::from_utf8(settings)
-        .map_err(|_| Refusal::failed("invalid oidc plugin config: the settings are not UTF-8"))
+    std::str::from_utf8(settings).map_err(|_| Refusal::failed("settings: not UTF-8 text"))
 }
 
 impl Life for Oidc {
@@ -396,7 +427,7 @@ impl Life for Oidc {
         _generation: u64,
     ) -> Result<Refreshed, Refusal> {
         let now = self.now();
-        let same_secret = now.secret.as_deref().map(String::as_bytes) == lent_secret(secrets);
+        let same_secret = now.secret == lent_secret(secrets);
         let reopened = if now.settings == settings && same_secret {
             None
         } else {
@@ -411,6 +442,16 @@ impl Life for Oidc {
                 family: CACHE_FAMILY,
                 value: flushed as f64,
             }),
+        })
+    }
+
+    /// A plain http `jwks_url` raises [`DIAG_JWKS_PLAIN_HTTP`] at warn on the `open` or `refresh`
+    /// that built the running module, in the words its log line says.
+    fn flagged(&self) -> Option<Flagged> {
+        self.now().flagged.clone().map(|text| Flagged {
+            id_idx: DIAG_JWKS_PLAIN_HTTP,
+            severity: SEVERITY_WARN,
+            text,
         })
     }
 }
@@ -764,7 +805,7 @@ impl SafeSlot for Complete {
         let mut reached = oidc.reached.lock().unwrap_or_else(PoisonError::into_inner);
         let kept = reached
             .remove(&instance.ticket())
-            .filter(|r| r.state == state && r.code.as_slice() == code_bytes);
+            .filter(|r| r.serves(state, code_bytes));
         drop(reached);
         let principal = match kept {
             Some(r) => r.principal,
@@ -800,14 +841,7 @@ impl SafeSlot for Complete {
                 }
             }
         };
-        let answered = answer(
-            Some(&principal),
-            None,
-            None,
-            input.field(|i| &i.out_buf),
-            &mut out,
-            LOGIN_IDENTITY,
-        );
+        let answered = login_identity(&principal, input.field(|i| &i.out_buf), &mut out);
         if answered == Outcome::Failed {
             let mut reached = oidc.reached.lock().unwrap_or_else(PoisonError::into_inner);
             keep(
@@ -816,8 +850,8 @@ impl SafeSlot for Complete {
                 instance.ticket(),
                 Reached {
                     at: Instant::now(),
-                    state: state.to_vec(),
-                    code: Zeroizing::new(code_bytes.to_vec()),
+                    state: cred::Held::new(state.to_vec()),
+                    code: cred::Held::new(code_bytes.to_vec()),
                     principal,
                 },
             );

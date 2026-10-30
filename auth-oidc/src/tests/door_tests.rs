@@ -181,8 +181,8 @@ fn ticket(n: u32) -> Ticket {
 fn kept_for(n: u32, at: Instant) -> Reached {
     Reached {
         at,
-        state: format!("s{n}").into_bytes(),
-        code: Zeroizing::new(format!("c{n}").into_bytes()),
+        state: busbar_contract::abi::sdk::cred::Held::new(format!("s{n}").into_bytes()),
+        code: busbar_contract::abi::sdk::cred::Held::new(format!("c{n}").into_bytes()),
         principal: Principal::from_id(format!("u{n}")),
     }
 }
@@ -252,4 +252,94 @@ fn a_blank_issuer_or_audience_is_refused_naming_the_key() {
         let text = refused.text().unwrap_or_default();
         assert!(text.contains(key), "open names `{key}`: {text}");
     }
+}
+
+/// BIND-AUDIT: a plain http `jwks_url` raises the diagnostic the Statement declares,
+/// `OIDC_JWKS_PLAIN_HTTP`, at warn, in the very words `open` logs, so the host audits the loaded
+/// but flagged instance on the plugin's behalf (`plugin.open`, `degraded`). An https one raises
+/// nothing, and a `refresh` to https stops raising it.
+#[test]
+fn a_plain_http_jwks_url_raises_its_declared_diagnostic() {
+    let plain = serde_json::json!({
+        "issuer": ISSUER,
+        "audience": AUDIENCE,
+        "jwks_url": "http://127.0.0.1:8080/jwks",
+    })
+    .to_string();
+    let oidc = Oidc::open(plain.as_bytes(), &lent(b""), 1).expect("a plain http jwks_url opens");
+    let flag = oidc.flagged().expect("it raises its warning");
+    assert_eq!(DIAG_NAMES[flag.id_idx as usize], "OIDC_JWKS_PLAIN_HTTP");
+    assert_eq!(
+        DIAG_IDS.len(),
+        DIAG_NAMES.len(),
+        "the Statement declares it"
+    );
+    assert_eq!(
+        flag.severity,
+        busbar_contract::abi::mechanism::call::SEVERITY_WARN
+    );
+    let logged = crate::check_jwks_url(&config(&plain).expect("parses"))
+        .expect("checks")
+        .expect("a warning");
+    assert_eq!(flag.text, logged, "the words the log line says");
+
+    let https = Oidc::open(&settings(), &lent(b""), 1).expect("opens");
+    assert!(
+        https.flagged().is_none(),
+        "an https jwks_url raises nothing"
+    );
+    oidc.refresh(&settings(), &lent(b""), 2).expect("refreshes");
+    assert!(
+        oidc.flagged().is_none(),
+        "a refresh to https stops raising it"
+    );
+}
+
+/// S2: bad settings answer FAILED at validate and open alike, each line in the contract's
+/// instance-relative form (`settings[.<path>]: <reason>`, which the host renders under the
+/// provider's own name), and a lent secret that is not text names its reference.
+#[test]
+fn bad_settings_are_refused_in_the_contracts_settings_line_form() {
+    use busbar_contract::abi::mechanism::lifecycle::{check_validate_refusal, refusal_lines};
+    for (cfg, lead) in [
+        ("", "settings: "),
+        ("{ not json", "settings: "),
+        (r#"{"audience":"a"}"#, "settings: missing field `issuer`"),
+        (
+            r#"{"issuer":"https://i.test","audience":"a","bogus":1}"#,
+            "settings: unknown field `bogus`",
+        ),
+        (r#"{"issuer":" ","audience":"a"}"#, "settings.issuer: "),
+        (
+            r#"{"issuer":"https://i.test","audience":""}"#,
+            "settings.audience: ",
+        ),
+    ] {
+        for refused in [
+            <Oidc as Life>::validate(cfg.as_bytes()).expect_err("validate refuses"),
+            Oidc::open(cfg.as_bytes(), &lent(b""), 1).expect_err("open refuses"),
+        ] {
+            assert_eq!(refused.outcome(), Outcome::Failed);
+            let text = refused.text().unwrap_or_default().to_string();
+            assert!(text.starts_with(lead), "{cfg:?}: {text}");
+            check_validate_refusal(text.as_bytes()).expect("a well-formed refusal");
+            let rendered = refusal_lines("identity-providers", "corp", &text);
+            assert!(
+                rendered[0].starts_with("identity-providers.corp.settings"),
+                "{rendered:?}"
+            );
+        }
+    }
+    let refused = <Oidc as Life>::validate(&[0xff]).expect_err("not UTF-8");
+    assert!(
+        refused.text().unwrap_or_default().starts_with("settings: "),
+        "{:?}",
+        refused.text()
+    );
+    let refused = Oidc::open(&settings(), &lent(&[0xff, 0xfe]), 1).expect_err("not text");
+    assert_eq!(refused.outcome(), Outcome::Failed);
+    assert_eq!(
+        refused.text().unwrap_or_default(),
+        "secrets: `client_secret` is not UTF-8"
+    );
 }

@@ -18,9 +18,17 @@ use std::sync::OnceLock;
 #[derive(Debug, Clone)]
 pub enum KeyMaterial {
     /// RSA modulus + exponent (decoded from `n`/`e`).
-    Rsa { n: Vec<u8>, e: Vec<u8> },
+    Rsa {
+        /// The modulus, big-endian.
+        n: Vec<u8>,
+        /// The public exponent, big-endian.
+        e: Vec<u8>,
+    },
     /// EC public point in uncompressed SEC1 form `0x04 || X || Y` (decoded from `x`/`y`).
-    Ec { point: Vec<u8> },
+    Ec {
+        /// `0x04 || X || Y`.
+        point: Vec<u8>,
+    },
     /// The key material was absent or not base64url; the deferred error is surfaced at verify time.
     Unusable(String),
 }
@@ -152,8 +160,9 @@ impl JwkSet {
     /// empty body does. The caller's error path already preserves the previous keys; this makes the
     /// degenerate document take that path instead of the success path.
     pub fn parse(body: &str) -> Result<Self, String> {
-        let set: Self =
-            serde_json::from_str(body).map_err(|e| format!("invalid JWKS document: {e}"))?;
+        let set: Self = serde_json::from_str(body).map_err(
+            busbar_contract::abi::sdk::auth_kit::json_error("invalid JWKS document"),
+        )?;
         if set.keys.is_empty() {
             return Err(
                 "JWKS document contains no keys; refusing to replace the cached key set with an \
