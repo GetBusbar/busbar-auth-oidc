@@ -181,8 +181,8 @@ fn ticket(n: u32) -> Ticket {
 fn kept_for(n: u32, at: Instant) -> Reached {
     Reached {
         at,
-        state: format!("s{n}").into_bytes(),
-        code: Zeroizing::new(format!("c{n}").into_bytes()),
+        state: busbar_contract::abi::sdk::cred::Held::new(format!("s{n}").into_bytes()),
+        code: busbar_contract::abi::sdk::cred::Held::new(format!("c{n}").into_bytes()),
         principal: Principal::from_id(format!("u{n}")),
     }
 }

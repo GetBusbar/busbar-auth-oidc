@@ -7,6 +7,7 @@ use super::*;
 use busbar_contract::abi::host::conn::connector::{
     DIRECTION_OUTBOUND, EGRESS_DEFAULT, EGRESS_LOOPBACK_ALLOWED, EGRESS_OPEN_WEB,
 };
+use busbar_contract::abi::sdk::cred::FormBody;
 use std::net::IpAddr;
 
 const URL: &str = "https://idp.example/jwks";
@@ -80,55 +81,37 @@ fn a_request_that_got_no_answer_keeps_1_5_5_s_prefix() {
     );
 }
 
-fn hop() -> LoginHop {
-    LoginHop {
-        method: "POST".to_string(),
-        url: "https://idp.example/token?p=b2c".to_string(),
-        form: vec![
-            ("grant_type".to_string(), "authorization_code".to_string()),
-            ("code".to_string(), "a b&c".to_string()),
-            ("client_secret".to_string(), String::new()),
-        ],
-        secret_form_field: Some("client_secret".to_string()),
-        headers: vec![("x-extra".to_string(), "1".to_string())],
-    }
-}
-
-#[test]
-fn the_lent_secret_fills_the_named_field_and_none_drops_it() {
-    let filled = form(&hop(), Some("s3cret"));
-    assert!(filled.contains(&("client_secret".to_string(), "s3cret".to_string())));
-    let public = form(&hop(), None);
-    assert!(public.iter().all(|(k, _)| k != "client_secret"));
+fn form() -> FormBody {
+    FormBody::new()
+        .public("grant_type", "authorization_code")
+        .public("code", "a b&c")
+        .sealed(
+            "client_secret",
+            &busbar_contract::abi::sdk::test_support::chip::cred("s3cret"),
+        )
 }
 
 #[test]
 fn the_token_exchange_is_a_url_encoded_form_post_to_the_endpoint_path() {
-    let url = url::Url::parse(&hop().url).unwrap();
-    let r = post_request(&url, &hop(), Some("s3cret"));
-    assert_eq!(r.method, b"POST");
-    assert_eq!(r.target, b"/token?p=b2c");
+    let url = url::Url::parse("https://idp.example/token?p=b2c").unwrap();
+    let ex = post_exchange(&url, &form()).expect("frames");
+    let head = busbar_contract::abi::sdk::test_support::chip::framed_head(&ex);
+    assert!(head.starts_with(b"POST/token?p=b2c"), "{head:?}");
+    // 1.5.5's wire order: the form's content-type, then the client's accept.
     assert_eq!(
-        String::from_utf8(r.body).unwrap(),
-        "grant_type=authorization_code&code=a+b%26c&client_secret=s3cret"
-    );
-    // 1.5.5's wire order: the form's content-type, the client's accept, then the hop's own.
-    assert_eq!(
-        r.fields,
+        ex.framed_fields(),
         vec![
             (
-                b"content-type".to_vec(),
-                b"application/x-www-form-urlencoded".to_vec()
+                &b"content-type"[..],
+                &b"application/x-www-form-urlencoded"[..]
             ),
-            (b"accept".to_vec(), b"*/*".to_vec()),
-            (b"x-extra".to_vec(), b"1".to_vec()),
+            (&b"accept"[..], &b"*/*"[..]),
         ]
     );
-    assert_eq!(r.timeout_ms, FETCH_TIMEOUT_MS);
-
-    let mut odd = hop();
-    odd.method = "NOT A METHOD".to_string();
-    assert_eq!(post_request(&url, &odd, None).method, b"POST");
+    assert_eq!(
+        crate::script::wire_text(&form()),
+        "grant_type=authorization_code&code=a+b%26c&client_secret=s3cret"
+    );
 }
 
 #[test]
@@ -228,9 +211,7 @@ fn connector_admits_plaintext(egress_class: u32, addr: IpAddr) -> bool {
 /// address the target names. `true` = the request goes out.
 fn token_admitted(class: u32, url: &str) -> bool {
     let mut io = HostIo::new(None, Ticket::NONE, IoState::default(), false);
-    let mut h = hop();
-    h.url = url.to_string();
-    let reached_host = match io.post(&h, None).map(|r| r.map(|_| ())) {
+    let reached_host = match io.post(url, &form()).map(|r| r.map(|_| ())) {
         Poll::Ready(Err(e)) => {
             assert!(
                 e.ends_with("URL scheme is not allowed")
@@ -312,10 +293,8 @@ fn http_to_a_public_token_endpoint_is_refused_before_the_host_is_asked() {
         // A private-looking NAME is no private host: 1.5.5 judged the URL's host as written.
         "http://idp.corp.internal/token",
     ] {
-        let mut h = hop();
-        h.url = url.to_string();
         assert_eq!(
-            io.post(&h, None).map(|r| r.map(|_| ())),
+            io.post(url, &form()).map(|r| r.map(|_| ())),
             Poll::Ready(Err(format!(
                 "request to {url} failed: URL scheme is not allowed"
             ))),
@@ -363,15 +342,11 @@ fn documents_stay_https_only_whatever_the_host() {
 /// Holds `T` to wiping itself on drop: a compile-time check.
 fn wipes<T: zeroize::ZeroizeOnDrop>(_: &T) {}
 
-/// THE TOKEN REQUEST'S CREDENTIAL COPIES ARE WIPED (bank grade): the form pairs (client secret,
-/// code, code_verifier), the encoded body, and the hop the token exchange builds each wipe
-/// themselves on drop. A type-level check: it does not compile while any of them is a plain
-/// `Vec`/`String`/`LoginHop`.
+/// THE TOKEN REQUEST'S CREDENTIAL COPIES ARE WIPED (bank grade): the form the token exchange
+/// builds (the code, the code_verifier, the sealed client secret) wipes itself on drop. A
+/// type-level check.
 #[test]
 fn the_token_request_copies_wipe_on_drop() {
-    let pairs = form(&hop(), Some("s3cret"));
-    wipes(&pairs);
-    wipes(&form_body(&pairs));
     let cfg: crate::OidcConfig = serde_json::from_str(
         r#"{"issuer":"https://i.test","audience":"a","jwks_url":"https://i.test/keys",
             "token_endpoint":"https://i.test/token"}"#,
@@ -382,16 +357,17 @@ fn the_token_request_copies_wipe_on_drop() {
         Some("code"),
         Some("https://busbar.test/cb"),
         Some("verifier"),
+        None,
         std::time::Instant::now(),
         &mut crate::script::Idp::new(String::new()).at_once(Some(crate::script::ME)),
     ))
     .expect("configured")
-    .expect("a hop");
-    wipes(&made);
+    .expect("a token request");
+    wipes(&made.form);
 }
 
-/// The one-buffer encoder writes byte for byte what the `url` crate's form serializer (the
-/// encoder it replaces) wrote, so the wire does not change.
+/// The SDK's form encoder writes byte for byte what the `url` crate's form serializer (the
+/// encoder 1.5.5 used) wrote, so the wire does not change.
 #[test]
 fn the_form_body_matches_the_url_form_serializer() {
     let cases: Vec<Vec<(&str, &str)>> = vec![
@@ -409,14 +385,13 @@ fn the_form_body_matches_the_url_form_serializer() {
         vec![("ünï", "çødé 日本 \u{1F600}"), ("ctl", "\t\r\n\0\x7f")],
     ];
     for case in cases {
-        let pairs: Vec<(String, String)> = case
-            .iter()
-            .map(|(n, v)| ((*n).to_string(), (*v).to_string()))
-            .collect();
         let old = url::form_urlencoded::Serializer::new(String::new())
-            .extend_pairs(pairs.iter())
+            .extend_pairs(case.iter())
             .finish();
-        assert_eq!(form_body(&pairs).as_str(), old, "pairs {case:?}");
+        let form = case
+            .iter()
+            .fold(FormBody::new(), |f, (n, v)| f.public(n, v));
+        assert_eq!(crate::script::wire_text(&form), old, "pairs {case:?}");
     }
 }
 
