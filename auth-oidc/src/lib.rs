@@ -747,15 +747,18 @@ impl OidcModule {
         now_mono: Instant,
         io: &mut dyn Fetch,
     ) -> Step<Result<AuthVerdict, String>> {
-        if let Some(principal) = token.and_then(|t| self.cached(t, now_unix)) {
-            return Step::Ready(Ok(AuthVerdict::Identify(Principal::clone(&principal))));
+        if let Some(hit) = token.and_then(|t| self.cached(t, now_unix)) {
+            let mut principal = Principal::clone(&hit.principal);
+            principal.ttl_secs = hit.ttl_secs;
+            return Step::Ready(Ok(AuthVerdict::Identify(principal)));
         }
         self.judge(token, now_unix, now_mono, io)
     }
 
     /// The credential cache: the identity a bearer this module identified within its TTL
-    /// verified as, answered with no decode, parse or signature check and no request.
-    pub fn cached(&self, token: &str, now_unix: i64) -> Option<std::sync::Arc<Principal>> {
+    /// verified as, and the TTL it has left, answered with no decode, parse or signature check and
+    /// no request.
+    pub fn cached(&self, token: &str, now_unix: i64) -> Option<verdicts::Hit> {
         self.verdicts.get(token, now_unix)
     }
 

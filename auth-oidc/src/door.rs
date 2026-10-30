@@ -553,6 +553,7 @@ const CARRIERS: &[MarkWord] = &[carrier(AUTHORIZATION)];
 /// §11.13 M-SB: capacity is checked before anything is written).
 fn answer(
     p: Option<&Principal>,
+    ttl: Option<u64>,
     credential: Option<&[u8]>,
     strip: Option<(HostBuf<'_, StripName>, u32)>,
     buf: Lent<'_, IdentityBuf>,
@@ -625,7 +626,7 @@ fn answer(
         |o| &o.identity.groups_len,
         u32::try_from(groups.written()).unwrap_or(u32::MAX),
     );
-    let (flags, ttl) = p.ttl_secs.map_or((0, 0), |t| (IDENTITY_HAS_TTL, t));
+    let (flags, ttl) = ttl.map_or((0, 0), |t| (IDENTITY_HAS_TTL, t));
     out.set(|o| &o.identity.flags, flags);
     out.set(|o| &o.identity.ttl_secs, ttl);
     if !credential.is_empty() {
@@ -662,6 +663,7 @@ impl SafeSlot for Verify {
                 return answer(
                     None,
                     None,
+                    None,
                     Some((input.strip(), DECISION_CONTINUE)),
                     input.field(|i| &i.out_buf),
                     &mut out,
@@ -678,10 +680,12 @@ impl SafeSlot for Verify {
         let ticketless = instance.ticket().is_none();
         let opened = h.life().now();
         let (mut io, parked) = resume(&instance, h, &opened);
-        // A HIT is answered from the cached identity itself, with no copy of it.
-        if let Some(p) = token.and_then(|t| opened.module.cached(t, request_now)) {
+        // A HIT is answered from the cached identity itself, with no copy of it, stating the TTL
+        // it has left.
+        if let Some(hit) = token.and_then(|t| opened.module.cached(t, request_now)) {
             return answer(
-                Some(&*p),
+                Some(&*hit.principal),
+                hit.ttl_secs,
                 token.map(str::as_bytes),
                 Some((input.strip(), DECISION_CONTINUE)),
                 input.field(|i| &i.out_buf),
@@ -721,6 +725,7 @@ impl SafeSlot for Verify {
         };
         answer(
             p,
+            p.and_then(|p| p.ttl_secs),
             token.map(str::as_bytes),
             Some((input.strip(), decision)),
             input.field(|i| &i.out_buf),

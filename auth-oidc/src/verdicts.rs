@@ -28,6 +28,16 @@ const MAX_TTL_SECS: u64 = 3600;
 /// The most entries held.
 pub const MAX_ENTRIES: usize = 4096;
 
+/// A cache hit: the identity held, and the TTL it has LEFT at the hit (`None` when its module
+/// suggested none, as when it was first answered).
+#[derive(Debug, Clone)]
+pub struct Hit {
+    /// The identity held.
+    pub principal: Arc<Principal>,
+    /// Its remaining TTL, seconds.
+    pub ttl_secs: Option<u64>,
+}
+
 /// A flush generation: the cache's flush counter at one moment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Generation(u64);
@@ -76,12 +86,18 @@ impl VerdictCache {
         Generation(self.read().flushes)
     }
 
-    /// The identity cached for `credential` at UNIX second `now`; an expired entry is a miss and
-    /// goes.
-    pub fn get(&self, credential: &str, now: i64) -> Option<Arc<Principal>> {
+    /// The identity cached for `credential` at UNIX second `now`, with the TTL it has left; an
+    /// expired entry is a miss and goes.
+    pub fn get(&self, credential: &str, now: i64) -> Option<Hit> {
         let k = key(credential);
         match self.read().entries.get(&k) {
-            Some(e) if e.expires_at > now => return Some(Arc::clone(&e.principal)),
+            Some(e) if e.expires_at > now => {
+                let left = u64::try_from(e.expires_at.saturating_sub(now)).unwrap_or(0);
+                return Some(Hit {
+                    principal: Arc::clone(&e.principal),
+                    ttl_secs: e.principal.ttl_secs.map(|_| left),
+                });
+            }
             Some(_) => {}
             None => return None,
         }
