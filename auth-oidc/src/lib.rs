@@ -865,7 +865,7 @@ impl OidcModule {
         let claims = match jwt::claims(&parts) {
             Ok(c) => c,
             Err(e) => {
-                tracing::warn!(module = "oidc", error = %e, "OIDC token claims are malformed");
+                tracing::info!(module = "oidc", reason = "malformed", error = %e, "OIDC token rejected: its claims are malformed");
                 return Step::Ready(Ok(AuthVerdict::Reject));
             }
         };
@@ -873,7 +873,7 @@ impl OidcModule {
         Step::Ready(Ok(match verifier.validate_claims(&claims, now_unix) {
             Ok(principal) => AuthVerdict::Identify(principal),
             Err(e) => {
-                tracing::warn!(module = "oidc", error = %e, "OIDC token claim validation failed");
+                tracing::info!(module = "oidc", reason = "claims", error = %e, "OIDC token rejected: its claims do not validate");
                 AuthVerdict::Reject
             }
         }))
