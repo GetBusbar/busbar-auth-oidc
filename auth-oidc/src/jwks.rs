@@ -82,7 +82,7 @@ fn b64(field: Option<&str>, what: &str) -> Result<Vec<u8>, String> {
 }
 
 /// One JSON Web Key, the subset busbar's supported algorithms need. Unknown fields are ignored
-/// (`use`, `alg`, `x5c`, …) — a JWKS carries more than we consume.
+/// (`x5c`, …) — a JWKS carries more than we consume.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Jwk {
     /// Key type: `RSA` or `EC`. Selects which of the field groups below is populated.
@@ -111,6 +111,14 @@ pub struct Jwk {
     /// never be accepted for signature verification — enforced in [`crate::jwt::verify_signature`].
     #[serde(rename = "use", default)]
     pub key_use: Option<String>,
+    /// The algorithm the key is for (RFC 7517 §4.4): when present, the key verifies only a token
+    /// signed with exactly it ([`crate::jwt::verify_signature`]).
+    #[serde(default)]
+    pub alg: Option<String>,
+    /// The operations the key is for (RFC 7517 §4.3): when present, the key verifies a signature
+    /// only if it names `verify` ([`crate::jwt::verify_signature`]).
+    #[serde(default)]
+    pub key_ops: Option<Vec<String>>,
     /// Memoised base64url-decoded key material — decoded once on first verify and reused for every
     /// later request against this same cached key (see [`KeyMaterial`]). Not part of the JWKS wire
     /// form; skipped in deserialization and rebuilt per JWKS refresh.
