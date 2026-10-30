@@ -2014,6 +2014,35 @@ fn only_an_rfc_6749_credential_error_at_the_token_endpoint_is_a_decline() {
     }
 }
 
+/// L3: a `begin_login` the host lends NO nonce (absent or empty) is refused — FAILED, logged —
+/// rather than answering an authorize URL without one: `complete_login` requires the id_token to
+/// carry the login's nonce, so such a login could only ever fail its security check.
+#[test]
+fn a_begin_login_with_no_nonce_is_refused_and_logged() {
+    let mut c = cfg("groups");
+    c.authorization_endpoint = Some("https://idp.test/authorize".to_string());
+    let m = OidcModule::new(&c);
+    let idp = Idp::new(String::new());
+    for nonce in [None, Some(String::new())] {
+        let begin = BeginLogin {
+            redirect_uri: "https://busbar.test/auth/token".to_string(),
+            state: "st".to_string(),
+            code_challenge: "ch".to_string(),
+            nonce: nonce.clone(),
+            scopes: Vec::new(),
+        };
+        let cap = busbar_test_kit::warn_capture::WarnCapture::default();
+        let begun = tracing::subscriber::with_default(cap.clone(), || {
+            ready(m.begin_login(&begin, Instant::now(), &mut idp.at_once(Some(ME))))
+        });
+        match begun {
+            Err(e) => assert!(e.contains("nonce"), "{nonce:?}: {e}"),
+            other => panic!("{nonce:?}: a login with no nonce is refused, got {other:?}"),
+        }
+        assert!(cap.contains("nonce"), "{nonce:?}: logged: {:?}", cap.messages());
+    }
+}
+
 /// Fail-closed: a module with no login endpoints configured whose issuer's discovery document names
 /// none either (a verify-only deployment) rejects both login steps rather than emitting a malformed
 /// authorize URL or exchange.
