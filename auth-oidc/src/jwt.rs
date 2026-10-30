@@ -26,8 +26,8 @@ pub struct Header {
     /// (`HS*` — a symmetric key we must never accept from a JWKS) are REJECTED, closing the classic
     /// "alg: none" and "RS256→HS256 key-confusion" JWT attacks.
     pub alg: String,
-    /// Key id selecting which JWKS key signed this token. Absent ⇒ the empty id (matches a keyless
-    /// JWKS key only).
+    /// Key id selecting which JWKS key signed this token. Absent ⇒ the key set's single usable
+    /// signing key for `alg`, if there is exactly one ([`crate::jwks::JwkSet::select`]).
     #[serde(default)]
     pub kid: Option<String>,
     /// RFC 7515 §4.1.11 `crit`: header parameters the producer marks as critical — a verifier that
