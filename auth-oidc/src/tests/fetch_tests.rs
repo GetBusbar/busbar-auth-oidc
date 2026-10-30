@@ -463,3 +463,18 @@ fn each_need_bounds_its_reply() {
     assert_eq!(reply_cap(NEED_DISCOVERY), 1024 * 1024);
     assert_eq!(reply_cap(NEED_JWKS), 1024 * 1024);
 }
+
+/// S1: a URL an error or log line names is shown with its userinfo removed.
+#[test]
+fn an_error_naming_a_url_drops_its_userinfo() {
+    let url = "https://user:Zq7pw@idp.example/jwks";
+    for said in [
+        failed(url, "the connection was refused"),
+        document(url, 404, Vec::new()).unwrap_err(),
+        capped(url, vec![0xff], 16).unwrap_err(),
+        capped(url, vec![b'x'; 32], 16).unwrap_err(),
+    ] {
+        assert!(!said.contains("Zq7pw") && !said.contains("user:"), "{said}");
+        assert!(said.contains("https://idp.example/jwks"), "{said}");
+    }
+}
