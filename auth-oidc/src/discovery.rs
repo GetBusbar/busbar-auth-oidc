@@ -166,7 +166,7 @@ impl Discovery {
         drop(guard);
         if let Some(e) = failed {
             // The tick discards a discovery failure, so say it here, once per attempt.
-            tracing::warn!(module = "oidc", url = %url, error = %e, "OIDC discovery failed");
+            tracing::warn!(module = "oidc", url = %crate::fetch::shown(&url), error = %e, "OIDC discovery failed");
         }
         // The waiters re-enter on this wake and read the document (or its failure).
         if !waiters.is_empty() {
