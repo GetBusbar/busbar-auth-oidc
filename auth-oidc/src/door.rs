@@ -434,8 +434,10 @@ impl Life for Oidc {
             Some(Arc::new(Opened::new(settings, secrets)?))
         };
         let flushed = now.module.flush_verdicts();
-        if let Some(opened) = reopened {
-            *self.now.write().unwrap_or_else(PoisonError::into_inner) = opened;
+        match reopened {
+            Some(opened) => *self.now.write().unwrap_or_else(PoisonError::into_inner) = opened,
+            // The module kept: its discovery document is asked for again, as a re-opened one's is.
+            None => now.module.rediscover(),
         }
         Ok(Refreshed {
             counted: Some(Counted {
