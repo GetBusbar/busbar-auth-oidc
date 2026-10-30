@@ -2394,3 +2394,28 @@ fn a_begin_login_with_no_authorize_endpoint_is_logged() {
         "the refusal is explained: {logged:?}"
     );
 }
+
+/// S1: a far-end document the decoder cannot read is refused without the decoder's text, which
+/// quotes the IdP's bytes: what failed, the class and where survive.
+#[test]
+fn an_unreadable_idp_document_is_refused_without_echoing_it() {
+    let err = crate::jwks::JwkSet::parse(r#"{"keys":"Zq7distinctiveValue"}"#)
+        .err()
+        .expect("refused");
+    assert!(err.starts_with("invalid JWKS document: "), "{err}");
+    assert!(!err.contains("Zq7distinctiveValue"), "echoed: {err}");
+    assert!(err.contains("line 1"), "where is kept: {err}");
+
+    let err = crate::discovery::check_document(
+        &cfg("groups"),
+        "https://idp.test/.well-known/openid-configuration",
+        Ok(r#"{"issuer": Zq7distinctiveValue}"#.to_string()),
+    )
+    .expect_err("refused");
+    assert!(
+        err.starts_with("OIDC discovery document is not JSON: "),
+        "{err}"
+    );
+    assert!(!err.contains("Zq7distinctiveValue"), "echoed: {err}");
+    assert!(err.contains("withheld"), "{err}");
+}
