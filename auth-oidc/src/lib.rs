@@ -597,10 +597,11 @@ impl OidcModule {
         let Some(url) = doc.get(field).and_then(Value::as_str) else {
             return Step::Ready(Ok(None));
         };
-        // A key set or a token exchange the DOCUMENT names, on any host, is taken over https only;
-        // WHERE it goes is the destination guard's (the needs' classes). The authorize URL is a
-        // browser redirect, never fetched.
-        if let Some(setting) = fetched_setting(field) {
+        // A key set, a token exchange or an authorize URL the DOCUMENT names, on any host, is taken
+        // over https only (plain http only to loopback); WHERE a fetched one goes is the
+        // destination guard's (the needs' classes). The authorize URL is a browser redirect, never
+        // fetched, but the browser is never sent to it in plaintext.
+        if let Some(setting) = discovered_setting(field) {
             if let Err(why) = discovered_secure(field, setting, url) {
                 io.refused(&why);
                 return Step::Ready(Err(why));
@@ -1175,12 +1176,14 @@ pub(crate) fn clock_or_fail_closed(t: i64) -> i64 {
 }
 
 /// The setting an operator configures to name a discovered endpoint's URL themselves: the discovery
-/// fields whose URL the module FETCHES (`jwks_uri`, `token_endpoint`), and so holds to https
-/// ([`discovered_secure`]). `None` for any other field.
-fn fetched_setting(field: &str) -> Option<&'static str> {
+/// fields whose URL the module FETCHES (`jwks_uri`, `token_endpoint`) or sends the browser to
+/// (`authorization_endpoint`), and so holds to https ([`discovered_secure`]). `None` for any other
+/// field.
+fn discovered_setting(field: &str) -> Option<&'static str> {
     match field {
         "jwks_uri" => Some("jwks_url"),
         "token_endpoint" => Some("token_endpoint"),
+        "authorization_endpoint" => Some("authorization_endpoint"),
         _ => None,
     }
 }
