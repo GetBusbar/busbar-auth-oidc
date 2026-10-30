@@ -748,6 +748,23 @@ fn a_token_with_no_kid_uses_the_one_usable_key_for_its_alg() {
     );
 }
 
+/// L10: an identity answered from the verdict cache states the TTL it has LEFT, not the one it
+/// was first verified with: a hit 100 s after a 300 s verdict answers 200 s.
+#[test]
+fn a_cache_hit_answers_the_remaining_ttl() {
+    let key = TestKey::generate(KID);
+    let m = module_with(&key, "groups");
+    let now = 1_700_000_000;
+    let token = key.mint(&base_claims(now));
+    let ttl = |at: i64| match m.verify(&token, at, Instant::now()) {
+        AuthVerdict::Identify(p) => p.ttl_secs,
+        other => panic!("expected Identify, got {other:?}"),
+    };
+    assert_eq!(ttl(now), Some(300));
+    assert_eq!(ttl(now + 100), Some(200), "the hit answers what is left");
+    assert_eq!(m.m.cached(&token, now + 299).map(|p| p.ttl_secs), Some(Some(1)));
+}
+
 #[test]
 fn unknown_kid_after_refetch_is_rejected() {
     let key = TestKey::generate("real-kid");
