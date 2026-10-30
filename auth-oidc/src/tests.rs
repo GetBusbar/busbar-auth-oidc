@@ -762,7 +762,7 @@ fn a_cache_hit_answers_the_remaining_ttl() {
     };
     assert_eq!(ttl(now), Some(300));
     assert_eq!(ttl(now + 100), Some(200), "the hit answers what is left");
-    assert_eq!(m.m.cached(&token, now + 299).map(|p| p.ttl_secs), Some(Some(1)));
+    assert_eq!(m.m.cached(&token, now + 299).map(|h| h.ttl_secs), Some(Some(1)));
 }
 
 #[test]
