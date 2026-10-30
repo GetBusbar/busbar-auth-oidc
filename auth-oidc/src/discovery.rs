@@ -42,6 +42,7 @@ pub fn check_document(
     url: &str,
     fetched: Result<String, String>,
 ) -> Result<Value, String> {
+    let url = &crate::fetch::shown(url);
     let body = fetched.map_err(|e| {
         format!("OIDC discovery fetch failed ({url}): {e}; set jwks_url explicitly")
     })?;

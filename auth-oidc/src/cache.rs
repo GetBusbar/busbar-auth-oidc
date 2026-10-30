@@ -151,8 +151,9 @@ impl JwksCache {
         // which would blame the token for the provider being down.
         let Some(set) = keys else {
             return Step::Ready(Err(format!(
-                "no JWKS has been fetched from {url} yet (the last fetch attempt failed and the \
-                 refetch rate limit is holding off the next one); cannot verify any token"
+                "no JWKS has been fetched from {} yet (the last fetch attempt failed and the \
+                 refetch rate limit is holding off the next one); cannot verify any token",
+                crate::fetch::shown(url)
             )));
         };
         // First lookup. More than one key can share `kid` (RFC 7517 §4.5 — e.g. an RSA and an EC key
@@ -459,9 +460,10 @@ impl JwksCache {
     ) -> Result<Option<Arc<JwkSet>>, String> {
         if self.past_ceiling(inner, now) {
             Err(format!(
-                "cached JWKS from {url} is past the absolute staleness ceiling ({:?}) while every \
+                "cached JWKS from {} is past the absolute staleness ceiling ({:?}) while every \
                  refetch attempt is failing or rate-limited; refusing to verify against a key set \
                  the provider may have rotated out because it was compromised",
+                crate::fetch::shown(url),
                 self.max_stale
             ))
         } else {
