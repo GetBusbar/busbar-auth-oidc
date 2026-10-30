@@ -640,9 +640,9 @@ impl OidcModule {
     /// discovered — is an OUTAGE (OWNER-SIGNED 2026-10-30: an IdP outage is never a 401): the
     /// error, which the door answers `LOGIN_OUTAGE`, with a warn naming why.
     ///
-    /// NOTE: OIDC `nonce` is minted by the CORE at begin and is NOT carried back on
-    /// the callback, so nonce binding is the core's to enforce; this reuses the existing
-    /// signature+claims path (iss/aud/exp) that the verify module already trusts.
+    /// The OIDC `nonce` is minted by the CORE at begin and lent again on the callback; the door
+    /// binds the token response to it ([`nonce_binds`]) before this verifies the id_token, and
+    /// [`Self::begin_login`] refuses a login the host lends no nonce.
     ///
     /// # Errors
     /// The identity provider could not answer: its token endpoint answered 5xx or 429, or the
@@ -872,13 +872,26 @@ impl OidcModule {
     /// `authorization_endpoint` is configured or discovered — this module is verify-only then.
     ///
     /// # Errors
-    /// The endpoint had to be discovered, and discovery failed.
+    /// The host lent no nonce (absent or empty: the login's id_token could never bind to it, so
+    /// `complete_login` would refuse it), logged; or the endpoint had to be discovered, and
+    /// discovery failed.
     pub fn begin_login(
         &self,
         req: &BeginLogin,
         now: Instant,
         io: &mut dyn Fetch,
     ) -> Step<Result<LoginOutcome, String>> {
+        let Some(nonce) = req.nonce.as_deref().filter(|n| !n.is_empty()) else {
+            tracing::warn!(
+                module = "oidc",
+                "begin_login carries no nonce; browser login refused"
+            );
+            return Step::Ready(Err(
+                "oidc: begin_login carries no nonce, so the login's id_token could never be bound \
+                 to it; browser login refused"
+                    .to_string(),
+            ));
+        };
         let Some(endpoint) = step_ok!(self.authorization_endpoint(now, io)) else {
             tracing::info!(
                 module = "oidc",
@@ -897,7 +910,7 @@ impl OidcModule {
             &req.redirect_uri,
             &req.state,
             &req.code_challenge,
-            req.nonce.as_deref(),
+            Some(nonce),
         ))))
     }
 
