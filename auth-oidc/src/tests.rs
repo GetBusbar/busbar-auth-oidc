@@ -709,6 +709,45 @@ fn a_jwk_whose_alg_or_key_ops_forbid_it_does_not_verify() {
     }
 }
 
+/// L9: a token whose header names NO kid is verified by the key set's single usable signing key
+/// for its algorithm (the kty its alg needs, an `alg` that is absent or its own, not
+/// encryption-only), if there is exactly one; with two such keys it is ambiguous and rejected.
+#[test]
+fn a_token_with_no_kid_uses_the_one_usable_key_for_its_alg() {
+    let key = TestKey::generate("k1");
+    let now = 1_700_000_000;
+    let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"ES256","typ":"JWT"}"#);
+    let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&base_claims(now)).unwrap());
+    let input = format!("{header}.{payload}");
+    let sig = key.kp.sign(&key.rng, input.as_bytes()).unwrap();
+    let token = format!("{input}.{}", URL_SAFE_NO_PAD.encode(sig.as_ref()));
+    let ec = || serde_json::from_str::<Value>(&key.jwks()).unwrap()["keys"][0].clone();
+    let rsa = serde_json::from_str::<Value>(&RsaTestKey::generate("r1").jwks()).unwrap()["keys"]
+        [0]
+        .clone();
+    let set = |keys: Vec<Value>| serde_json::json!({ "keys": keys }).to_string();
+
+    for (what, keys) in [
+        ("one EC key", vec![ec()]),
+        ("one EC key beside an RSA key", vec![rsa.clone(), ec()]),
+    ] {
+        let m = Module::new(&cfg("groups"), FixtureFetcher::new(set(keys)));
+        assert!(
+            matches!(m.verify(&token, now, Instant::now()), AuthVerdict::Identify(_)),
+            "{what}: the one usable key verifies a kid-less token"
+        );
+    }
+    let mut other = serde_json::from_str::<Value>(&TestKey::generate("k2").jwks()).unwrap()
+        ["keys"][0]
+        .clone();
+    other["kid"] = serde_json::json!("k2");
+    let m = Module::new(&cfg("groups"), FixtureFetcher::new(set(vec![ec(), other])));
+    assert!(
+        matches!(m.verify(&token, now, Instant::now()), AuthVerdict::Reject),
+        "two usable EC keys: ambiguous"
+    );
+}
+
 #[test]
 fn unknown_kid_after_refetch_is_rejected() {
     let key = TestKey::generate("real-kid");
