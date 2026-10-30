@@ -340,14 +340,22 @@ pub fn post_exchange(url: &url::Url, form: &FormBody) -> Result<Exchange, ConnFa
 
 /// What an op parks of its requests across PENDING: the handles its finished exchanges issued, and
 /// the exchange in flight (with the URL it fetches).
-#[derive(Debug, Default)]
+///
+/// Its `Debug` names nothing it holds: an exchange in flight carries the token request.
+#[derive(Default)]
 pub struct IoState {
     issued: u32,
     current: Option<(String, Exchange)>,
 }
 
-/// [`Fetch`] over the host's connector, for ONE entry of one op on `ticket`.
-#[derive(Debug)]
+impl std::fmt::Debug for IoState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IoState").finish_non_exhaustive()
+    }
+}
+
+/// [`Fetch`] over the host's connector, for ONE entry of one op on `ticket`. Its `Debug` names
+/// nothing it holds ([`IoState`]).
 pub struct HostIo<'h> {
     host: Option<&'h Host>,
     ticket: Ticket,
@@ -355,6 +363,12 @@ pub struct HostIo<'h> {
     anchored: bool,
     wanted: bool,
     refusals: Vec<String>,
+}
+
+impl std::fmt::Debug for HostIo<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HostIo").finish_non_exhaustive()
+    }
 }
 
 impl<'h> HostIo<'h> {
