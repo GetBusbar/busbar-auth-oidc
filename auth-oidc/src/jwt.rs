@@ -51,6 +51,18 @@ pub struct Parts<'a> {
     pub signing_input: &'a str,
 }
 
+/// The decoded PAYLOAD of what reads as a compact JWS (exactly three dot-separated segments, the
+/// second base64url), the header left undecoded: what issuer routing reads before anything else,
+/// so a token naming this provider's issuer is judged by it even when its header is malformed.
+/// `None` for anything else (not this module's credential shape).
+pub fn payload(token: &str) -> Option<Vec<u8>> {
+    let mut it = token.split('.');
+    match (it.next(), it.next(), it.next(), it.next()) {
+        (Some(_), Some(p), Some(_), None) => URL_SAFE_NO_PAD.decode(p).ok(),
+        _ => None,
+    }
+}
+
 /// Split and base64url-decode a compact JWT (`header.payload.signature`), decoding the header enough
 /// to select verification. Does NOT verify — that is [`verify_signature`]. Rejects a token that isn't
 /// exactly three segments (a classic malformed-input guard).
