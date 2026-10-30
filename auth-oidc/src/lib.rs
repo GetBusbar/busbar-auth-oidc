@@ -827,7 +827,9 @@ impl OidcModule {
         // chain, never a fall-through. The unverified claim only ever narrows: it selects which
         // provider judges, never what that provider accepts.
         if let Some(other) = foreign_issuer(&payload, &verifier.issuer) {
-            tracing::info!(
+            // Debug: in a multi-provider chain every other provider's token is routed past here
+            // on every request, which is no event for the operator.
+            tracing::debug!(
                 module = "oidc",
                 token_issuer = %other,
                 "OIDC token names an issuer that is not this provider's issuer: not this \
