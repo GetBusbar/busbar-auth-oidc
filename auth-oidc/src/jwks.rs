@@ -127,6 +127,24 @@ pub struct Jwk {
 }
 
 impl Jwk {
+    /// Whether this key may verify a token signed with `alg`: the key type `alg` needs (`RS256`:
+    /// RSA, `ES256`: EC), an `alg` absent or equal to it, not encryption-only, and `key_ops` absent
+    /// or naming `verify`.
+    pub fn signs(&self, alg: &str) -> bool {
+        let kty = match alg {
+            "RS256" => "RSA",
+            "ES256" => "EC",
+            _ => return false,
+        };
+        self.kty == kty
+            && self.alg.as_deref().is_none_or(|a| a == alg)
+            && self.key_use.as_deref() != Some("enc")
+            && self
+                .key_ops
+                .as_ref()
+                .is_none_or(|ops| ops.iter().any(|op| op == "verify"))
+    }
+
     /// The decoded, verify-ready key material for this key — decoded once, then memoised, so the hot
     /// per-request verify path never re-decodes the base64url fields.
     pub fn material(&self) -> &KeyMaterial {
@@ -182,6 +200,24 @@ impl JwkSet {
             );
         }
         Ok(set)
+    }
+
+    /// The keys a token naming `kid`, signed with `alg`, is tried against: every key whose `kid`
+    /// matches ([`Self::find_all`]); for a token naming NO kid (`kid` empty) with its `alg` known,
+    /// the set's single usable signing key for that alg ([`Jwk::signs`]) if there is exactly one,
+    /// else none (ambiguous). `alg` `None` selects by `kid` alone.
+    pub fn select<'a>(&'a self, kid: &'a str, alg: Option<&str>) -> Vec<&'a Jwk> {
+        match alg {
+            Some(alg) if kid.is_empty() => {
+                let usable: Vec<&Jwk> = self.keys.iter().filter(|k| k.signs(alg)).collect();
+                if usable.len() == 1 {
+                    usable
+                } else {
+                    Vec::new()
+                }
+            }
+            _ => self.find_all(kid).collect(),
+        }
     }
 
     /// Find ALL keys whose `kid` matches `kid`. A JWT header names the `kid` that signed it; selecting

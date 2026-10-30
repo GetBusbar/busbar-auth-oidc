@@ -144,6 +144,21 @@ impl JwksCache {
         io: &mut dyn Fetch,
         f: impl Fn(&Jwk) -> Result<T, String>,
     ) -> Step<Result<T, KeyError>> {
+        self.with_key_for(url, kid, None, now, io, f)
+    }
+
+    /// [`Self::with_key`] for a token signed with `alg`: a token naming NO kid (`kid` empty) is
+    /// verified by the set's single usable signing key for `alg` ([`JwkSet::select`]), if there is
+    /// exactly one.
+    pub fn with_key_for<T>(
+        &self,
+        url: &str,
+        kid: &str,
+        alg: Option<&str>,
+        now: Instant,
+        io: &mut dyn Fetch,
+        f: impl Fn(&Jwk) -> Result<T, String>,
+    ) -> Step<Result<T, KeyError>> {
         // RESUME: this caller's own fetch, then on from the point it claimed it. One lock reads
         // both the flight and the snapshot.
         let (mine, snapshot) = {
@@ -158,7 +173,7 @@ impl JwksCache {
                     Err(e) => return Step::Ready(Err(KeyError::Unavailable(e))),
                 };
                 if point == Point::Rotation {
-                    return Step::Ready(self.after_rotation(keys.as_deref(), url, kid, &f));
+                    return Step::Ready(self.after_rotation(keys.as_deref(), url, kid, alg, &f));
                 }
                 (keys, flight.at)
             }
@@ -198,7 +213,7 @@ impl JwksCache {
         // First lookup. More than one key can share `kid` (RFC 7517 §4.5 — e.g. an RSA and an EC key
         // coexisting under one `kid` during an algorithm migration), so try every match and return
         // the first that verifies; keep the last error if none do.
-        if let Some(result) = Self::try_all(&set, kid, &f) {
+        if let Some(result) = Self::try_all(&set, kid, alg, &f) {
             return Step::Ready(result.map_err(KeyError::Mismatch));
         }
         // Miss ⇒ possible key rotation. Refetch ONCE if the rate limit permits, then retry. Never
@@ -207,7 +222,7 @@ impl JwksCache {
             Ok(keys) => keys,
             Err(e) => return Step::Ready(Err(KeyError::Unavailable(e))),
         };
-        Step::Ready(self.after_rotation(keys.as_deref(), url, kid, &f))
+        Step::Ready(self.after_rotation(keys.as_deref(), url, kid, alg, &f))
     }
 
     /// THE WARM-UP (`ready`, at boot): fetch the key set once when the cache holds none, so the
@@ -271,9 +286,10 @@ impl JwksCache {
         keys: Option<&JwkSet>,
         url: &str,
         kid: &str,
+        alg: Option<&str>,
         f: &impl Fn(&Jwk) -> Result<T, String>,
     ) -> Result<T, KeyError> {
-        if let Some(result) = keys.and_then(|set| Self::try_all(set, kid, f)) {
+        if let Some(result) = keys.and_then(|set| Self::try_all(set, kid, alg, f)) {
             return result.map_err(KeyError::Mismatch);
         }
         if self.lock().failing {
@@ -296,17 +312,18 @@ impl JwksCache {
         )))
     }
 
-    /// Try `f` against every key in `set` matching `kid`, returning the first `Ok`. If at least one
-    /// key matched but all errored, returns the LAST error. Returns `None` when zero keys matched
-    /// `kid` at all, so the caller can distinguish "no key with this kid" from "keys existed but none
-    /// verified".
+    /// Try `f` against every key in `set` selected for `kid` and `alg` ([`JwkSet::select`]),
+    /// returning the first `Ok`. If at least one key matched but all errored, returns the LAST
+    /// error. Returns `None` when zero keys matched at all, so the caller can distinguish "no key
+    /// with this kid" from "keys existed but none verified".
     fn try_all<T>(
         set: &JwkSet,
         kid: &str,
+        alg: Option<&str>,
         f: &impl Fn(&Jwk) -> Result<T, String>,
     ) -> Option<Result<T, String>> {
         let mut last_err = None;
-        for k in set.find_all(kid) {
+        for k in set.select(kid, alg) {
             match f(k) {
                 Ok(v) => return Some(Ok(v)),
                 Err(e) => last_err = Some(e),

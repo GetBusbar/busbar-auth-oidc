@@ -843,7 +843,8 @@ impl OidcModule {
         // Verify the signature against the JWKS key for this kid (fetching / rotation-refetching as
         // needed). No key that verifies is a REJECT — a presented-but-invalid credential; a key set
         // that cannot be had is an OUTAGE (OWNER-SIGNED 2026-10-30: never a 401).
-        let signed = step!(self.jwks.with_key(&url, kid, now_mono, io, |key| {
+        let alg = Some(parts.header.alg.as_str());
+        let signed = step!(self.jwks.with_key_for(&url, kid, alg, now_mono, io, |key| {
             jwt::verify_signature(&parts, key)
         }));
         match signed {
