@@ -84,3 +84,30 @@ fn the_bound_holds_by_evicting_the_oldest_inserted() {
     assert!(c.get("cred-0", t + 1).is_none(), "the oldest went");
     assert!(c.get("one-more", t + 1).is_some());
 }
+
+/// L18: an identity whose TTL is zero is never inserted: it could never be served, and it would
+/// hold a slot (and be counted by the admin flush).
+#[test]
+fn a_zero_ttl_identity_is_not_inserted() {
+    let c = VerdictCache::default();
+    let t = 1_700_000_000;
+    c.put("cred-z", &principal(Some(0)), t, c.generation());
+    assert_eq!(c.flush(), 0, "nothing was held");
+}
+
+/// L19: an identity larger than 8 KiB (its id, name and roles) is not cached — a token carrying
+/// thousands of roles cannot make the 4096-entry bound hold gigabytes; it is judged afresh each
+/// time. One under the bound still is.
+#[test]
+fn an_identity_over_8_kib_is_not_cached() {
+    let c = VerdictCache::default();
+    let t = 1_700_000_000;
+    let mut big = principal(Some(300));
+    big.roles = (0..200).map(|i| format!("{i:0>48}")).collect();
+    c.put("cred-big", &big, t, c.generation());
+    assert!(c.get("cred-big", t + 1).is_none(), "over 8 KiB: not held");
+    let mut fits = principal(Some(300));
+    fits.roles = (0..100).map(|i| format!("{i:0>48}")).collect();
+    c.put("cred-fits", &fits, t, c.generation());
+    assert!(c.get("cred-fits", t + 1).is_some(), "under 8 KiB: held");
+}
