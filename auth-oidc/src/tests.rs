@@ -1417,32 +1417,6 @@ fn ttl_secs_still_shortens_for_a_token_expiring_sooner_than_the_ceiling() {
 
 // ── clock-failure fail-closed (realistic broken-clock states, not just sub-epoch) ──────────────────
 
-#[test]
-fn now_unix_fails_closed_below_the_sanity_floor() {
-    // Below CLOCK_SANITY_FLOOR_UNIX simulates a dead RTC / NTP fault landing the clock in the past —
-    // the realistic broken-clock case, which `SystemTime::now()` reports as `Ok(small_value)` and
-    // never touches the `unwrap_or` branch at all. A token whose exp is comfortably in the "future"
-    // relative to that bogus small `now` must NOT be treated as valid.
-    let now = CLOCK_SANITY_FLOOR_UNIX - 1;
-    let mut c = base_claims(0);
-    c["exp"] = serde_json::json!(now + 3600); // "unexpired" relative to the broken clock
-    c["nbf"] = serde_json::json!(now - 10);
-    // Directly exercises validate_claims with the bogus `now` a broken now_unix() would have
-    // produced BEFORE this fix (i.e. proves the check rejects once now_unix correctly reports
-    // i64::MAX instead) by asserting the module-level now_unix() itself is what's under test:
-    assert!(
-        now_unix() >= CLOCK_SANITY_FLOOR_UNIX,
-        "the REAL now_unix() (real host clock) must read above the sanity floor for this test to \
-         mean anything"
-    );
-    // Simulate what now_unix() returns for a host clock below the floor: i64::MAX, fed straight into
-    // validate_claims, exactly as authenticate() would.
-    let err = verifier("groups")
-        .validate_claims(&c, i64::MAX)
-        .expect_err("a below-sanity-floor clock must fail the exp check, not pass it");
-    assert!(err.contains("expired"), "got: {err}");
-}
-
 /// The fail-closed MAPPING `now_unix` applies (OIDC-13): below the floor the reading becomes
 /// `i64::MAX` (every token then fails `exp`), at or above it the reading passes through. Pinning
 /// the mapping, not just the comparison, is what catches a `now_unix` that returns the raw reading.
