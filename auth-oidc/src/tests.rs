@@ -2205,6 +2205,21 @@ fn an_id_token_binds_only_to_the_logins_nonce() {
     assert!(!nonce_binds(&body("garbage".to_string()), "n-1"));
 }
 
+/// O5: the token endpoint's answer is parsed into a typed struct whose tokens live in wiped
+/// holders (`Zeroizing`), its other members ignored, and a body that does not parse is never
+/// echoed.
+#[test]
+fn the_token_response_holds_its_tokens_in_wiped_holders() {
+    let r = TokenResponse::parse(
+        r#"{"id_token":"a.b.c","access_token":"at","refresh_token":"rt","token_type":"Bearer","expires_in":3600,"x":{"y":[1]}}"#,
+    )
+    .expect("a token response parses, unknown members ignored");
+    let held: &zeroize::Zeroizing<String> = r.id_token.as_ref().expect("an id_token");
+    assert_eq!(held.as_str(), "a.b.c");
+    let err = TokenResponse::parse("not json SECRET").err().expect("refused");
+    assert!(!err.contains("SECRET"), "{err}");
+}
+
 /// Every refusal of the browser login's token response is explained in the plugin's log, by status
 /// or by kind, and never with the body.
 #[test]
