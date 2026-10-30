@@ -2460,6 +2460,42 @@ fn the_token_response_holds_its_tokens_in_wiped_holders() {
     assert!(!err.contains("SECRET"), "{err}");
 }
 
+/// L11: every log line naming an IdP URL names it as `fetch::shown` does, its userinfo removed:
+/// the JWKS fetch failing (nothing kept, and a previous set kept) and discovery failing.
+#[test]
+fn a_logged_idp_url_drops_its_userinfo() {
+    let key = TestKey::generate(KID);
+    let cap = busbar_test_kit::warn_capture::WarnCapture::default();
+    tracing::subscriber::with_default(cap.clone(), || {
+        let c = crate::cache::JwksCache::new(Duration::from_secs(1), Duration::from_secs(1));
+        let url = "https://jwks-user:SECRETPW@jwks.test/keys";
+        let idp = Idp::answering(Err("down".to_string()));
+        let t0 = Instant::now();
+        let _ = ready(c.with_key(url, KID, t0, &mut idp.at_once(Some(ME)), |_| Ok(())));
+        idp.set_body(key.jwks());
+        let later = t0 + Duration::from_secs(2);
+        let _ = ready(c.with_key(url, KID, later, &mut idp.at_once(Some(ME)), |_| Ok(())));
+        idp.set_answer(Err("down".to_string()));
+        let _ = ready(c.with_key(
+            url,
+            KID,
+            later + Duration::from_secs(2),
+            &mut idp.at_once(Some(ME)),
+            |_| Ok(()),
+        ));
+
+        let mut d = discovery_cfg();
+        d.issuer = "https://issuer-user:SECRETPW@login.example/v2.0".to_string();
+        let m = OidcModule::new(&d);
+        let _ = ready(m.jwks_url(Instant::now(), &mut idp.at_once(Some(ME))));
+    });
+    let logged = cap.messages().join("\n");
+    assert!(logged.contains("JWKS fetch failed"), "{logged}");
+    assert!(logged.contains("serving the previous key set"), "{logged}");
+    assert!(logged.contains("OIDC discovery failed"), "{logged}");
+    assert!(!logged.contains("SECRETPW"), "a URL's userinfo is logged: {logged}");
+}
+
 /// Every refusal of the browser login's token response is explained in the plugin's log, by status
 /// or by kind, and never with the body.
 #[test]
