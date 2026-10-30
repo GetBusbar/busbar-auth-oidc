@@ -2048,6 +2048,90 @@ fn login_fails_closed_without_endpoints() {
 
 // ── log-injection: untrusted header strings are escaped in errors that reach a log (OIDC-3) ──────
 
+/// O7: every far-end string (a JWKS key's `kty`/`crv`, a discovery document's `issuer`) and every
+/// attacker string (a token header's `alg`, `kid`, `crit`) an error or log repeats is escaped AND
+/// capped at 64 characters (then `…`), through one helper: a 300-character value with a newline and
+/// a terminal escape never reaches a log line whole.
+#[test]
+fn far_end_and_attacker_strings_are_escaped_and_capped_in_errors() {
+    let hostile = format!("{}\n\u{1b}[31m", "A".repeat(300));
+    let check = |what: &str, err: &str| {
+        assert!(
+            !err.contains('\n') && !err.contains('\u{1b}'),
+            "{what}: not escaped: {err:?}"
+        );
+        assert!(
+            !err.contains(&"A".repeat(65)),
+            "{what}: not capped: {} chars",
+            err.len()
+        );
+        assert!(
+            err.contains(&format!("{}…", "A".repeat(64))),
+            "{what}: named up to the cap: {err:?}"
+        );
+    };
+    let key = TestKey::generate(KID);
+    let now = 1_700_000_000;
+
+    let c = crate::cache::JwksCache::new(Duration::from_secs(60), Duration::from_secs(3600));
+    let idp = FixtureFetcher::new(key.jwks());
+    let err = ready(c.with_key(
+        "https://jwks.test/keys",
+        &hostile,
+        Instant::now(),
+        &mut idp.at_once(Some(ME)),
+        |_| Ok(()),
+    ))
+    .expect_err("an unknown kid");
+    check("kid", err.message());
+
+    let jwk = jwks::JwkSet::parse(&key.jwks()).unwrap().keys[0].clone();
+    let token = token_with_alg(KID, &hostile, &base_claims(now), b"sig");
+    let parts = jwt::split(&token).unwrap();
+    check("alg", &jwt::verify_signature(&parts, &jwk).unwrap_err());
+
+    let parts_with = |alg: &str, crit: Option<Vec<String>>| jwt::Parts {
+        header: jwt::Header {
+            alg: alg.to_string(),
+            kid: None,
+            crit,
+        },
+        payload: Vec::new(),
+        signature: Vec::new(),
+        signing_input: "h.p",
+    };
+    check(
+        "crit",
+        &jwt::verify_signature(&parts_with("ES256", Some(vec![hostile.clone()])), &jwk)
+            .unwrap_err(),
+    );
+    let mut odd = jwk.clone();
+    odd.kty = hostile.clone();
+    check(
+        "kty",
+        &jwt::verify_signature(&parts_with("RS256", None), &odd).unwrap_err(),
+    );
+    match odd.material() {
+        jwks::KeyMaterial::Unusable(e) => check("kty (material)", e),
+        _ => panic!("an unknown kty is unusable"),
+    }
+    let mut curve = jwk.clone();
+    curve.crv = Some(hostile.clone());
+    check(
+        "crv",
+        &jwt::verify_signature(&parts_with("ES256", None), &curve).unwrap_err(),
+    );
+
+    let doc = serde_json::json!({ "issuer": hostile }).to_string();
+    let err = discovery::check_document(
+        &discovery_cfg(),
+        "https://login.microsoftonline.com/x",
+        Ok(doc),
+    )
+    .unwrap_err();
+    check("discovery issuer", &err);
+}
+
 /// `kid` and `alg` come from the UNSIGNED header of an untrusted bearer, and the errors that carry
 /// them reach `tracing::warn!` before any signature is accepted. A newline or a terminal escape in
 /// either must not survive into the error text (a forged log record / recoloured terminal).
