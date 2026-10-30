@@ -55,6 +55,7 @@ use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::sdk::auth_door::{carrier, verify_tail, with_tail};
 use busbar_contract::abi::sdk::auth_kit::login_identity;
 use busbar_contract::abi::sdk::conn::{ConnFailure, Host};
+use busbar_contract::abi::sdk::cred::{self, Cred};
 use busbar_contract::abi::sdk::door::{abi_str, alias, statement, AbiIn, AbiOut};
 use busbar_contract::abi::sdk::lent::HostBuf;
 use busbar_contract::abi::sdk::life::{Counted, Held, Life, Refreshed, Refusal};
@@ -156,15 +157,18 @@ const WAIT_NS: u64 = FLIGHT_MAX.as_nanos() as u64;
 
 /// The client secret `secrets` lends: its first entry, an empty one being none (the host lends an
 /// empty entry for a provider with no `browser_login.client_secret`).
-fn lent_secret<'a>(secrets: &[&'a [u8]]) -> Option<&'a [u8]> {
-    secrets.first().copied().filter(|s| !s.is_empty())
+fn lent_secret(secrets: &[&[u8]]) -> Option<Cred> {
+    secrets
+        .first()
+        .filter(|s| !s.is_empty())
+        .map(|s| Cred::captured(Zeroizing::new(s.to_vec())))
 }
 
 /// One opened module: what `open` built from one settings blob and its lent secrets.
 struct Opened {
     module: OidcModule,
     /// The confidential-client secret the host lent, if any.
-    secret: Option<Zeroizing<String>>,
+    secret: Option<Cred>,
     /// The settings and secret it was opened with: a `refresh` with the same ones keeps it.
     settings: Vec<u8>,
 }
@@ -174,13 +178,10 @@ impl Opened {
         let module = module(text(settings)?).map_err(Refusal::failed)?;
         // An empty lent secret is none (a provider with no `browser_login.client_secret`): the
         // token exchange then sends no secret field, as 1.5.5's core sent none.
-        let secret = lent_secret(secrets)
-            .map(|s| {
-                std::str::from_utf8(s)
-                    .map(|s| Zeroizing::new(s.to_string()))
-                    .map_err(|_| Refusal::failed("oidc: the lent client secret is not UTF-8"))
-            })
-            .transpose()?;
+        let secret = lent_secret(secrets);
+        if secret.as_ref().is_some_and(|s| !s.is_text()) {
+            return Err(Refusal::failed("oidc: the lent client secret is not UTF-8"));
+        }
         Ok(Self {
             module,
             secret,
@@ -208,15 +209,20 @@ impl Opened {
     ) -> Step<Login> {
         let now = Instant::now();
         if answer.is_none() {
-            let hop = match step!(self
-                .module
-                .token_exchange(code, redirect_uri, verifier, now, io))
-            {
-                Ok(Some(hop)) => hop,
+            let secret = self.secret.as_ref();
+            let request = match step!(self.module.token_exchange(
+                code,
+                redirect_uri,
+                verifier,
+                secret,
+                now,
+                io
+            )) {
+                Ok(Some(request)) => request,
                 Ok(None) => return Step::Ready(Login::Bad),
                 Err(e) => return Step::Ready(Login::Outage(e)),
             };
-            match io.post(&hop, self.secret.as_deref().map(String::as_str)) {
+            match io.post(&request.url, &request.form) {
                 Poll::Pending => return Step::Pending,
                 Poll::Ready(Ok(r)) => *answer = Some(r),
                 Poll::Ready(Err(e)) => return Step::Ready(Login::Outage(e)),
@@ -259,9 +265,19 @@ enum Login {
 struct Reached {
     /// When it was kept: at the cap the oldest goes ([`keep`]).
     at: Instant,
-    state: Vec<u8>,
-    code: Zeroizing<Vec<u8>>,
+    state: cred::Held<Vec<u8>>,
+    code: cred::Held<Vec<u8>>,
     principal: Principal,
+}
+
+impl Reached {
+    /// Whether it was kept for the callback naming `state` and `code`: both compared in constant
+    /// time, and both always compared.
+    fn serves(&self, state: &[u8], code: &[u8]) -> bool {
+        let state = self.state == cred::Held::new(state.to_vec());
+        let code = self.code == cred::Held::new(code.to_vec());
+        state & code
+    }
 }
 
 /// Keep `r` for `ticket`'s re-call, at most `max` at once: at the cap the OLDEST entry goes, never
@@ -397,7 +413,7 @@ impl Life for Oidc {
         _generation: u64,
     ) -> Result<Refreshed, Refusal> {
         let now = self.now();
-        let same_secret = now.secret.as_deref().map(String::as_bytes) == lent_secret(secrets);
+        let same_secret = now.secret == lent_secret(secrets);
         let reopened = if now.settings == settings && same_secret {
             None
         } else {
@@ -765,7 +781,7 @@ impl SafeSlot for Complete {
         let mut reached = oidc.reached.lock().unwrap_or_else(PoisonError::into_inner);
         let kept = reached
             .remove(&instance.ticket())
-            .filter(|r| r.state == state && r.code.as_slice() == code_bytes);
+            .filter(|r| r.serves(state, code_bytes));
         drop(reached);
         let principal = match kept {
             Some(r) => r.principal,
@@ -810,8 +826,8 @@ impl SafeSlot for Complete {
                 instance.ticket(),
                 Reached {
                     at: Instant::now(),
-                    state: state.to_vec(),
-                    code: Zeroizing::new(code_bytes.to_vec()),
+                    state: cred::Held::new(state.to_vec()),
+                    code: cred::Held::new(code_bytes.to_vec()),
                     principal,
                 },
             );

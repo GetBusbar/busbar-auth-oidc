@@ -18,7 +18,8 @@
 use busbar_auth_oidc::fetch::{document, failed, Doc, Fetch};
 use busbar_auth_oidc::{OidcConfig, OidcModule, Step};
 use busbar_contract::abi::mechanism::ticket::Ticket;
-use busbar_contract::auth::{AuthVerdict, LoginHop, LoginHttpResponse};
+use busbar_contract::abi::sdk::cred::FormBody;
+use busbar_contract::auth::{AuthVerdict, LoginHttpResponse};
 use std::task::Poll;
 use std::time::Instant;
 
@@ -48,11 +49,8 @@ impl Fetch for Blocking {
         )
     }
 
-    fn post(&mut self, hop: &LoginHop, _: Option<&str>) -> Poll<Result<LoginHttpResponse, String>> {
-        Poll::Ready(Err(failed(
-            &hop.url,
-            "this example makes no token exchange",
-        )))
+    fn post(&mut self, url: &str, _: &FormBody) -> Poll<Result<LoginHttpResponse, String>> {
+        Poll::Ready(Err(failed(url, "this example makes no token exchange")))
     }
 }
 

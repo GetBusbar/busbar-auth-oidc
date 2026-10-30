@@ -50,6 +50,7 @@ use busbar_contract::abi::host::conn::connector::{
 use busbar_contract::abi::mechanism::call::{AbiStr, Blob};
 use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::sdk::conn::{ConnFailure, Host};
+use busbar_contract::abi::sdk::cred::FormBody;
 use busbar_contract::abi::sdk::door::abi_str;
 use busbar_contract::abi::sdk::exchange::{
     exchange, Exchange, ExchangeResponse, Request, REPLY_OVER_BOUND,
@@ -57,8 +58,7 @@ use busbar_contract::abi::sdk::exchange::{
 use busbar_contract::abi::sdk::net::{
     extract_normalized_host, host_is_private_or_loopback, scheme_is,
 };
-use busbar_contract::auth::{LoginHop, LoginHttpResponse};
-use zeroize::Zeroizing;
+use busbar_contract::auth::LoginHttpResponse;
 
 /// Upper bound on a JWKS / discovery document, and on a token endpoint's answer. A real JWKS is a
 /// handful of keys — a few KiB; even a tenant rotating aggressively stays well under this. The bound
@@ -195,14 +195,10 @@ pub trait Fetch {
     }
 
     /// The login token exchange, made by the plugin itself (an IdP login holds its own client
-    /// secret and makes its own token exchange): `hop` sent as a form ([`form`]). The
+    /// secret and makes its own token exchange): `form` POSTed to `url` ([`post_exchange`]). The
     /// answer is the status and the body, whatever the status; a request that got no answer is
     /// `Err`.
-    fn post(
-        &mut self,
-        hop: &LoginHop,
-        secret: Option<&str>,
-    ) -> Poll<Result<LoginHttpResponse, String>>;
+    fn post(&mut self, url: &str, form: &FormBody) -> Poll<Result<LoginHttpResponse, String>>;
 }
 
 /// Whether a request on `need` may go to `url` in plaintext: never for discovery or the JWKS; for
@@ -283,74 +279,6 @@ pub fn capped(url: &str, body: Vec<u8>, cap: usize) -> Result<String, String> {
     String::from_utf8(body).map_err(|_| format!("{url} JWKS body is not UTF-8"))
 }
 
-/// The form `hop` is sent as, with `secret` filling the field
-/// `hop.secret_form_field` names. With no secret lent, that field is dropped rather than sent empty
-/// (a public client sends none).
-/// The pairs are wiped on drop: they carry the code, the code_verifier and the lent secret.
-pub fn form(hop: &LoginHop, secret: Option<&str>) -> Zeroizing<Vec<(String, String)>> {
-    let mut form = Zeroizing::new(hop.form.clone());
-    if let Some(field) = hop.secret_form_field.as_deref() {
-        match secret {
-            Some(secret) => match form.iter_mut().find(|(k, _)| k == field) {
-                Some(slot) => slot.1 = secret.to_string(),
-                None => form.push((field.to_string(), secret.to_string())),
-            },
-            None => form.retain(|(k, _)| k != field),
-        }
-    }
-    form
-}
-
-/// Whether `b` is written as itself in an `application/x-www-form-urlencoded` value (the WHATWG
-/// byte serializer the `url` crate writes with: ASCII alphanumerics and `*-._`).
-const fn form_kept(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || matches!(b, b'*' | b'-' | b'.' | b'_')
-}
-
-/// How many bytes `v` takes form-encoded.
-fn form_len(v: &str) -> usize {
-    v.bytes()
-        .map(|b| if form_kept(b) || b == b' ' { 1 } else { 3 })
-        .sum()
-}
-
-/// THE TOKEN REQUEST BODY: `pairs` as `name=value&...`, byte for byte what the `url` crate's form
-/// serializer wrote for them (space as `+`, every byte but ASCII alphanumerics and `*-._` as an
-/// upper-case `%XX`), built in ONE buffer sized to the exact length first, so no growth frees a
-/// partial copy of the client secret, code or code_verifier the form carries; wiped on drop.
-pub fn form_body(pairs: &[(String, String)]) -> Zeroizing<String> {
-    const HEX: &[u8; 16] = b"0123456789ABCDEF";
-    let len = pairs
-        .iter()
-        .map(|(n, v)| form_len(n) + 1 + form_len(v))
-        .sum::<usize>()
-        + pairs.len().saturating_sub(1);
-    let mut out = Zeroizing::new(String::with_capacity(len));
-    for (i, (name, value)) in pairs.iter().enumerate() {
-        if i > 0 {
-            out.push('&');
-        }
-        for (j, part) in [name, value].into_iter().enumerate() {
-            if j == 1 {
-                out.push('=');
-            }
-            for b in part.bytes() {
-                if form_kept(b) {
-                    out.push(char::from(b));
-                } else if b == b' ' {
-                    out.push('+');
-                } else {
-                    out.push('%');
-                    out.push(char::from(HEX[usize::from(b >> 4)]));
-                    out.push(char::from(HEX[usize::from(b & 0x0f)]));
-                }
-            }
-        }
-    }
-    debug_assert_eq!(out.len(), len, "the body is sized once");
-    out
-}
-
 /// The path and query a request to `url` names.
 fn head_target(url: &url::Url) -> Vec<u8> {
     match url.query() {
@@ -371,37 +299,30 @@ pub fn get_request(url: &url::Url) -> Request {
     }
 }
 
-/// The token exchange `hop` to `url` with `secret`: its method (POST when it names none a request
-/// can carry), the form url-encoded, then the hop's own fields.
-pub fn post_request(url: &url::Url, hop: &LoginHop, secret: Option<&str>) -> Request {
-    let method = http::Method::from_bytes(hop.method.as_bytes()).unwrap_or(http::Method::POST);
-    // The form holds the lent client secret, the code and the code_verifier: its pairs are wiped
-    // when they drop, once the body is encoded. The body is encoded into one exact-size wiped
-    // buffer, and that buffer itself (no copy) moves into the SDK's `exchange::Request`, whose
-    // holder wipes it.
-    let pairs = form(hop, secret);
-    let mut body = form_body(&pairs);
-    drop(pairs);
-    // Order on the wire: the form's content-type, then the client's `accept`.
-    let mut fields = vec![
-        (
-            b"content-type".to_vec(),
-            b"application/x-www-form-urlencoded".to_vec(),
-        ),
-        (b"accept".to_vec(), b"*/*".to_vec()),
-    ];
-    fields.extend(
-        hop.headers
-            .iter()
-            .map(|(n, v)| (n.as_bytes().to_vec(), v.as_bytes().to_vec())),
-    );
-    Request {
-        method: method.as_str().as_bytes().to_vec(),
+/// The token exchange to `url`: a POST of `form`, which the SDK encodes into the body (the
+/// sealed client secret written there and nowhere else, wiped with the request), the form's
+/// content-type then the client's `accept`.
+///
+/// # Errors
+/// The form could not be encoded, or the SDK refused the request: nothing is sent.
+pub fn post_exchange(url: &url::Url, form: &FormBody) -> Result<Exchange, ConnFailure> {
+    let body = form
+        .encoded()
+        .map_err(|e| ConnFailure::Failed(e.to_string()))?;
+    let request = Request {
+        method: b"POST".to_vec(),
         target: head_target(url),
-        fields,
-        body: std::mem::take(&mut *body).into_bytes(),
+        fields: vec![
+            (
+                b"content-type".to_vec(),
+                b"application/x-www-form-urlencoded".to_vec(),
+            ),
+            (b"accept".to_vec(), b"*/*".to_vec()),
+        ],
+        body: Vec::new(),
         timeout_ms: FETCH_TIMEOUT_MS,
-    }
+    };
+    Exchange::request_with(request, Vec::new(), Some(body))
 }
 
 /// What an op parks of its requests across PENDING: the handles its finished exchanges issued, and
@@ -476,7 +397,7 @@ impl<'h> HostIo<'h> {
         &mut self,
         need: u32,
         url: &str,
-        request: impl FnOnce(&url::Url) -> Request,
+        request: impl FnOnce(&url::Url) -> Result<Exchange, ConnFailure>,
     ) -> Poll<Result<ExchangeResponse, String>> {
         let parsed = match url::Url::parse(url) {
             Ok(u) => u,
@@ -504,8 +425,7 @@ impl<'h> HostIo<'h> {
         let mut c = host.connector_from(self.ticket, self.state.issued);
         let mut ex = match self.state.current.take() {
             Some((at, ex)) if at == url => ex,
-            _ => match Exchange::request(request(&parsed)).map(|ex| ex.reply_limit(MAX_JWKS_BYTES))
-            {
+            _ => match request(&parsed).map(|ex| ex.reply_limit(MAX_JWKS_BYTES)) {
                 Ok(ex) => ex,
                 Err(e) => return Poll::Ready(Err(failed(url, e))),
             },
@@ -564,17 +484,12 @@ impl Fetch for HostIo<'_> {
     }
 
     fn get(&mut self, doc: Doc, url: &str) -> Poll<Result<String, String>> {
-        self.run(doc.need(), url, get_request)
+        self.run(doc.need(), url, |u| Exchange::request(get_request(u)))
             .map(|r| r.and_then(|reply| document(url, reply.status, reply.body)))
     }
 
-    fn post(
-        &mut self,
-        hop: &LoginHop,
-        secret: Option<&str>,
-    ) -> Poll<Result<LoginHttpResponse, String>> {
-        let url = hop.url.as_str();
-        self.run(NEED_TOKEN, url, |u| post_request(u, hop, secret))
+    fn post(&mut self, url: &str, form: &FormBody) -> Poll<Result<LoginHttpResponse, String>> {
+        self.run(NEED_TOKEN, url, |u| post_exchange(u, form))
             .map(|r| {
                 r.and_then(|reply| {
                     Ok(LoginHttpResponse {

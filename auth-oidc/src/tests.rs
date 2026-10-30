@@ -124,12 +124,19 @@ impl Module {
             req.code.as_deref(),
             req.redirect_uri.as_deref(),
             req.code_verifier.as_deref(),
+            None,
             Instant::now(),
             &mut io,
         ))
         .expect("no discovery")
         {
-            Some(hop) => LoginOutcome::Exchange(LoginHop::clone(&hop)),
+            Some(request) => LoginOutcome::Exchange(busbar_contract::auth::LoginHop {
+                method: "POST".to_string(),
+                url: request.url.clone(),
+                form: crate::script::wire(&request.form),
+                secret_form_field: None,
+                headers: Vec::new(),
+            }),
             None => LoginOutcome::Reject,
         }
     }
@@ -1411,41 +1418,48 @@ fn build_authorize_url_keeps_an_existing_endpoint_query() {
     assert_eq!(url.matches('?').count(), 1, "exactly one '?': {url}");
 }
 
-/// The token-exchange hop is an authorization-code POST that NAMES the secret form field for the
-/// core to fill — it carries the key, never a secret value.
+/// The token request is an authorization-code grant: its pairs in order, and the lent client
+/// secret sealed as the last one; with no secret lent the field is left out, never sent empty.
 #[test]
-fn build_token_exchange_marks_secret_field() {
-    let mut c = cfg("groups");
-    c.token_endpoint = Some("https://idp.test/token".to_string());
-    let hop = build_token_exchange(
-        &c,
+fn the_token_form_is_an_authorization_code_grant_with_the_secret_sealed() {
+    let url = "https://idp.test/token";
+    let public = token_form(
+        &cfg("groups"),
+        url,
         "auth-code-1",
         "https://busbar.test/auth/token",
         "verifier-1",
+        None,
     );
-    assert_eq!(hop.method, "POST");
-    assert_eq!(hop.url, "https://idp.test/token");
-    // The core injects the secret VALUE into this named field; the module only wrote the KEY.
-    assert_eq!(hop.secret_form_field.as_deref(), Some("client_secret"));
+    let pairs = vec![
+        ("grant_type", "authorization_code"),
+        ("code", "auth-code-1"),
+        ("redirect_uri", "https://busbar.test/auth/token"),
+        ("code_verifier", "verifier-1"),
+        ("client_id", AUDIENCE),
+    ];
+    let owned = |p: &[(&str, &str)]| -> Vec<(String, String)> {
+        p.iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    };
+    assert_eq!(crate::script::wire(&public), owned(&pairs));
 
-    let form: std::collections::HashMap<&str, &str> = hop
-        .form
-        .iter()
-        .map(|(k, v)| (k.as_str(), v.as_str()))
-        .collect();
-    assert_eq!(form.get("grant_type").copied(), Some("authorization_code"));
-    assert_eq!(form.get("code").copied(), Some("auth-code-1"));
-    assert_eq!(form.get("code_verifier").copied(), Some("verifier-1"));
-    assert_eq!(
-        form.get("redirect_uri").copied(),
-        Some("https://busbar.test/auth/token")
+    let secret = busbar_contract::abi::sdk::test_support::chip::cred("s3cret");
+    let confidential = token_form(
+        &cfg("groups"),
+        url,
+        "auth-code-1",
+        "https://busbar.test/auth/token",
+        "verifier-1",
+        Some(&secret),
     );
-    assert_eq!(form.get("client_id").copied(), Some(AUDIENCE));
-    // The secret field is present as a KEY with an EMPTY placeholder value — never a real secret.
-    assert_eq!(
-        form.get("client_secret").copied(),
-        Some(""),
-        "client_secret must be an empty placeholder the core overwrites, not a value the plugin set"
+    let mut with_secret = pairs.clone();
+    with_secret.push(("client_secret", "s3cret"));
+    assert_eq!(crate::script::wire(&confidential), owned(&with_secret));
+    assert!(
+        !format!("{confidential:?}").contains("s3cret"),
+        "the form's Debug names keys only"
     );
 }
 
@@ -1728,7 +1742,10 @@ fn begin_and_complete_login_drive_the_full_flow() {
     match m.complete_login(&cl) {
         LoginOutcome::Exchange(hop) => {
             assert_eq!(hop.url, "https://idp.test/token");
-            assert_eq!(hop.secret_form_field.as_deref(), Some("client_secret"));
+            assert!(
+                hop.form.iter().all(|(k, _)| k != "client_secret"),
+                "no secret lent: none sent"
+            );
         }
         other => panic!("expected Exchange, got {other:?}"),
     }
@@ -2083,6 +2100,7 @@ fn a_refused_token_exchange_is_logged_with_its_reason() {
                 code,
                 Some("https://busbar.test/cb"),
                 None,
+                None,
                 Instant::now(),
                 &mut idp.at_once(Some(ME)),
             ))
@@ -2106,6 +2124,7 @@ fn a_refused_token_exchange_is_logged_with_its_reason() {
             Some("c"),
             Some("r"),
             Some("v"),
+            None,
             Instant::now(),
             &mut io,
         ))
@@ -2199,6 +2218,7 @@ fn an_end_user_decline_logs_at_info_and_an_idp_failure_at_warn() {
                 None,
                 Some("https://busbar.test/cb"),
                 Some("v"),
+                None,
                 Instant::now(),
                 &mut idp.at_once(Some(ME)),
             ))

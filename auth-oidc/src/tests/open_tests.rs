@@ -239,11 +239,12 @@ fn the_discovered_login_endpoints_reach_both_login_steps_from_one_document() {
         Some("code"),
         Some("https://busbar.test/auth/token"),
         Some("verifier"),
+        None,
         now,
         &mut idp.at_once(Some(ME)),
     ))
     .expect("discovered")
-    .expect("a hop");
+    .expect("a token request");
     assert_eq!(
         hop.url, "https://issuer.invalid.example/discovered/token",
         "the token exchange must target the DISCOVERED token endpoint"

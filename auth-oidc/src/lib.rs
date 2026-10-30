@@ -33,9 +33,8 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-use busbar_contract::auth::{
-    AuthVerdict, BeginLogin, LoginHop, LoginHttpResponse, LoginOutcome, Principal,
-};
+use busbar_contract::abi::sdk::cred::{Cred, FormBody};
+use busbar_contract::auth::{AuthVerdict, BeginLogin, LoginHttpResponse, LoginOutcome, Principal};
 use serde::Deserialize;
 use serde_json::Value;
 use std::borrow::Cow;
@@ -851,9 +850,9 @@ impl OidcModule {
         ))))
     }
 
-    /// The callback's token exchange: the hop for its `code`, `redirect_uri` and `code_verifier`.
-    /// `None` (fail closed) for a callback lacking any of the three, or with no `token_endpoint`
-    /// configured or discovered.
+    /// The callback's token request: its `code`, `redirect_uri` and `code_verifier`, and the lent
+    /// client `secret` (if any), as the form [`token_form`] builds. `None` (fail closed) for a
+    /// callback lacking any of the three, or with no `token_endpoint` configured or discovered.
     ///
     /// # Errors
     /// The endpoint had to be discovered, and discovery failed.
@@ -862,9 +861,10 @@ impl OidcModule {
         code: Option<&str>,
         redirect_uri: Option<&str>,
         code_verifier: Option<&str>,
+        secret: Option<&Cred>,
         now: Instant,
         io: &mut dyn Fetch,
-    ) -> Step<Result<Option<TokenHop>, String>> {
+    ) -> Step<Result<Option<TokenRequest>, String>> {
         let (Some(code), Some(redirect_uri), Some(code_verifier)) =
             (code, redirect_uri, code_verifier)
         else {
@@ -880,40 +880,25 @@ impl OidcModule {
             tracing::info!(module = "oidc", absent = %absent.join(", "), "OIDC callback lacks fields the token exchange needs; login declined");
             return Step::Ready(Ok(None));
         };
-        let Some(endpoint) = step_ok!(self.token_endpoint(now, io)) else {
+        let Some(url) = step_ok!(self.token_endpoint(now, io)) else {
             tracing::warn!(module = "oidc", "no token_endpoint is configured and the discovery document names none; login declined");
             return Step::Ready(Ok(None));
         };
-        let mut cfg = self.cfg.clone();
-        cfg.token_endpoint = Some(endpoint);
-        Step::Ready(Ok(Some(TokenHop(build_token_exchange(
-            &cfg,
-            code,
-            redirect_uri,
-            code_verifier,
-        )))))
+        let form = token_form(&self.cfg, &url, code, redirect_uri, code_verifier, secret);
+        Step::Ready(Ok(Some(TokenRequest { url, form })))
     }
 }
 
-/// The token-exchange hop the plugin builds and sends, its form values (the code and the
-/// code_verifier) wiped when it drops. [`LoginHop`] is the contract's type, plain `String`s with no
-/// wipe of their own, so this holder wipes the copies the plugin made into it.
-pub struct TokenHop(LoginHop);
-
-impl std::ops::Deref for TokenHop {
-    type Target = LoginHop;
-    fn deref(&self) -> &LoginHop {
-        &self.0
-    }
+/// The callback's token request: the token endpoint and the form it is sent. The form's values
+/// (the code, the code_verifier) are wiped when it drops, and the client secret is sealed in it:
+/// the SDK writes it into the request body and nowhere else.
+#[derive(Debug)]
+pub struct TokenRequest {
+    /// The token endpoint.
+    pub url: String,
+    /// The `application/x-www-form-urlencoded` body.
+    pub form: FormBody,
 }
-
-impl Drop for TokenHop {
-    fn drop(&mut self) {
-        zeroize::Zeroize::zeroize(&mut self.0.form);
-    }
-}
-
-impl zeroize::ZeroizeOnDrop for TokenHop {}
 
 /// The nonce binding: `true` when the token endpoint's `body`
 /// carries no `id_token`, or carries one whose (unverified) payload names `nonce` as its `nonce`
@@ -938,13 +923,7 @@ pub(crate) fn nonce_binds(body: &str, nonce: &str) -> bool {
         })
         .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
         .and_then(|c| c.get("nonce").and_then(Value::as_str).map(str::to_string));
-    claimed.is_some_and(|c| {
-        c.len() == nonce.len()
-            && c.bytes()
-                .zip(nonce.bytes())
-                .fold(0u8, |acc, (a, b)| acc | (a ^ b))
-                == 0
-    })
+    claimed.is_some_and(|c| busbar_contract::constant_time_eq(&c, nonce))
 }
 
 /// The OAuth `client_id` to present: the explicit `client_id`, else the `audience` (the common
@@ -967,8 +946,8 @@ fn scope_value(cfg: &OidcConfig) -> String {
 }
 
 /// Percent-encode `s` for use as a URL QUERY-component value (RFC 3986 unreserved set kept literal,
-/// everything else `%`-escaped). Used only for the authorize URL; the token-exchange form is encoded
-/// when it is sent ([`fetch::post_request`]), so its values stay raw.
+/// everything else `%`-escaped). Used only for the authorize URL; the token request's form is
+/// encoded by the SDK ([`token_form`]).
 fn pct(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for &b in s.as_bytes() {
@@ -1013,33 +992,27 @@ pub fn build_authorize_url(
     url
 }
 
-/// Build the token-exchange hop the door sends: `POST` to the token endpoint with
-/// `grant_type=authorization_code`, `code`, `redirect_uri`, `code_verifier`, and `client_id`. The
-/// `client_secret` is written as an EMPTY placeholder keyed by `secret_form_field`: the hop names the
-/// KEY, and the secret the host lent at `open` fills the VALUE when it is sent ([`fetch::form`]).
-pub fn build_token_exchange(
+/// THE TOKEN REQUEST'S FORM (`url`'s authorization-code grant): `grant_type=authorization_code`,
+/// `code`, `redirect_uri`, `code_verifier`, `client_id`, then the lent client `secret` sealed as
+/// `client_secret`. With no secret lent the field is left out rather than sent empty (a public
+/// client sends none). The secret goes out only on a secured connection when `url` is https.
+pub fn token_form(
     cfg: &OidcConfig,
+    url: &str,
     code: &str,
     redirect_uri: &str,
     code_verifier: &str,
-) -> LoginHop {
-    LoginHop {
-        method: "POST".to_string(),
-        url: cfg.token_endpoint.clone().unwrap_or_default(),
-        form: vec![
-            ("grant_type".to_string(), "authorization_code".to_string()),
-            ("code".to_string(), code.to_string()),
-            ("redirect_uri".to_string(), redirect_uri.to_string()),
-            ("code_verifier".to_string(), code_verifier.to_string()),
-            ("client_id".to_string(), resolved_client_id(cfg)),
-            // Placeholder ONLY — the lent confidential-client secret fills it when the hop is sent
-            // (`fetch::form`); the hop itself never carries the value.
-            ("client_secret".to_string(), String::new()),
-        ],
-        secret_form_field: Some("client_secret".to_string()),
-        // This module has no extra hop headers to add (e.g. no userinfo Authorization header on the
-        // token-exchange hop); the core's own headers (Content-Type, etc.) are added on its side.
-        headers: Vec::new(),
+    secret: Option<&Cred>,
+) -> FormBody {
+    let form = FormBody::new()
+        .public("grant_type", "authorization_code")
+        .public("code", code)
+        .public("redirect_uri", redirect_uri)
+        .public("code_verifier", code_verifier)
+        .public("client_id", &resolved_client_id(cfg));
+    match secret {
+        Some(secret) => form.sealed("client_secret", &secret.clone().secure_for(url)),
+        None => form,
     }
 }
 

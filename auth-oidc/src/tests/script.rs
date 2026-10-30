@@ -13,7 +13,8 @@ use std::sync::Mutex;
 use std::task::Poll;
 
 use busbar_contract::abi::mechanism::ticket::Ticket;
-use busbar_contract::auth::{LoginHop, LoginHttpResponse};
+use busbar_contract::abi::sdk::cred::FormBody;
+use busbar_contract::auth::LoginHttpResponse;
 
 use crate::fetch::{Doc, Fetch};
 use crate::flight::Step;
@@ -30,6 +31,26 @@ pub const fn ticket(n: u32) -> Ticket {
         slot: n,
         generation: 1,
     }
+}
+
+/// What `form` writes on the wire, sealed values included.
+pub fn wire_text(form: &FormBody) -> String {
+    let mut sealed = form.encoded().expect("the form encodes");
+    let mut bytes = Vec::new();
+    let sent =
+        busbar_contract::abi::sdk::test_support::chip::drive_sealed::<()>(&mut sealed, |b| {
+            bytes.extend_from_slice(b);
+            Poll::Ready(Ok(b.len()))
+        });
+    assert_eq!(sent, Poll::Ready(Ok(())));
+    String::from_utf8(bytes).expect("a form is ASCII")
+}
+
+/// [`wire_text`] decoded back into its pairs, in order.
+pub fn wire(form: &FormBody) -> Vec<(String, String)> {
+    url::form_urlencoded::parse(wire_text(form).as_bytes())
+        .into_owned()
+        .collect()
 }
 
 /// `Step::Ready(v)` → `v`; anything else is a test failure.
@@ -166,8 +187,8 @@ impl Fetch for Caller<'_> {
         self.idp.refusals.lock().unwrap().push(why.to_string());
     }
 
-    fn post(&mut self, hop: &LoginHop, _: Option<&str>) -> Poll<Result<LoginHttpResponse, String>> {
-        if !self.answered(&hop.url) {
+    fn post(&mut self, url: &str, _: &FormBody) -> Poll<Result<LoginHttpResponse, String>> {
+        if !self.answered(url) {
             return Poll::Pending;
         }
         Poll::Ready(self.idp.reply.lock().unwrap().clone())
