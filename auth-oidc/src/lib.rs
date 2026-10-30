@@ -521,6 +521,12 @@ impl OidcModule {
             .insert(why.to_string())
     }
 
+    /// Have the issuer's discovery document asked for again at its next use (`refresh`), the one
+    /// held serving until then.
+    pub fn rediscover(&self) {
+        self.discovery.expire();
+    }
+
     /// Drop every cached verdict (`refresh`, the admin cache flush): how many there were.
     pub fn flush_verdicts(&self) -> usize {
         self.verdicts.flush()
