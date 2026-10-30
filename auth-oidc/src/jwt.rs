@@ -40,6 +40,7 @@ pub struct Header {
 /// The three base64url segments of a compact JWS, plus the signing input (`header.payload`) the
 /// signature covers. Produced by [`split`], consumed by [`verify_signature`].
 pub struct Parts<'a> {
+    /// The decoded JOSE header.
     pub header: Header,
     /// The raw decoded payload bytes (the claims JSON) — decoded once here, deserialized by the caller.
     pub payload: Vec<u8>,
