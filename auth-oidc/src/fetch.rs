@@ -50,6 +50,7 @@ use busbar_contract::abi::host::conn::connector::{
 use busbar_contract::abi::mechanism::call::{AbiStr, Blob};
 use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::sdk::conn::{ConnFailure, Host};
+use busbar_contract::abi::sdk::cred::FormBody;
 use busbar_contract::abi::sdk::door::abi_str;
 use busbar_contract::abi::sdk::exchange::{
     exchange, Exchange, ExchangeResponse, Request, REPLY_OVER_BOUND,
@@ -57,14 +58,26 @@ use busbar_contract::abi::sdk::exchange::{
 use busbar_contract::abi::sdk::net::{
     extract_normalized_host, host_is_private_or_loopback, scheme_is,
 };
-use busbar_contract::auth::{LoginHop, LoginHttpResponse};
-use zeroize::Zeroizing;
+use busbar_contract::auth::LoginHttpResponse;
 
 /// Upper bound on a JWKS / discovery document, and on a token endpoint's answer. A real JWKS is a
 /// handful of keys — a few KiB; even a tenant rotating aggressively stays well under this. The bound
 /// exists because the body arrives from a remote IdP whose `jwks_uri` is itself read out of a remote
 /// discovery document.
 pub const MAX_JWKS_BYTES: usize = 1024 * 1024;
+
+/// Upper bound on a token endpoint's answer: a token response is a few KiB of JSON.
+pub const MAX_TOKEN_BYTES: usize = 256 * 1024;
+
+/// The most bytes of an answer read on `need`: [`MAX_TOKEN_BYTES`] for the token exchange,
+/// [`MAX_JWKS_BYTES`] for discovery and the JWKS.
+pub const fn reply_cap(need: u32) -> usize {
+    if need == NEED_TOKEN {
+        MAX_TOKEN_BYTES
+    } else {
+        MAX_JWKS_BYTES
+    }
+}
 
 /// The bound on one request, milliseconds: 10s. Generous enough for a cold
 /// DNS + TLS handshake to a public IdP, short enough that a hung endpoint cannot hold an op.
@@ -195,14 +208,10 @@ pub trait Fetch {
     }
 
     /// The login token exchange, made by the plugin itself (an IdP login holds its own client
-    /// secret and makes its own token exchange): `hop` sent as a form ([`form`]). The
+    /// secret and makes its own token exchange): `form` POSTed to `url` ([`post_exchange`]). The
     /// answer is the status and the body, whatever the status; a request that got no answer is
     /// `Err`.
-    fn post(
-        &mut self,
-        hop: &LoginHop,
-        secret: Option<&str>,
-    ) -> Poll<Result<LoginHttpResponse, String>>;
+    fn post(&mut self, url: &str, form: &FormBody) -> Poll<Result<LoginHttpResponse, String>>;
 }
 
 /// Whether a request on `need` may go to `url` in plaintext: never for discovery or the JWKS; for
@@ -243,9 +252,32 @@ pub fn guard_refusal(url: &str) -> String {
     refusal(&host_of(url), GUARD_RULE)
 }
 
+/// `url` as an error or a log line names it: its userinfo (a user name, a password) removed.
+pub fn shown(url: &str) -> String {
+    match url::Url::parse(url) {
+        Ok(mut u) if !u.username().is_empty() || u.password().is_some() => {
+            let _ = u.set_username("");
+            let _ = u.set_password(None);
+            u.to_string()
+        }
+        Ok(_) => url.to_string(),
+        // Not a URL: everything between the scheme and an `@` before the path goes.
+        Err(_) => match url.split_once("://") {
+            Some((scheme, rest)) => {
+                let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+                match rest[..end].rfind('@') {
+                    Some(at) => format!("{scheme}://{}", &rest[at + 1..]),
+                    None => url.to_string(),
+                }
+            }
+            None => url.to_string(),
+        },
+    }
+}
+
 /// A request to `url` that got no answer: a fixed prefix, then why.
 pub fn failed(url: &str, why: impl Display) -> String {
-    format!("request to {url} failed: {why}")
+    format!("request to {} failed: {why}", shown(url))
 }
 
 /// A GET's answer as the document it carries: a non-2xx status is refused naming the status as
@@ -264,12 +296,12 @@ pub fn document(url: &str, status: u16, body: Vec<u8>) -> Result<String, String>
 fn refused_status(url: &str, status: u16) -> String {
     let shown =
         http::StatusCode::from_u16(status).map_or_else(|_| status.to_string(), |s| s.to_string());
-    format!("{url} returned HTTP {shown}")
+    format!("{} returned HTTP {shown}", self::shown(url))
 }
 
 /// The text for a body past `cap` bytes.
 fn over_cap(url: &str, cap: usize) -> String {
-    format!("{url} JWKS body exceeds the {cap}-byte cap")
+    format!("{} JWKS body exceeds the {cap}-byte cap", shown(url))
 }
 
 /// `body` as text, refusing anything over `cap` bytes or not UTF-8.
@@ -280,75 +312,7 @@ pub fn capped(url: &str, body: Vec<u8>, cap: usize) -> Result<String, String> {
     if body.len() > cap {
         return Err(over_cap(url, cap));
     }
-    String::from_utf8(body).map_err(|_| format!("{url} JWKS body is not UTF-8"))
-}
-
-/// The form `hop` is sent as, with `secret` filling the field
-/// `hop.secret_form_field` names. With no secret lent, that field is dropped rather than sent empty
-/// (a public client sends none).
-/// The pairs are wiped on drop: they carry the code, the code_verifier and the lent secret.
-pub fn form(hop: &LoginHop, secret: Option<&str>) -> Zeroizing<Vec<(String, String)>> {
-    let mut form = Zeroizing::new(hop.form.clone());
-    if let Some(field) = hop.secret_form_field.as_deref() {
-        match secret {
-            Some(secret) => match form.iter_mut().find(|(k, _)| k == field) {
-                Some(slot) => slot.1 = secret.to_string(),
-                None => form.push((field.to_string(), secret.to_string())),
-            },
-            None => form.retain(|(k, _)| k != field),
-        }
-    }
-    form
-}
-
-/// Whether `b` is written as itself in an `application/x-www-form-urlencoded` value (the WHATWG
-/// byte serializer the `url` crate writes with: ASCII alphanumerics and `*-._`).
-const fn form_kept(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || matches!(b, b'*' | b'-' | b'.' | b'_')
-}
-
-/// How many bytes `v` takes form-encoded.
-fn form_len(v: &str) -> usize {
-    v.bytes()
-        .map(|b| if form_kept(b) || b == b' ' { 1 } else { 3 })
-        .sum()
-}
-
-/// THE TOKEN REQUEST BODY: `pairs` as `name=value&...`, byte for byte what the `url` crate's form
-/// serializer wrote for them (space as `+`, every byte but ASCII alphanumerics and `*-._` as an
-/// upper-case `%XX`), built in ONE buffer sized to the exact length first, so no growth frees a
-/// partial copy of the client secret, code or code_verifier the form carries; wiped on drop.
-pub fn form_body(pairs: &[(String, String)]) -> Zeroizing<String> {
-    const HEX: &[u8; 16] = b"0123456789ABCDEF";
-    let len = pairs
-        .iter()
-        .map(|(n, v)| form_len(n) + 1 + form_len(v))
-        .sum::<usize>()
-        + pairs.len().saturating_sub(1);
-    let mut out = Zeroizing::new(String::with_capacity(len));
-    for (i, (name, value)) in pairs.iter().enumerate() {
-        if i > 0 {
-            out.push('&');
-        }
-        for (j, part) in [name, value].into_iter().enumerate() {
-            if j == 1 {
-                out.push('=');
-            }
-            for b in part.bytes() {
-                if form_kept(b) {
-                    out.push(char::from(b));
-                } else if b == b' ' {
-                    out.push('+');
-                } else {
-                    out.push('%');
-                    out.push(char::from(HEX[usize::from(b >> 4)]));
-                    out.push(char::from(HEX[usize::from(b & 0x0f)]));
-                }
-            }
-        }
-    }
-    debug_assert_eq!(out.len(), len, "the body is sized once");
-    out
+    String::from_utf8(body).map_err(|_| format!("{} JWKS body is not UTF-8", shown(url)))
 }
 
 /// The path and query a request to `url` names.
@@ -371,49 +335,50 @@ pub fn get_request(url: &url::Url) -> Request {
     }
 }
 
-/// The token exchange `hop` to `url` with `secret`: its method (POST when it names none a request
-/// can carry), the form url-encoded, then the hop's own fields.
-pub fn post_request(url: &url::Url, hop: &LoginHop, secret: Option<&str>) -> Request {
-    let method = http::Method::from_bytes(hop.method.as_bytes()).unwrap_or(http::Method::POST);
-    // The form holds the lent client secret, the code and the code_verifier: its pairs are wiped
-    // when they drop, once the body is encoded. The body is encoded into one exact-size wiped
-    // buffer, and that buffer itself (no copy) moves into the SDK's `exchange::Request`, whose
-    // holder wipes it.
-    let pairs = form(hop, secret);
-    let mut body = form_body(&pairs);
-    drop(pairs);
-    // Order on the wire: the form's content-type, then the client's `accept`.
-    let mut fields = vec![
-        (
-            b"content-type".to_vec(),
-            b"application/x-www-form-urlencoded".to_vec(),
-        ),
-        (b"accept".to_vec(), b"*/*".to_vec()),
-    ];
-    fields.extend(
-        hop.headers
-            .iter()
-            .map(|(n, v)| (n.as_bytes().to_vec(), v.as_bytes().to_vec())),
-    );
-    Request {
-        method: method.as_str().as_bytes().to_vec(),
+/// The token exchange to `url`: a POST of `form`, which the SDK encodes into the body (the
+/// sealed client secret written there and nowhere else, wiped with the request), the form's
+/// content-type then the client's `accept`.
+///
+/// # Errors
+/// The form could not be encoded, or the SDK refused the request: nothing is sent.
+pub fn post_exchange(url: &url::Url, form: &FormBody) -> Result<Exchange, ConnFailure> {
+    let body = form
+        .encoded()
+        .map_err(|e| ConnFailure::Failed(e.to_string()))?;
+    let request = Request {
+        method: b"POST".to_vec(),
         target: head_target(url),
-        fields,
-        body: std::mem::take(&mut *body).into_bytes(),
+        fields: vec![
+            (
+                b"content-type".to_vec(),
+                b"application/x-www-form-urlencoded".to_vec(),
+            ),
+            (b"accept".to_vec(), b"*/*".to_vec()),
+        ],
+        body: Vec::new(),
         timeout_ms: FETCH_TIMEOUT_MS,
-    }
+    };
+    Exchange::request_with(request, Vec::new(), Some(body))
 }
 
 /// What an op parks of its requests across PENDING: the handles its finished exchanges issued, and
 /// the exchange in flight (with the URL it fetches).
-#[derive(Debug, Default)]
+///
+/// Its `Debug` names nothing it holds: an exchange in flight carries the token request.
+#[derive(Default)]
 pub struct IoState {
     issued: u32,
     current: Option<(String, Exchange)>,
 }
 
-/// [`Fetch`] over the host's connector, for ONE entry of one op on `ticket`.
-#[derive(Debug)]
+impl std::fmt::Debug for IoState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IoState").finish_non_exhaustive()
+    }
+}
+
+/// [`Fetch`] over the host's connector, for ONE entry of one op on `ticket`. Its `Debug` names
+/// nothing it holds ([`IoState`]).
 pub struct HostIo<'h> {
     host: Option<&'h Host>,
     ticket: Ticket,
@@ -421,6 +386,12 @@ pub struct HostIo<'h> {
     anchored: bool,
     wanted: bool,
     refusals: Vec<String>,
+}
+
+impl std::fmt::Debug for HostIo<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HostIo").finish_non_exhaustive()
+    }
 }
 
 impl<'h> HostIo<'h> {
@@ -476,7 +447,7 @@ impl<'h> HostIo<'h> {
         &mut self,
         need: u32,
         url: &str,
-        request: impl FnOnce(&url::Url) -> Request,
+        request: impl FnOnce(&url::Url) -> Result<Exchange, ConnFailure>,
     ) -> Poll<Result<ExchangeResponse, String>> {
         let parsed = match url::Url::parse(url) {
             Ok(u) => u,
@@ -504,8 +475,7 @@ impl<'h> HostIo<'h> {
         let mut c = host.connector_from(self.ticket, self.state.issued);
         let mut ex = match self.state.current.take() {
             Some((at, ex)) if at == url => ex,
-            _ => match Exchange::request(request(&parsed)).map(|ex| ex.reply_limit(MAX_JWKS_BYTES))
-            {
+            _ => match request(&parsed).map(|ex| ex.reply_limit(reply_cap(need))) {
                 Ok(ex) => ex,
                 Err(e) => return Poll::Ready(Err(failed(url, e))),
             },
@@ -530,7 +500,7 @@ impl<'h> HostIo<'h> {
                                 .filter(|s| need != NEED_TOKEN && !(200..300).contains(s))
                             {
                                 Some(status) => refused_status(url, status),
-                                None => over_cap(url, MAX_JWKS_BYTES),
+                                None => over_cap(url, reply_cap(need)),
                             }
                         }
                         e => failed(url, e),
@@ -564,22 +534,17 @@ impl Fetch for HostIo<'_> {
     }
 
     fn get(&mut self, doc: Doc, url: &str) -> Poll<Result<String, String>> {
-        self.run(doc.need(), url, get_request)
+        self.run(doc.need(), url, |u| Exchange::request(get_request(u)))
             .map(|r| r.and_then(|reply| document(url, reply.status, reply.body)))
     }
 
-    fn post(
-        &mut self,
-        hop: &LoginHop,
-        secret: Option<&str>,
-    ) -> Poll<Result<LoginHttpResponse, String>> {
-        let url = hop.url.as_str();
-        self.run(NEED_TOKEN, url, |u| post_request(u, hop, secret))
+    fn post(&mut self, url: &str, form: &FormBody) -> Poll<Result<LoginHttpResponse, String>> {
+        self.run(NEED_TOKEN, url, |u| post_exchange(u, form))
             .map(|r| {
                 r.and_then(|reply| {
                     Ok(LoginHttpResponse {
                         status: reply.status,
-                        body: capped(url, reply.body, MAX_JWKS_BYTES)?,
+                        body: capped(url, reply.body, MAX_TOKEN_BYTES)?,
                     })
                 })
             })

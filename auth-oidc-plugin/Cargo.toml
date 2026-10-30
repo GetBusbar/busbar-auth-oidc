@@ -2,11 +2,11 @@
 [package]
 name = "busbar-auth-oidc-plugin"
 version = "1.6.0"
-publish = false            # first-party signed cdylib, shipped as a packed/signed tarball, not to crates.io
-edition = "2021"
-rust-version = "1.97"
+publish.workspace = true
+edition.workspace = true
+rust-version.workspace = true
 description = "The OIDC auth module as a droppable busbar plugin: a cdylib exporting the auth kind's door. Drop it in the plugins folder, add `oidc` to auth.chain, and configure it under `identity-providers:`."
-license = "Apache-2.0"
+license.workspace = true
 
 [lib]
 # cdylib: the DROPPED-IN door, exporting `busbar_plugin_door`.

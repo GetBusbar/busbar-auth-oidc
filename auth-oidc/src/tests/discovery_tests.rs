@@ -99,10 +99,10 @@ impl Fetch for TakenOver<'_> {
 
     fn post(
         &mut self,
-        hop: &busbar_contract::auth::LoginHop,
-        secret: Option<&str>,
+        url: &str,
+        form: &busbar_contract::abi::sdk::cred::FormBody,
     ) -> Poll<Result<busbar_contract::auth::LoginHttpResponse, String>> {
-        self.a.post(hop, secret)
+        self.a.post(url, form)
     }
 }
 

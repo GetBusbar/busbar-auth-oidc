@@ -2,11 +2,11 @@
 [package]
 name = "busbar-auth-oidc"
 version = "1.6.0"
-publish = false            # internal workspace crate; never goes to crates.io
-edition = "2021"
-rust-version = "1.97"
+publish.workspace = true
+edition.workspace = true
+rust-version.workspace = true
 description = "The OIDC auth module for busbar: verify an OpenID Connect JWT (JWKS signature + iss/aud/exp/nbf) and map its role/group claim to a Principal. Its door is the auth kind's memory-ABI door (verify and browser login). Crypto on ring (no jsonwebtoken/rsa)."
-license = "Apache-2.0"
+license.workspace = true
 
 [dependencies]
 # The ONE busbar crate a plugin names (#40: contract only). Pinned by git rev to the busbar commit in

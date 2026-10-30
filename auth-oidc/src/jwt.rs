@@ -40,6 +40,7 @@ pub struct Header {
 /// The three base64url segments of a compact JWS, plus the signing input (`header.payload`) the
 /// signature covers. Produced by [`split`], consumed by [`verify_signature`].
 pub struct Parts<'a> {
+    /// The decoded JOSE header.
     pub header: Header,
     /// The raw decoded payload bytes (the claims JSON) — decoded once here, deserialized by the caller.
     pub payload: Vec<u8>,
@@ -62,8 +63,9 @@ pub fn split(token: &str) -> Result<Parts<'_>, String> {
     let header_bytes = URL_SAFE_NO_PAD
         .decode(h)
         .map_err(|_| "malformed JWT: header is not base64url".to_string())?;
-    let header: Header =
-        serde_json::from_slice(&header_bytes).map_err(crate::json_err("malformed JWT header"))?;
+    let header: Header = serde_json::from_slice(&header_bytes).map_err(
+        busbar_contract::abi::sdk::auth_kit::json_error("malformed JWT header"),
+    )?;
     let payload = URL_SAFE_NO_PAD
         .decode(p)
         .map_err(|_| "malformed JWT: payload is not base64url".to_string())?;
@@ -173,7 +175,9 @@ pub fn verify_signature(parts: &Parts, key: &Jwk) -> Result<(), String> {
 
 /// Deserialize the token's claims payload as a JSON object.
 pub fn claims(parts: &Parts) -> Result<Value, String> {
-    serde_json::from_slice(&parts.payload).map_err(crate::json_err("malformed JWT claims"))
+    serde_json::from_slice(&parts.payload).map_err(busbar_contract::abi::sdk::auth_kit::json_error(
+        "malformed JWT claims",
+    ))
 }
 
 #[cfg(test)]

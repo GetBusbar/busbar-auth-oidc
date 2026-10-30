@@ -98,18 +98,20 @@ the first request.
 |---|---|---|---|
 | `issuer` | yes | — | The IdP's OIDC issuer URL, exact-matched against the JWT's `iss` claim: a token naming another issuer passes to the next auth in the chain, a token naming this one is verified in full. A blank value is refused at load. |
 | `audience` | yes | — | The expected `aud` claim (busbar's registered client/resource identifier at the IdP). A blank value is refused at load. |
-| `jwks_url` | no | discovered from `issuer` | The IdP's JWKS endpoint. Must be an `https` URL. Plain `http` is accepted only for a loopback host (127.0.0.0/8, `::1`, `localhost`); it loads with a warning, and since the key set is only ever fetched over https, every token is rejected until the URL is https. Anything else is refused at load. When omitted, resolved once at boot via OIDC discovery (`<issuer>/.well-known/openid-configuration`); a discovery failure refuses the boot. |
+| `jwks_url` | no | discovered from `issuer` | The IdP's JWKS endpoint. Must be an `https` URL. Plain `http` is accepted only for a loopback host (127.0.0.0/8, `::1`, `localhost`); it loads with a warning (also raised as the declared diagnostic `OIDC_JWKS_PLAIN_HTTP`, which the host audits), and since the key set is only ever fetched over https, every token is rejected until the URL is https. Anything else is refused at load. When omitted, resolved once at boot via OIDC discovery (`<issuer>/.well-known/openid-configuration`); a discovery failure refuses the boot. |
 | `role_claim` | no | `groups` | The claim mapped onto the resulting `Principal`'s roles; set `roles` to use Entra app-roles instead. |
 | `jwks_min_refetch_secs` | no | `60` | JWKS refetch rate-limit (seconds) — the bound on how often a kid-rotation refetch can occur. |
 | `jwks_ttl_secs` | no | `3600` | JWKS cache TTL (seconds). |
 | `ca_cert_pem` | no | — | An extra root CA (PEM) to trust for the JWKS/discovery HTTPS fetch, in addition to the built-in public (webpki) roots; the OS trust store is not consulted — for a private CA or a test fixture (this is exactly what `tests/e2e.rs` uses to trust its own self-signed local JWKS server). |
-| `client_id` | no | `audience` | The OAuth `client_id` presented on the browser-login authorize URL and token exchange. The client secret is never set here; busbar core holds it. |
+| `client_id` | no | `audience` | The OAuth `client_id` presented on the browser-login authorize URL and token exchange. The client secret is never written here: the `client_secret` key names a secret reference the host resolves and lends at `open`, and the plugin sends it only in the token exchange's form body (sealed by the SDK, wiped after). |
 | `scopes` | no | `[]` | Extra OAuth scopes requested at browser login, on top of the always-sent `openid`. |
 | `authorization_endpoint` | no | discovered from `issuer` | The IdP authorize endpoint for browser login. When omitted, taken from the issuer's discovery document (fetched at boot when `jwks_url` is omitted too, else on the first browser login); absent and undiscoverable means browser login is refused (token verification is unaffected). |
 | `token_endpoint` | no | discovered from `issuer` | The IdP token endpoint for the browser-login code exchange. Discovered like `authorization_endpoint` when omitted. |
 
 Unknown config fields are rejected (`deny_unknown_fields`) — a typo'd or
 stray key fails loudly at boot instead of being silently ignored.
+Every settings refusal is a `settings[.<key>]: <reason>` line (rendered by
+the host under the provider's name), and never quotes a settings value.
 
 ## Build
 
