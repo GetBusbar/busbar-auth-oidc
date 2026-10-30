@@ -834,6 +834,11 @@ impl OidcModule {
         io: &mut dyn Fetch,
     ) -> Step<Result<LoginOutcome, String>> {
         let Some(endpoint) = step_ok!(self.authorization_endpoint(now, io)) else {
+            tracing::info!(
+                module = "oidc",
+                "no authorization_endpoint is configured and the discovery document names none; \
+                 browser login refused"
+            );
             return Step::Ready(Ok(LoginOutcome::Reject));
         };
         // Fold the operator's request-time extra scopes into the configured set;
