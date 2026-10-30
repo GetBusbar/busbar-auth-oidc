@@ -2399,9 +2399,9 @@ fn a_begin_login_with_no_authorize_endpoint_is_logged() {
 /// quotes the IdP's bytes: what failed, the class and where survive.
 #[test]
 fn an_unreadable_idp_document_is_refused_without_echoing_it() {
-    let err = crate::jwks::JwkSet::parse(r#"{"keys":"Zq7distinctiveValue"}"#)
-        .err()
-        .expect("refused");
+    let Err(err) = crate::jwks::JwkSet::parse(r#"{"keys":"Zq7distinctiveValue"}"#) else {
+        panic!("refused");
+    };
     assert!(err.starts_with("invalid JWKS document: "), "{err}");
     assert!(!err.contains("Zq7distinctiveValue"), "echoed: {err}");
     assert!(err.contains("line 1"), "where is kept: {err}");
