@@ -800,6 +800,43 @@ fn a_rejected_token_is_logged_at_info_with_a_reason() {
     }
 }
 
+/// L13: a host clock that cannot be read (the `i64::MAX` sentinel `clock_or_fail_closed` maps it
+/// to) is the host's fault, not the token's: a bearer of this issuer FAILS its verify and a login's
+/// id_token is an OUTAGE, each with a reason naming the clock and a warn — never a 401.
+#[test]
+fn an_unreadable_host_clock_is_a_failure_not_a_bad_credential() {
+    let key = TestKey::generate(KID);
+    let m = module_with(&key, "groups");
+    let token = key.mint(&base_claims(now_unix()));
+    let cap = busbar_test_kit::warn_capture::WarnCapture::default();
+    let (bearer, login) = tracing::subscriber::with_default(cap.clone(), || {
+        let bearer = ready(m.m.verify(
+            Some(&token),
+            i64::MAX,
+            Instant::now(),
+            &mut m.idp.at_once(Some(ME)),
+        ));
+        let resp = LoginHttpResponse {
+            status: 200,
+            body: serde_json::json!({ "id_token": token }).to_string(),
+        };
+        let login = ready(m.m.identity_from_token_response(
+            &resp,
+            i64::MAX,
+            Instant::now(),
+            &mut m.idp.at_once(Some(ME)),
+        ));
+        (bearer, login)
+    });
+    for (what, answered) in [("bearer", bearer.map(|_| ())), ("login", login.map(|_| ()))] {
+        match answered {
+            Err(e) => assert!(e.contains("clock"), "{what}: {e}"),
+            Ok(()) => panic!("{what}: an unreadable clock is a failure, not a verdict"),
+        }
+    }
+    assert!(cap.contains("clock"), "warned: {:?}", cap.messages());
+}
+
 #[test]
 fn unknown_kid_after_refetch_is_rejected() {
     let key = TestKey::generate("real-kid");
