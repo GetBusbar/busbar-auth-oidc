@@ -546,6 +546,30 @@ fn a_waiter_whose_fetch_failed_fails_closed_inside_the_rate_limit() {
     assert_eq!(idp.calls(), 1);
 }
 
+/// O6: a fetch that runs to its OWN timeout (`FETCH_TIMEOUT_MS`, connect + total) is not yet
+/// abandoned: its owner re-enters with the timeout's answer and settles it, so a caller arriving
+/// at that instant waits on it rather than taking it over (dropping the owner's result and making
+/// a second fetch). The abandonment bound is strictly past the fetch's deadline.
+#[test]
+fn a_fetch_running_to_its_own_timeout_is_not_taken_over() {
+    let c = JwksCache::new(Duration::from_millis(1), Duration::from_secs(3600));
+    let idp = Idp::new(jwks("k1"));
+    let t0 = Instant::now();
+    let mut owner = idp.pending(ticket(1));
+    assert_eq!(
+        c.with_key(URL, "k1", t0, &mut owner, |_| Ok(())),
+        Step::Pending
+    );
+    let deadline = t0 + Duration::from_millis(crate::fetch::FETCH_TIMEOUT_MS);
+    let mut cold = idp.pending(ticket(2));
+    assert_eq!(
+        c.with_key(URL, "k1", deadline, &mut cold, |_| Ok(())),
+        Step::Wait,
+        "a fetch at its own deadline still holds its flight"
+    );
+    assert_eq!(idp.calls(), 1, "no second fetch");
+}
+
 /// A flight whose op never came back (cancelled, faulted) is abandoned after 1.5.5's fetch bound:
 /// a cold caller waits on it until then, and takes it over after.
 #[test]
