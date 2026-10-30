@@ -211,7 +211,8 @@ impl OidcVerifier {
             Some(iss) if iss == self.issuer => {}
             Some(other) => {
                 return Err(format!(
-                    "token issuer '{other}' does not match the configured issuer"
+                    "token issuer '{}' does not match the configured issuer",
+                    untrusted(other)
                 ))
             }
             None => return Err("token has no 'iss' claim".to_string()),
@@ -366,8 +367,24 @@ impl OidcVerifier {
     }
 }
 
-/// The longest token issuer a log line repeats: the claim is unverified caller input.
-const ISSUER_LOG_MAX: usize = 128;
+/// The longest far-end or attacker string an error or log line repeats, in characters.
+const UNTRUSTED_MAX: usize = 64;
+
+/// A FAR-END string (a JWKS key's `kty`/`crv`, a discovery document's `issuer`) or an ATTACKER one
+/// (a token's `alg`, `kid`, `crit`, `iss`) as an error or log line repeats it: escaped (a newline or
+/// a terminal escape cannot forge or colour a record) and capped at [`UNTRUSTED_MAX`] characters,
+/// then `…`. The one helper every such site uses.
+pub fn untrusted(s: &str) -> String {
+    let mut shown: String = s
+        .chars()
+        .take(UNTRUSTED_MAX)
+        .flat_map(char::escape_debug)
+        .collect();
+    if s.chars().nth(UNTRUSTED_MAX).is_some() {
+        shown.push('…');
+    }
+    shown
+}
 
 /// Issuer routing: `None` when the (UNVERIFIED) claims `payload` names exactly `issuer` as its
 /// `iss`, so the token is this provider's to verify; otherwise the issuer it names instead, as a
@@ -381,12 +398,7 @@ fn foreign_issuer(payload: &[u8], issuer: &str) -> Option<String> {
         .and_then(Value::as_str)
     {
         Some(iss) if iss == issuer => None,
-        Some(iss) => Some(
-            iss.chars()
-                .take(ISSUER_LOG_MAX)
-                .flat_map(char::escape_debug)
-                .collect(),
-        ),
+        Some(iss) => Some(untrusted(iss)),
         None => Some("<none>".to_string()),
     }
 }

@@ -280,19 +280,19 @@ impl JwksCache {
             return Err(KeyError::Unavailable(format!(
                 "no cached JWKS key matches the token's kid '{}' and the latest fetch of the key \
                  set from {} failed, so the token cannot be judged",
-                kid.escape_debug(),
+                crate::untrusted(kid),
                 crate::fetch::shown(url)
             )));
         }
         // `kid` comes from the UNSIGNED header of an untrusted bearer and this error reaches a
-        // warn log before any signature has been accepted, so it is escaped: a kid carrying a
-        // newline or a terminal escape must not forge or colour log records. Printable kids are
-        // byte-identical.
+        // log before any signature has been accepted, so it is escaped and capped
+        // ([`crate::untrusted`]): a kid carrying a newline or a terminal escape must not forge or
+        // colour log records. Short printable kids are byte-identical.
         Err(KeyError::Mismatch(format!(
             "no JWKS key matches the token's kid '{}' (a rotation refetch is bounded by \
              jwks_min_refetch_secs, so the key set may not have been refetched for this token); the \
              signing key is unknown to the configured jwks_url",
-            kid.escape_debug()
+            crate::untrusted(kid)
         )))
     }
 

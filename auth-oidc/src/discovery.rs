@@ -54,7 +54,7 @@ pub fn check_document(
         Some(other) => Err(format!(
             "OIDC discovery document's issuer '{}' does not match the configured issuer '{}' \
              ({url}); refusing to trust its jwks_uri",
-            other.escape_debug(),
+            crate::untrusted(other),
             cfg.issuer
         )),
         None => Err(format!(
