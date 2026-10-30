@@ -252,9 +252,32 @@ pub fn guard_refusal(url: &str) -> String {
     refusal(&host_of(url), GUARD_RULE)
 }
 
+/// `url` as an error or a log line names it: its userinfo (a user name, a password) removed.
+pub fn shown(url: &str) -> String {
+    match url::Url::parse(url) {
+        Ok(mut u) if !u.username().is_empty() || u.password().is_some() => {
+            let _ = u.set_username("");
+            let _ = u.set_password(None);
+            u.to_string()
+        }
+        Ok(_) => url.to_string(),
+        // Not a URL: everything between the scheme and an `@` before the path goes.
+        Err(_) => match url.split_once("://") {
+            Some((scheme, rest)) => {
+                let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+                match rest[..end].rfind('@') {
+                    Some(at) => format!("{scheme}://{}", &rest[at + 1..]),
+                    None => url.to_string(),
+                }
+            }
+            None => url.to_string(),
+        },
+    }
+}
+
 /// A request to `url` that got no answer: a fixed prefix, then why.
 pub fn failed(url: &str, why: impl Display) -> String {
-    format!("request to {url} failed: {why}")
+    format!("request to {} failed: {why}", shown(url))
 }
 
 /// A GET's answer as the document it carries: a non-2xx status is refused naming the status as
@@ -273,12 +296,12 @@ pub fn document(url: &str, status: u16, body: Vec<u8>) -> Result<String, String>
 fn refused_status(url: &str, status: u16) -> String {
     let shown =
         http::StatusCode::from_u16(status).map_or_else(|_| status.to_string(), |s| s.to_string());
-    format!("{url} returned HTTP {shown}")
+    format!("{} returned HTTP {shown}", self::shown(url))
 }
 
 /// The text for a body past `cap` bytes.
 fn over_cap(url: &str, cap: usize) -> String {
-    format!("{url} JWKS body exceeds the {cap}-byte cap")
+    format!("{} JWKS body exceeds the {cap}-byte cap", shown(url))
 }
 
 /// `body` as text, refusing anything over `cap` bytes or not UTF-8.
@@ -289,7 +312,7 @@ pub fn capped(url: &str, body: Vec<u8>, cap: usize) -> Result<String, String> {
     if body.len() > cap {
         return Err(over_cap(url, cap));
     }
-    String::from_utf8(body).map_err(|_| format!("{url} JWKS body is not UTF-8"))
+    String::from_utf8(body).map_err(|_| format!("{} JWKS body is not UTF-8", shown(url)))
 }
 
 /// The path and query a request to `url` names.
