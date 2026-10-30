@@ -643,11 +643,31 @@ impl OidcModule {
         now_mono: Instant,
         io: &mut dyn Fetch,
     ) -> Step<Result<LoginOutcome, String>> {
-        // A non-2xx token-endpoint response (e.g. invalid_grant) never carries a usable id_token.
-        // A 5xx or 429 is the IdP unable to answer: an outage, logged with its status (the
-        // operator's to see: warn). Any other non-2xx refuses the user's code (an end-user
-        // decline: info).
-        if resp.status >= 500 || resp.status == 429 {
+        // A non-2xx token-endpoint response never carries a usable id_token. OWNER-SIGNED
+        // 2026-10-30: only an RFC 6749 §5.2 credential error answers 401 — a 400 or 401 carrying a
+        // §5.2 JSON `error` is a declined login, logged with the allow-listed code (the client's own
+        // misconfiguration at warn, the user's code at info). Any other non-2xx — 5xx, 429, a
+        // redirect, 403, 404, 408, a 4xx with no §5.2 body — is the IdP not answering the
+        // exchange: an outage, logged with its status (the operator's to see: warn).
+        if !(200..300).contains(&resp.status) {
+            if let (400 | 401, Some(code)) = (resp.status, oauth_error(&resp.body)) {
+                if matches!(code, "invalid_client" | "unauthorized_client") {
+                    tracing::warn!(
+                        module = "oidc",
+                        status = resp.status,
+                        error = code,
+                        "OIDC token endpoint refused this client (check client_id and the client secret); login declined"
+                    );
+                } else {
+                    tracing::info!(
+                        module = "oidc",
+                        status = resp.status,
+                        error = code,
+                        "OIDC token endpoint refused the login's code; login declined"
+                    );
+                }
+                return Step::Ready(Ok(LoginOutcome::Reject));
+            }
             tracing::warn!(
                 module = "oidc",
                 status = resp.status,
@@ -657,14 +677,6 @@ impl OidcModule {
                 "the identity provider is unavailable: its token endpoint answered HTTP {}",
                 resp.status
             )));
-        }
-        if !(200..300).contains(&resp.status) {
-            tracing::info!(
-                module = "oidc",
-                status = resp.status,
-                "OIDC token endpoint answered a non-2xx status; login declined"
-            );
-            return Step::Ready(Ok(LoginOutcome::Reject));
         }
         let body = match serde_json::from_str::<Value>(&resp.body).map_err(
             busbar_contract::abi::sdk::auth_kit::json_error("token response"),
@@ -953,6 +965,34 @@ pub(crate) fn nonce_binds(body: &str, nonce: &str) -> bool {
         .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
         .and_then(|c| c.get("nonce").and_then(Value::as_str).map(str::to_string));
     claimed.is_some_and(|c| busbar_contract::constant_time_eq(&c, nonce))
+}
+
+/// The RFC 6749 §5.2 error codes a token endpoint answers a refused exchange with.
+const OAUTH_ERRORS: &[&str] = &[
+    "invalid_request",
+    "invalid_client",
+    "invalid_grant",
+    "unauthorized_client",
+    "unsupported_grant_type",
+    "invalid_scope",
+];
+
+/// The RFC 6749 §5.2 error a token-endpoint `body` carries, as a log may print it: the allow-listed
+/// code, `(unlisted)` for any other string (an extension code is never echoed); `None` when the
+/// body is not a JSON object with a string `error` (no §5.2 body at all).
+fn oauth_error(body: &str) -> Option<&'static str> {
+    #[derive(Deserialize)]
+    struct ErrorBody {
+        error: String,
+    }
+    let code = serde_json::from_str::<ErrorBody>(body).ok()?.error;
+    Some(
+        OAUTH_ERRORS
+            .iter()
+            .find(|c| **c == code)
+            .copied()
+            .unwrap_or("(unlisted)"),
+    )
 }
 
 /// The OAuth `client_id` to present: the explicit `client_id`, else the `audience` (the common
