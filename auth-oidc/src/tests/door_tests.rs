@@ -343,3 +343,25 @@ fn bad_settings_are_refused_in_the_contracts_settings_line_form() {
         "secrets: `client_secret` is not UTF-8"
     );
 }
+
+/// L15: a `refresh` that keeps the opened module (the admin cache flush, unchanged settings) has
+/// the issuer's discovery document asked for again on its next use, as a `refresh` with new
+/// settings would.
+#[test]
+fn a_refresh_rediscovers_the_issuer_s_document() {
+    let settings = serde_json::json!({ "issuer": ISSUER, "audience": AUDIENCE })
+        .to_string()
+        .into_bytes();
+    let doc = serde_json::json!({ "issuer": ISSUER, "jwks_uri": "https://jwks.test/keys" });
+    let idp = Idp::new(doc.to_string());
+    let oidc = Oidc::open(&settings, &lent(b""), 1).expect("opens");
+    let url = |oidc: &Oidc| {
+        ready(oidc.now().module.jwks_url(Instant::now(), &mut idp.at_once(Some(ME))))
+            .map(std::borrow::Cow::into_owned)
+    };
+    assert_eq!(url(&oidc).as_deref(), Ok("https://jwks.test/keys"));
+    assert_eq!(idp.calls(), 1);
+    oidc.refresh(&settings, &lent(b""), 2).expect("refreshes");
+    assert_eq!(url(&oidc).as_deref(), Ok("https://jwks.test/keys"));
+    assert_eq!(idp.calls(), 2, "the refresh has the document asked for again");
+}
