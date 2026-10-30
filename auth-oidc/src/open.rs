@@ -28,15 +28,16 @@ use crate::{check_jwks_url, OidcConfig, OidcModule};
 /// No settings, settings that are not this module's config, or a blank `issuer`/`audience`.
 pub fn config(cfg: &str) -> Result<OidcConfig, String> {
     if cfg.trim().is_empty() {
-        return Err("oidc plugin requires config (issuer, audience); none provided".to_string());
+        return Err(
+            "settings: none provided; the oidc plugin requires issuer and audience".to_string(),
+        );
     }
-    let cfg: OidcConfig = serde_json::from_str(cfg).map_err(
-        busbar_contract::abi::sdk::auth_kit::json_error("invalid oidc plugin config"),
-    )?;
+    let cfg: OidcConfig = serde_json::from_str(cfg)
+        .map_err(busbar_contract::abi::sdk::auth_kit::json_error("settings"))?;
     for (key, value) in [("issuer", &cfg.issuer), ("audience", &cfg.audience)] {
         if value.trim().is_empty() {
             return Err(format!(
-                "invalid oidc plugin config: `{key}` is blank; it must name the token {key}"
+                "settings.{key}: is blank; it must name the token {key}"
             ));
         }
     }
