@@ -1961,11 +1961,11 @@ fn untrusted_kid_and_alg_are_escaped_in_error_text() {
     ))
     .expect_err("an unknown kid must not verify");
     assert!(
-        !err.contains('\n') && !err.contains('\u{1b}'),
+        !err.message().contains('\n') && !err.message().contains('\u{1b}'),
         "the unknown-kid error must escape the header's kid: {err:?}"
     );
     assert!(
-        err.contains("a\\nb"),
+        err.message().contains("a\\nb"),
         "the kid is still named, escaped: {err:?}"
     );
 
@@ -2371,13 +2371,14 @@ fn a_token_claiming_the_first_providers_issuer_with_a_bad_signature_is_refused_b
     let (key_a, a, key_b, b) = two_providers();
     let now = 1_700_000_000;
     let forged = key_b.mint(&claims_of(ISSUER, AUDIENCE, now));
-    let cap = busbar_test_kit::warn_capture::WarnCapture::default();
+    let cap = busbar_test_kit::warn_capture::WarnCapture::capturing_debug();
     let walked = tracing::subscriber::with_default(cap.clone(), || chain(&[&a, &b], &forged, now));
     assert_eq!(walked, Walked::Refused(0));
     assert_eq!(b.idp.calls(), 0, "B never judged it");
     assert!(
-        cap.contains("signature verification failed"),
-        "A's refusal names its reason"
+        cap.contains("OIDC token rejected") && cap.contains("signature"),
+        "A's refusal names its reason: {:?}",
+        cap.messages()
     );
     // Our issuer with a wrong audience, or expired, is refused by A too: never handed on.
     for c in [

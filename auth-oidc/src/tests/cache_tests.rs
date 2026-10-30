@@ -23,6 +23,7 @@ fn jwks(kid: &str) -> String {
 /// `with_key` for kid `k1` on one op that answers at once.
 fn serve(c: &JwksCache, idp: &Idp, now: Instant) -> Result<(), String> {
     ready(c.with_key(URL, "k1", now, &mut idp.at_once(Some(ME)), |_| Ok(())))
+        .map_err(|e| e.to_string())
 }
 
 /// THE CLASS TEST: signature verification must not be serialised. `f` runs on a snapshot with no
@@ -345,7 +346,7 @@ fn with_key_reports_the_last_error_when_no_key_sharing_a_kid_verifies() {
         |key| Err::<(), _>(format!("rejected: {}", key.kty)),
     ))
     .unwrap_err();
-    assert_eq!(err, "rejected: EC");
+    assert_eq!(err, KeyError::Mismatch("rejected: EC".to_string()));
 }
 
 /// KEY ROTATION: a kid absent from a fresh set refetches ONCE (rate-limited), pending on that
@@ -380,7 +381,7 @@ fn an_unknown_kid_pends_one_rotation_refetch_and_carries_on_from_it() {
     ))
     .unwrap_err();
     assert!(
-        err.contains("no JWKS key matches the token's kid 'ghost'"),
+        matches!(&err, KeyError::Mismatch(m) if m.contains("no JWKS key matches the token's kid 'ghost'")),
         "{err}"
     );
     assert_eq!(idp.calls(), 2, "the rate limit held off a second refetch");
@@ -535,10 +536,13 @@ fn a_waiter_whose_fetch_failed_fails_closed_inside_the_rate_limit() {
     );
     assert_eq!(
         c.with_key(URL, "k1", t0, &mut winner, |_| Ok(())),
-        Step::Ready(Err("provider unreachable".to_string()))
+        Step::Ready(Err(KeyError::Unavailable("provider unreachable".to_string())))
     );
     let err = ready(c.with_key(URL, "k1", t0, &mut waiter, |_| Ok(()))).unwrap_err();
-    assert!(err.contains("cannot verify any token"), "{err}");
+    assert!(
+        matches!(&err, KeyError::Unavailable(m) if m.contains("cannot verify any token")),
+        "{err}"
+    );
     assert_eq!(idp.calls(), 1);
 }
 
@@ -583,7 +587,10 @@ fn a_ticketless_caller_never_claims_or_waits() {
     let err = ready(c.with_key(URL, "k1", t0, &mut idp.at_once(None), |_| Ok(()))).unwrap_err();
     assert_eq!(
         err,
-        "request to https://idp.example/jwks failed: the call runs on no ticket and cannot pend"
+        KeyError::Unavailable(
+            "request to https://idp.example/jwks failed: the call runs on no ticket and cannot pend"
+                .to_string()
+        )
     );
     assert_eq!(idp.calls(), 0);
 
@@ -620,7 +627,7 @@ fn an_abandoned_flight_does_not_keep_the_rate_limit_window_shut_for_a_cold_calle
     let mut b = idp.pending(ticket(2));
     let first = c.with_key(URL, "k1", later, &mut b, f);
     assert!(
-        !matches!(&first, Step::Ready(Err(e)) if e.contains("no JWKS has been fetched")),
+        !matches!(&first, Step::Ready(Err(e)) if e.message().contains("no JWKS has been fetched")),
         "a cold caller was refused though no attempt failed: {first:?}"
     );
     assert_eq!(
@@ -668,5 +675,8 @@ fn a_rate_limited_unknown_kid_error_does_not_claim_a_refetch() {
     ))
     .unwrap_err();
     assert_eq!(idp.calls(), 1, "rate-limited: no refetch");
-    assert!(err.contains("may not have been refetched"), "{err}");
+    assert!(
+        matches!(&err, KeyError::Mismatch(m) if m.contains("may not have been refetched")),
+        "{err}"
+    );
 }

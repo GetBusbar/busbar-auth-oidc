@@ -51,7 +51,7 @@ pub mod jwt;
 mod open;
 pub mod verdicts;
 
-pub use cache::JwksCache;
+pub use cache::{JwksCache, KeyError};
 pub use discovery::Discovery;
 pub use fetch::Fetch;
 pub use flight::Step;
@@ -610,18 +610,18 @@ impl OidcModule {
     /// [`OidcVerifier::validate_claims`] for iss/aud/exp/nbf) to produce a [`Principal`]. The `aud`
     /// checked is the OAuth `client_id`, not the bearer `audience` (OIDC Core 1.0 §3.1.3.7 step 3).
     /// A missing/malformed body, a missing `id_token`, or any signature/claim failure is a
-    /// fail-closed `Reject`. So is an `id_token` whose key set cannot be had — fetched, or its URL
-    /// discovered: a key set that cannot be had is a `Reject`, which the host renders as the
-    /// declined sign-in, with a warn naming why.
+    /// fail-closed `Reject`. An `id_token` whose key set cannot be had — fetched, or its URL
+    /// discovered — is an OUTAGE (OWNER-SIGNED 2026-10-30: an IdP outage is never a 401): the
+    /// error, which the door answers `LOGIN_OUTAGE`, with a warn naming why.
     ///
     /// NOTE: OIDC `nonce` is minted by the CORE at begin and is NOT carried back on
     /// the callback, so nonce binding is the core's to enforce; this reuses the existing
     /// signature+claims path (iss/aud/exp) that the verify module already trusts.
     ///
     /// # Errors
-    /// The identity provider could not answer: its token endpoint answered 5xx or 429. That is an
-    /// outage (the host answers 503, retryable), never a declined login. Every
-    /// other failure is a `Reject`.
+    /// The identity provider could not answer: its token endpoint answered 5xx or 429, or the
+    /// id_token's key set cannot be had. That is an outage (the host answers 503, retryable), never
+    /// a declined login. Every other failure is a `Reject`.
     pub fn identity_from_token_response(
         &self,
         resp: &LoginHttpResponse,
@@ -668,21 +668,15 @@ impl OidcModule {
             );
             return Step::Ready(Ok(LoginOutcome::Reject));
         };
-        let verdict = match step!(self.verify_with(
+        // The key set cannot be had (fetched, or its URL discovered): an outage, logged by
+        // `verify_with`, answered as the error.
+        let verdict = step_ok!(self.verify_with(
             &self.login_verifier,
             id_token,
             now_unix,
             now_mono,
             io
-        )) {
-            Ok(v) => v,
-            // The key set's URL could not be discovered: the key set cannot be had, which is
-            // answered as a key set that could not be fetched — a declined login, logged.
-            Err(e) => {
-                tracing::warn!(module = "oidc", error = %e, "OIDC token signature verification failed");
-                AuthVerdict::Reject
-            }
-        };
+        ));
         Step::Ready(Ok(match verdict {
             AuthVerdict::Identify(p) => LoginOutcome::Identify(p),
             // A non-JWT / bad-sig / bad-claim id_token in a login callback is a hard failure —
@@ -702,12 +696,13 @@ impl OidcModule {
     /// The full verification of one presented bearer credential → an [`AuthVerdict`]: none
     /// presented, one that is not a JWT, or a JWT whose (unverified) `iss` is not this provider's
     /// issuer, is not ours (`Pass`, to the next auth in the chain); a JWT naming this provider's
-    /// issuer is verified in full, and any failure is a `Reject`. An identity is cached for its TTL
+    /// issuer is verified in full, and any failure of the token is a `Reject`. An identity is cached for its TTL
     /// and answered from the cache until it expires or a `refresh` drops it; a REJECT or a PASS is
     /// never cached.
     ///
     /// # Errors
-    /// The JWKS url could not be discovered.
+    /// The key set cannot be had: the JWKS url could not be discovered, or the key set could not be
+    /// fetched (an IdP outage, never a `Reject`).
     pub fn verify(
         &self,
         token: Option<&str>,
@@ -730,7 +725,7 @@ impl OidcModule {
     /// [`Self::verify`] past its cache: the credential judged, an identity cached.
     ///
     /// # Errors
-    /// The JWKS url could not be discovered.
+    /// As [`Self::verify`].
     pub fn judge(
         &self,
         token: Option<&str>,
@@ -792,16 +787,31 @@ impl OidcModule {
             return Step::Ready(Ok(AuthVerdict::Pass));
         }
         let kid = parts.header.kid.as_deref().unwrap_or_default();
-        let url = step_ok!(self.jwks_url(now_mono, io));
+        // The key set's URL could not be discovered: the key set cannot be had, an OUTAGE.
+        let url = match step!(self.jwks_url(now_mono, io)) {
+            Ok(url) => url,
+            Err(e) => {
+                tracing::warn!(module = "oidc", error = %e, "OIDC key set is unavailable; the token cannot be judged");
+                return Step::Ready(Err(e));
+            }
+        };
 
         // Verify the signature against the JWKS key for this kid (fetching / rotation-refetching as
-        // needed). A signature or key error is a REJECT — a presented-but-invalid credential.
+        // needed). No key that verifies is a REJECT — a presented-but-invalid credential; a key set
+        // that cannot be had is an OUTAGE (OWNER-SIGNED 2026-10-30: never a 401).
         let signed = step!(self.jwks.with_key(&url, kid, now_mono, io, |key| {
             jwt::verify_signature(&parts, key)
         }));
-        if let Err(e) = signed {
-            tracing::warn!(module = "oidc", error = %e, "OIDC token signature verification failed");
-            return Step::Ready(Ok(AuthVerdict::Reject));
+        match signed {
+            Ok(()) => {}
+            Err(KeyError::Unavailable(e)) => {
+                tracing::warn!(module = "oidc", error = %e, "OIDC key set is unavailable; the token cannot be judged");
+                return Step::Ready(Err(e));
+            }
+            Err(KeyError::Mismatch(e)) => {
+                tracing::info!(module = "oidc", reason = "signature", error = %e, "OIDC token rejected: no key in the key set verifies it");
+                return Step::Ready(Ok(AuthVerdict::Reject));
+            }
         }
 
         let claims = match jwt::claims(&parts) {

@@ -712,13 +712,13 @@ fn red_an_oversized_error_reply_names_its_status_and_is_cut_off_at_the_cap() {
     );
 }
 
-/// THE LOGIN WHOSE KEY SET CANNOT BE HAD, through the real dispatcher (ARCHITECT ruling: 1.5.5's
-/// answer). The token endpoint answers an identity token, but the key set's URL is to be
-/// discovered and the issuer's discovery answers 503: the door answers `LOGIN_BAD_CREDENTIAL`
-/// (the host's 401 "Sign-in was declined", as 1.5.5 rendered a key set its plugin could not
-/// fetch), never `LOGIN_OUTAGE` (502, which 1.5.5 kept for a token hop that failed).
+/// THE LOGIN WHOSE KEY SET CANNOT BE HAD, through the real dispatcher (OWNER-SIGNED 2026-10-30:
+/// an IdP outage is never a 401). The token endpoint answers an identity token, but the key set's
+/// URL is to be discovered and the issuer's discovery answers 503: the door answers
+/// `LOGIN_OUTAGE` (the IdP could not be had), never `LOGIN_BAD_CREDENTIAL` (1.5.5 rendered this
+/// as the declined sign-in; the owner reversed that).
 #[test]
-fn a_login_whose_key_set_cannot_be_had_is_declined_not_an_outage() {
+fn a_login_whose_key_set_cannot_be_had_is_an_outage_not_declined() {
     let _one = support::serial();
     let key = Issuer::start(UNUSED_ISSUER, KID);
     let idp = Idp::new(&key);
@@ -731,8 +731,8 @@ fn a_login_whose_key_set_cannot_be_had_is_declined_not_an_outage() {
     open(&b.plugin, &cfg.to_string(), Some(CLIENT_SECRET)).expect("opens");
 
     let answer = b.complete("code-1", ("st", NONCE), REDIRECT, "the-verifier", None);
-    assert_eq!(answer.trim_end(), format!("verdict {LOGIN_BAD_CREDENTIAL}"));
-    assert_ne!(answer.trim_end(), format!("verdict {LOGIN_OUTAGE}"));
+    assert_eq!(answer.trim_end(), format!("verdict {LOGIN_OUTAGE}"));
+    assert_ne!(answer.trim_end(), format!("verdict {LOGIN_BAD_CREDENTIAL}"));
     assert_eq!(idp.sent_to("/token").len(), 1, "the code was redeemed");
     assert_eq!(
         idp.sent_to(DISCOVERY_PATH).len(),
