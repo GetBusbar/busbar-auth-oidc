@@ -2055,7 +2055,7 @@ fn login_fails_closed_without_endpoints() {
         redirect_uri: "https://busbar.test/auth/token".to_string(),
         state: "st".to_string(),
         code_challenge: "ch".to_string(),
-        nonce: None,
+        nonce: Some("nc".to_string()),
         scopes: Vec::new(),
     };
     assert!(matches!(m.begin_login(&begin), LoginOutcome::Reject));
@@ -2658,7 +2658,7 @@ fn a_begin_login_with_no_authorize_endpoint_is_logged() {
         redirect_uri: "https://busbar.test/auth/token".to_string(),
         state: "st".to_string(),
         code_challenge: "ch".to_string(),
-        nonce: None,
+        nonce: Some("nc".to_string()),
         scopes: Vec::new(),
     };
     let cap = busbar_test_kit::warn_capture::WarnCapture::capturing_debug();
