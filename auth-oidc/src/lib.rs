@@ -794,26 +794,25 @@ impl OidcModule {
         now_mono: Instant,
         io: &mut dyn Fetch,
     ) -> Step<Result<AuthVerdict, String>> {
-        let parts = match jwt::split(token) {
-            Ok(p) => p,
-            // Not a well-formed JWT ⇒ not our credential shape. `Pass` so a later chain module (or
-            // the mode default) can handle it — a random opaque bearer is not an OIDC failure.
-            Err(_) => {
-                tracing::debug!(
-                    module = "oidc",
-                    "bearer is not a JWT: not this provider's credential; passed to the next auth"
-                );
-                return Step::Ready(Ok(AuthVerdict::Pass));
-            }
+        // Not shaped as a compact JWS (three segments, a base64url payload) ⇒ not our credential
+        // shape. `Pass` so a later chain module (or the mode default) can handle it — a random
+        // opaque bearer is not an OIDC failure.
+        let Some(payload) = jwt::payload(token) else {
+            tracing::debug!(
+                module = "oidc",
+                "bearer is not a JWT: not this provider's credential; passed to the next auth"
+            );
+            return Step::Ready(Ok(AuthVerdict::Pass));
         };
-        // ISSUER ROUTING (multi-issuer resource servers): the token's UNVERIFIED `iss` routes it.
+        // ISSUER ROUTING (multi-issuer resource servers): the token's UNVERIFIED `iss` routes it,
+        // read from the payload BEFORE the header is decoded.
         // One naming another issuer, or none, is not this provider's credential: `Pass`, so a
         // second identity provider later in the chain can judge it, and the chain's end refuses a
         // token no provider claims. Nothing is fetched for it. One naming THIS issuer is this
         // provider's alone and is verified in full below; any failure is a `Reject` that stops the
         // chain, never a fall-through. The unverified claim only ever narrows: it selects which
         // provider judges, never what that provider accepts.
-        if let Some(other) = foreign_issuer(&parts.payload, &verifier.issuer) {
+        if let Some(other) = foreign_issuer(&payload, &verifier.issuer) {
             tracing::info!(
                 module = "oidc",
                 token_issuer = %other,
@@ -822,6 +821,14 @@ impl OidcModule {
             );
             return Step::Ready(Ok(AuthVerdict::Pass));
         }
+        // Ours: a header that does not decode is this provider's to refuse.
+        let parts = match jwt::split(token) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::info!(module = "oidc", reason = "malformed", error = %e, "OIDC token naming this provider's issuer is malformed; rejected");
+                return Step::Ready(Ok(AuthVerdict::Reject));
+            }
+        };
         let kid = parts.header.kid.as_deref().unwrap_or_default();
         // The key set's URL could not be discovered: the key set cannot be had, an OUTAGE.
         let url = match step!(self.jwks_url(now_mono, io)) {
