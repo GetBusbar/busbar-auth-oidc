@@ -66,10 +66,17 @@ use busbar_contract::auth::LoginHttpResponse;
 /// discovery document.
 pub const MAX_JWKS_BYTES: usize = 1024 * 1024;
 
-/// The most bytes of an answer read on `need`.
+/// Upper bound on a token endpoint's answer: a token response is a few KiB of JSON.
+pub const MAX_TOKEN_BYTES: usize = 256 * 1024;
+
+/// The most bytes of an answer read on `need`: [`MAX_TOKEN_BYTES`] for the token exchange,
+/// [`MAX_JWKS_BYTES`] for discovery and the JWKS.
 pub const fn reply_cap(need: u32) -> usize {
-    let _ = need;
-    MAX_JWKS_BYTES
+    if need == NEED_TOKEN {
+        MAX_TOKEN_BYTES
+    } else {
+        MAX_JWKS_BYTES
+    }
 }
 
 /// The bound on one request, milliseconds: 10s. Generous enough for a cold
@@ -431,7 +438,7 @@ impl<'h> HostIo<'h> {
         let mut c = host.connector_from(self.ticket, self.state.issued);
         let mut ex = match self.state.current.take() {
             Some((at, ex)) if at == url => ex,
-            _ => match request(&parsed).map(|ex| ex.reply_limit(MAX_JWKS_BYTES)) {
+            _ => match request(&parsed).map(|ex| ex.reply_limit(reply_cap(need))) {
                 Ok(ex) => ex,
                 Err(e) => return Poll::Ready(Err(failed(url, e))),
             },
@@ -456,7 +463,7 @@ impl<'h> HostIo<'h> {
                                 .filter(|s| need != NEED_TOKEN && !(200..300).contains(s))
                             {
                                 Some(status) => refused_status(url, status),
-                                None => over_cap(url, MAX_JWKS_BYTES),
+                                None => over_cap(url, reply_cap(need)),
                             }
                         }
                         e => failed(url, e),
@@ -500,7 +507,7 @@ impl Fetch for HostIo<'_> {
                 r.and_then(|reply| {
                     Ok(LoginHttpResponse {
                         status: reply.status,
-                        body: capped(url, reply.body, MAX_JWKS_BYTES)?,
+                        body: capped(url, reply.body, MAX_TOKEN_BYTES)?,
                     })
                 })
             })
