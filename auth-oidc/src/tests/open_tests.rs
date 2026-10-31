@@ -1,11 +1,15 @@
 // ── unit tests for THIS module's own responsibility: adapting the engine's JSON config into a real
 // OIDC module. Hermetic — no network. Nothing is fetched at open; the discovery the first op makes
 // is driven here through the scripted IdP (`crate::script`).
-use super::module;
 use crate::script::{ready, Idp, ME};
 use crate::OidcModule;
 use busbar_contract::auth::{BeginLogin, LoginOutcome};
 use std::time::{Duration, Instant};
+
+/// The module `open` builds, its warning (checked by `door_tests`) set aside.
+fn module(cfg: &str) -> Result<OidcModule, String> {
+    super::module(cfg).map(|(m, _)| m)
+}
 
 /// `module` answers `Result<OidcModule, String>`, and `OidcModule` is not `Debug`, so the standard
 /// `.unwrap_err()` doesn't compile here. This is the equivalent for this specific `Result` shape.

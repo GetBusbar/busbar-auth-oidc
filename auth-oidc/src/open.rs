@@ -45,13 +45,15 @@ pub fn config(cfg: &str) -> Result<OidcConfig, String> {
 }
 
 /// The module `open` builds from the settings: parsed, its explicit `jwks_url` https, or plain
-/// http, which opens with a WARNING naming it ([`check_jwks_url`]).
-pub(crate) fn module(cfg: &str) -> Result<OidcModule, String> {
+/// http, which opens with a WARNING naming it ([`check_jwks_url`]), logged and answered beside the
+/// module (the door raises it as its declared diagnostic).
+pub(crate) fn module(cfg: &str) -> Result<(OidcModule, Option<String>), String> {
     let cfg = config(cfg)?;
-    if let Some(warning) = check_jwks_url(&cfg)? {
+    let warning = check_jwks_url(&cfg)?;
+    if let Some(warning) = &warning {
         tracing::warn!(module = "oidc", "{warning}");
     }
-    Ok(OidcModule::new(&cfg))
+    Ok((OidcModule::new(&cfg), warning))
 }
 
 #[cfg(test)]
