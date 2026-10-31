@@ -2016,20 +2016,13 @@ fn begin_and_complete_login_drive_the_full_flow() {
     }
 }
 
-/// `complete_login`'s `token_response` arm, driven through `complete_login` ITSELF rather than
-/// through the inner helper.
-///
-/// The round-trip test above reaches this behaviour via `identity_from_token_response` because the
-/// helper takes an injectable clock and `complete_login` does not. That left the arm in
-/// `complete_login` executed by no test at all: replacing its whole body with an unconditional
-/// `LoginOutcome::Identify(...)` (that is, handing out an identity for ANY token-endpoint response,
-/// with no signature and no claim check) kept the entire suite green. The e2e tests do not cover it
-/// either, since they drive `authenticate`, not the login flow.
-///
-/// Mints against the REAL clock so `complete_login`'s internal `now_unix()` accepts it, and pairs
-/// the positive case with a wrong-key negative so the test cannot pass on an unconditional accept.
+/// The module's token-response verification ([`OidcModule::identity_from_token_response`], which
+/// the door's `complete_login` calls), driven through this file's 1.5.5-shaped `complete_login`
+/// wrapper at the real clock, with a wrong-key negative so it cannot pass on an unconditional
+/// accept. The door's own `complete_login` (its exchange, nonce binding and verdicts) is driven
+/// through the real loader by the plugin crate's conformance tests, not here.
 #[test]
-fn complete_login_verifies_the_token_response_and_rejects_a_forged_one() {
+fn the_module_verifies_a_token_response_and_rejects_a_forged_one() {
     let key = TestKey::generate(KID);
     let real_now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
