@@ -911,9 +911,18 @@ impl SafeSlot for Tick {
         if ticket.is_none() {
             return Outcome::Ready;
         }
-        // A tick starts its driver ticket's cycle: whatever the last one left in flight is over.
-        *oidc.driving.lock().unwrap_or_else(PoisonError::into_inner) = None;
-        oidc.refresh_ahead(h.host(), ticket, opened, IoState::default())
+        // A refresh the last tick left in flight on this driver ticket is carried on, not
+        // restarted: its flight is still this ticket's, and a fresh exchange would be a second
+        // fetch of the same key set.
+        let parked = oidc
+            .driving
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        match parked {
+            Some((parked, state)) => oidc.refresh_ahead(h.host(), ticket, parked, state),
+            None => oidc.refresh_ahead(h.host(), ticket, opened, IoState::default()),
+        }
     }
 }
 
