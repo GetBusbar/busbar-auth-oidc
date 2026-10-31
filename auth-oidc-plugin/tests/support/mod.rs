@@ -41,8 +41,8 @@ use busbar_contract::transport::ConnFacts;
 use busbar_plugin_loader::dispatch::kinds::auth::Auth;
 use busbar_plugin_loader::dispatch::{
     in_head, load_dropped, load_dropped_bytes, load_linked, now_ns, out_head, Bind, ConnTable,
-    DispatchConfig, Dispatcher, Done, Frame, InFrame, LinkedRow, LoadError, NoSink, OutFrame,
-    Plugin, NO_BLOB,
+    Diagnostic, DispatchConfig, Dispatcher, Done, Dropped, EnvelopeSink, Frame, InFrame,
+    LinkedRow, LoadError, Metric, OutFrame, Plugin, NO_BLOB,
 };
 
 mod issuer;
@@ -173,6 +173,27 @@ pub struct Idp {
     /// Reply body bytes handed to the plugin so far, over every request.
     served: AtomicU64,
     delay: Mutex<Duration>,
+    /// Every declared diagnostic the door's envelopes raised, as `name severity text`.
+    diags: Mutex<Vec<String>>,
+}
+
+/// The envelope sink a bound door reports into: its declared diagnostics, kept on the IdP the
+/// test reads (log records, which carry no declared name, are not kept).
+struct Recorder(Arc<Idp>);
+
+impl EnvelopeSink for Recorder {
+    fn metric(&self, _: Metric<'_>) {}
+    fn diag(&self, d: Diagnostic<'_>) {
+        if !d.name.is_empty() {
+            self.0.diags.lock().unwrap().push(format!(
+                "{} {} {}",
+                String::from_utf8_lossy(d.name),
+                d.severity,
+                String::from_utf8_lossy(d.text)
+            ));
+        }
+    }
+    fn dropped(&self, _: Dropped) {}
 }
 
 impl Idp {
@@ -191,6 +212,7 @@ impl Idp {
             pended: AtomicU32::new(0),
             served: AtomicU64::new(0),
             delay: Mutex::new(Duration::from_millis(5)),
+            diags: Mutex::new(Vec::new()),
         });
         let doc = serde_json::json!({
             "issuer": ISSUER,
@@ -240,6 +262,16 @@ impl Idp {
     /// How many reply body bytes the plugin has read from this IdP.
     pub fn served(&self) -> u64 {
         self.served.load(Ordering::SeqCst)
+    }
+
+    /// Every declared diagnostic the door raised, in order (`name severity text`).
+    pub fn diags(&self) -> Vec<String> {
+        self.diags.lock().unwrap().clone()
+    }
+
+    /// Refuse every open on `need`, as the host's destination guard refuses an address.
+    pub fn refuse(&self, need: u32) {
+        self.refused.lock().unwrap().insert(need);
     }
 
     /// Every need the loader declared, as it declared it, sorted.
@@ -472,7 +504,7 @@ pub fn bind_as<K: busbar_plugin_loader::dispatch::Kind>(
     let bind = Bind {
         instance: Arc::from("oidc"),
         max_inflight_cap: 64,
-        sink: Arc::new(NoSink),
+        sink: Arc::new(Recorder(idp.clone())),
         dispatcher: dispatcher.adopter(),
         conns: ConnTable::Host(conns),
     };
