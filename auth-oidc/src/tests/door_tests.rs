@@ -187,6 +187,30 @@ fn kept_for(n: u32, at: Instant) -> Reached {
     }
 }
 
+/// T1: an identity kept for a short buffer's re-call is served ONLY to the same callback: a
+/// re-call on the ticket naming another state, another code, or both, is not served it (a recycled
+/// ticket must never hand one user's identity to another callback).
+#[test]
+fn a_kept_identity_serves_only_its_own_state_and_code() {
+    let kept = kept_for(1, Instant::now());
+    assert!(kept.serves(b"s1", b"c1"), "its own callback");
+    for (state, code) in [
+        (&b"s2"[..], &b"c1"[..]),
+        (b"s1", b"c2"),
+        (b"s2", b"c2"),
+        (b"", b""),
+        (b"s1", b""),
+        (b"s", b"c1"),
+    ] {
+        assert!(
+            !kept.serves(state, code),
+            "{:?}/{:?} is another callback",
+            String::from_utf8_lossy(state),
+            String::from_utf8_lossy(code)
+        );
+    }
+}
+
 /// A full short-answer map makes room by dropping its OLDEST entry only: every other identity a
 /// short buffer reached still waits for its re-call (clearing the map would refuse them all).
 #[test]
