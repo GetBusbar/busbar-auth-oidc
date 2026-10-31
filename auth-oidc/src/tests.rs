@@ -837,8 +837,12 @@ fn an_unreadable_host_clock_is_a_failure_not_a_bad_credential() {
     assert!(cap.contains("clock"), "warned: {:?}", cap.messages());
 }
 
+/// A kid absent from the key set is rejected, and the bounded rotation refetch it triggers is
+/// rate-limited: on a cold cache the one fetch is the initial one, and the refetch inside the same
+/// `jwks_min_refetch_secs` window is not made. (The refetch itself, past the window, is
+/// `kid_rotation_triggers_bounded_refetch`'s.)
 #[test]
-fn unknown_kid_after_refetch_is_rejected() {
+fn an_unknown_kid_is_rejected_with_its_refetch_rate_limited() {
     let key = TestKey::generate("real-kid");
     let m = module_with(&key, "groups");
     let now = 1_700_000_000;
@@ -849,6 +853,7 @@ fn unknown_kid_after_refetch_is_rejected() {
         m.verify(&token, now, Instant::now()),
         AuthVerdict::Reject
     ));
+    assert_eq!(m.idp.calls(), 1, "the initial fetch only: the refetch is rate-limited");
 }
 
 // ── claim-policy tests (drive the verifier directly) ──────────────────────────────────────────────
