@@ -1203,3 +1203,70 @@ fn ready_waits_on_another_op_s_discovery_and_a_failure_refuses_the_boot() {
     assert!(a().starts_with("Failed"));
     assert_eq!(idp.sent_to(DISCOVERY_PATH).len(), 1, "ready made no fetch of its own");
 }
+
+/// T2: a login's id_token is judged for expiry at the HOST's wall clock (`clock.now`), through the
+/// real door: one that expired, or is not yet valid, is a declined login; a fresh one identifies.
+#[test]
+fn a_login_id_token_s_expiry_is_judged_at_the_host_clock() {
+    let _one = support::serial();
+    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let mut expired = claims(AUDIENCE);
+    expired["exp"] = serde_json::json!(now - 7200);
+    let mut early = claims(AUDIENCE);
+    early["nbf"] = serde_json::json!(now + 7200);
+    for (what, c, identified) in [
+        ("expired", expired, false),
+        ("not yet valid", early, false),
+        ("fresh", claims(AUDIENCE), true),
+    ] {
+        let idp = Idp::new(&key);
+        let body = serde_json::json!({ "id_token": key.sign(&c) }).to_string();
+        idp.answer("/token", 200, &body);
+        let b = bind(&Arm::Linked, &idp);
+        open(&b.plugin, &config(AUDIENCE), Some(CLIENT_SECRET)).expect("opens");
+        let answer = b.complete("code-1", ("st", NONCE), REDIRECT, "the-verifier", None);
+        if identified {
+            assert!(answer.starts_with("verdict 1 "), "{what}: {answer}");
+        } else {
+            assert_eq!(
+                answer.trim_end(),
+                format!("verdict {LOGIN_BAD_CREDENTIAL}"),
+                "{what}"
+            );
+        }
+    }
+}
+
+/// T3: an IdP destination the host's guard REFUSES is audited through the door: the verify fails,
+/// and the door raises its declared `OIDC_IDP_DESTINATION_REFUSED` at error naming the host and
+/// the rule (never the URL's path) — once per module, not once per request.
+#[test]
+fn a_refused_idp_destination_raises_its_declared_diagnostic_once() {
+    let _one = support::serial();
+    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let idp = Idp::new(&key);
+    let b = bind(&Arm::Linked, &idp);
+    let mut cfg: serde_json::Value = serde_json::from_str(&config(AUDIENCE)).unwrap();
+    cfg["jwks_min_refetch_secs"] = serde_json::json!(1);
+    open(&b.plugin, &cfg.to_string(), None).expect("opens");
+    // The JWKS need (anchored set: `ca_cert_pem` is configured) is refused by the guard.
+    idp.refuse(1);
+    let token = key.sign(&claims(AUDIENCE));
+    assert!(b.verify(Some(&token), None).starts_with("Failed"));
+    let raised = idp.diags();
+    assert_eq!(raised.len(), 1, "{raised:?}");
+    assert!(
+        raised[0].starts_with("OIDC_IDP_DESTINATION_REFUSED 2 ")
+            && raised[0].contains("idp.conformance.example")
+            && !raised[0].contains("/keys"),
+        "{raised:?}"
+    );
+    // Past the retry bound the fetch is made, and refused, again: not raised again.
+    std::thread::sleep(Duration::from_millis(1100));
+    assert!(b.verify(Some(&token), None).starts_with("Failed"));
+    assert_eq!(idp.diags().len(), 1, "raised once: {:?}", idp.diags());
+}
