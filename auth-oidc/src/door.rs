@@ -694,8 +694,12 @@ impl SafeSlot for Verify {
         let opened = h.life().now();
         let (mut io, parked) = resume(&instance, h, &opened);
         // A HIT is answered from the cached identity itself, with no copy of it, stating the TTL
-        // it has left.
-        if let Some(hit) = token.and_then(|t| opened.module.cached(t, request_now)) {
+        // it has left — unless the op re-enters with its own fetch in flight: that fetch is
+        // landed (its flight settled, its waiters woken) by judging the token, never dropped.
+        let hit = (!io.in_flight())
+            .then(|| token.and_then(|t| opened.module.cached(t, request_now)))
+            .flatten();
+        if let Some(hit) = hit {
             return answer(
                 Some(&*hit.principal),
                 hit.ttl_secs,
