@@ -2828,14 +2828,23 @@ fn a_token_claiming_the_first_providers_issuer_with_a_bad_signature_is_refused_b
 ) {
     let (key_a, a, key_b, b) = two_providers();
     let now = 1_700_000_000;
-    let forged = key_b.mint(&claims_of(ISSUER, AUDIENCE, now));
+    // Signed by B's key but naming A's kid, so A finds its key and the SIGNATURE fails (not an
+    // unknown kid).
+    let forged = {
+        let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"ES256","typ":"JWT","kid":"kid-a"}"#);
+        let payload =
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims_of(ISSUER, AUDIENCE, now)).unwrap());
+        let input = format!("{header}.{payload}");
+        let sig = key_b.kp.sign(&key_b.rng, input.as_bytes()).unwrap();
+        format!("{input}.{}", URL_SAFE_NO_PAD.encode(sig.as_ref()))
+    };
     let cap = busbar_test_kit::warn_capture::WarnCapture::capturing_debug();
     let walked = tracing::subscriber::with_default(cap.clone(), || chain(&[&a, &b], &forged, now));
     assert_eq!(walked, Walked::Refused(0));
     assert_eq!(b.idp.calls(), 0, "B never judged it");
     assert!(
-        cap.contains("OIDC token rejected") && cap.contains("signature"),
-        "A's refusal names its reason: {:?}",
+        cap.contains("OIDC token rejected") && cap.contains("JWT signature verification failed"),
+        "A's refusal names the signature: {:?}",
         cap.messages()
     );
     // Our issuer with a wrong audience, or expired, is refused by A too: never handed on.
