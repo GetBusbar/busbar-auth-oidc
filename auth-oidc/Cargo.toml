@@ -8,6 +8,9 @@ rust-version.workspace = true
 description = "The OIDC auth module for busbar: verify an OpenID Connect JWT (JWKS signature + iss/aud/exp/nbf) and map its role/group claim to a Principal. Its door is the auth kind's memory-ABI door (verify and browser login). Crypto on ring (no jsonwebtoken/rsa)."
 license.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 # The ONE busbar crate a plugin names (#40: contract only). Pinned by git rev to the busbar commit in
 # `.busbar-ref`; a busbar build that links this crate `[patch]`es the busbar git source to its own

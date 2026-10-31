@@ -8,6 +8,9 @@ rust-version.workspace = true
 description = "The OIDC auth module as a droppable busbar plugin: a cdylib exporting the auth kind's door. Drop it in the plugins folder, add `oidc` to auth.chain, and configure it under `identity-providers:`."
 license.workspace = true
 
+[lints]
+workspace = true
+
 [lib]
 # cdylib: the DROPPED-IN door, exporting `busbar_plugin_door`.
 # rlib: what `cargo test` links, and what the conformance test depends on to have the cdylib built.
