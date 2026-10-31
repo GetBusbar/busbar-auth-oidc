@@ -1063,3 +1063,143 @@ fn a_token_s_expiry_is_judged_at_the_request_s_timestamp() {
         );
     }
 }
+
+/// A `verify` of `token` submitted on its own ticket and left in flight; the closure waits for
+/// its answer (`verdict N`, or the outcome). `token` must outlive the call of the closure.
+fn verify_in_flight<'b>(b: &'b Bound, token: &str) -> impl FnOnce() -> String + 'b {
+    let bytes: &'static mut [u8] = Box::leak(vec![0_u8; IDENTITY_BUF_BYTES].into_boxed_slice());
+    let groups: &'static mut [Span] =
+        Box::leak(vec![z::<Span>(); IDENTITY_GROUPS as usize].into_boxed_slice());
+    let ticket = b.dispatcher.mint(0).expect("a ticket");
+    let mut out: IdentifyOut = z();
+    out.head = out_head();
+    let reply = b.dispatcher.submit(
+        &b.plugin,
+        ticket,
+        slot::VERIFY,
+        Frame::new(verify_in(Some(token), identity_buf(bytes, groups)), out),
+        busbar_contract::abi::mechanism::call::DeadlineClass::Call,
+        now_ns() + 20_000_000_000,
+    );
+    move || {
+        let done = reply
+            .wait(Duration::from_secs(30))
+            .expect("the op completes");
+        b.dispatcher.recycle(ticket);
+        match (done.outcome, done.frame) {
+            (Outcome::Ready, Some(f)) => format!("verdict {}", f.out.verdict),
+            (other, _) => format!("{other:?}"),
+        }
+    }
+}
+
+/// Wait until the IdP has pended `n` reads in all.
+fn until_pended(idp: &Idp, n: u32) {
+    let until = std::time::Instant::now() + Duration::from_secs(10);
+    while idp.pended() < n {
+        assert!(std::time::Instant::now() < until, "never pended: {:?}", idp.sent());
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+/// L1: a verify that claimed the key set's refresh and pended on it, re-entered after ANOTHER
+/// verify cached the same token's identity meanwhile, still LANDS its own fetch: the rotated key
+/// the IdP answered is installed, so a token signed by it verifies at once. (Before, the re-entry
+/// answered from the verdict cache and dropped the fetch: the flight stayed claimed, the new key
+/// never arrived and the rate limit refused the rotation refetch.)
+#[test]
+fn a_verify_meeting_the_verdict_cache_on_re_entry_still_lands_its_fetch() {
+    let _one = support::serial();
+    let old = Issuer::start(UNUSED_ISSUER, KID);
+    let new = Issuer::start(UNUSED_ISSUER, "rotated-kid");
+    let idp = Idp::new(&old);
+    let b = bind(&Arm::Linked, &idp);
+    let mut cfg: serde_json::Value = serde_json::from_str(&config(AUDIENCE)).unwrap();
+    cfg["jwks_ttl_secs"] = serde_json::json!(1);
+    cfg["jwks_min_refetch_secs"] = serde_json::json!(2);
+    open(&b.plugin, &cfg.to_string(), None).expect("opens");
+    assert!(b.verify(Some(&old.sign(&claims(AUDIENCE))), None).starts_with("verdict 1 "));
+
+    // The set goes stale and the rate limit lets a refresh through; the IdP has rotated.
+    std::thread::sleep(Duration::from_millis(2100));
+    let keys = |i: &Issuer| serde_json::from_str::<serde_json::Value>(i.jwks()).unwrap()["keys"][0].clone();
+    let both = serde_json::json!({ "keys": [keys(&old), keys(&new)] }).to_string();
+    idp.answer("/keys", 200, &both);
+    idp.pend_for(Duration::from_millis(800));
+    let pended = idp.pended();
+
+    let mut c = claims(AUDIENCE);
+    c["sub"] = serde_json::json!("cached-meanwhile");
+    let token = old.sign(&c);
+    let a = verify_in_flight(&b, &token);
+    until_pended(&idp, pended + 1);
+    // Another verify of the same token, on the stale set, caches its identity.
+    assert!(b.verify(Some(&token), None).starts_with("verdict 1 "));
+    assert_eq!(a(), "verdict 1");
+
+    assert!(
+        b.verify(Some(&new.sign(&claims(AUDIENCE))), None).starts_with("verdict 1 "),
+        "the refresh the first verify claimed landed the rotated key"
+    );
+    assert_eq!(idp.sent_to("/keys").len(), 2, "{:?}", idp.sent());
+}
+
+/// L2: a tick arriving while the previous tick's refresh is still in flight on the driver ticket
+/// carries THAT fetch on rather than starting a second exchange for the same key set.
+#[test]
+fn a_tick_during_the_last_tick_s_fetch_does_not_fetch_again() {
+    let _one = support::serial();
+    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let idp = Idp::new(&key);
+    let b = bind(&Arm::Linked, &idp);
+    let mut cfg: serde_json::Value = serde_json::from_str(&config(AUDIENCE)).unwrap();
+    cfg["jwks_ttl_secs"] = serde_json::json!(3);
+    cfg["jwks_min_refetch_secs"] = serde_json::json!(1);
+    open(&b.plugin, &cfg.to_string(), None).expect("opens");
+    assert!(b.verify(Some(&key.sign(&claims(AUDIENCE))), None).starts_with("verdict 1 "));
+    assert_eq!(idp.sent_to("/keys").len(), 1);
+
+    let driver = b.dispatcher.driver(&b.plugin, 0).expect("a driver ticket");
+    let tick = || {
+        b.dispatcher
+            .tick(&b.plugin, driver, now_ns())
+            .wait(Duration::from_secs(30))
+            .expect("the tick completes")
+            .outcome
+    };
+    std::thread::sleep(Duration::from_millis(2100));
+    idp.pend_for(Duration::from_millis(1500));
+    assert_eq!(tick(), Outcome::Pending, "the refresh is in flight");
+    assert_eq!(idp.sent_to("/keys").len(), 2);
+    tick();
+    std::thread::sleep(Duration::from_millis(2000));
+    assert_eq!(
+        idp.sent_to("/keys").len(),
+        2,
+        "one exchange for the refresh: {:?}",
+        idp.sent()
+    );
+}
+
+/// L6: `ready` meeting another op's discovery in flight WAITS for it (woken when it settles),
+/// rather than approving the boot unseen: a discovery that then fails refuses the boot.
+#[test]
+fn ready_waits_on_another_op_s_discovery_and_a_failure_refuses_the_boot() {
+    let _one = support::serial();
+    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let idp = Idp::new(&key);
+    idp.answer(DISCOVERY_PATH, 503, "{}");
+    idp.pend_for(Duration::from_millis(500));
+    let b = bind(&Arm::Linked, &idp);
+    open(&b.plugin, &config(AUDIENCE), None).expect("opens");
+    let token = key.sign(&claims(AUDIENCE));
+    let a = verify_in_flight(&b, &token);
+    until_pended(&idp, 1);
+    let readied = b.plugin.ready(&b.dispatcher, Duration::from_secs(10));
+    assert!(
+        readied.as_ref().is_err_and(|e| e.contains("503")),
+        "the boot is refused with the discovery's failure: {readied:?}"
+    );
+    assert!(a().starts_with("Failed"));
+    assert_eq!(idp.sent_to(DISCOVERY_PATH).len(), 1, "ready made no fetch of its own");
+}
