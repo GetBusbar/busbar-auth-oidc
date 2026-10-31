@@ -413,15 +413,17 @@ impl Life for Oidc {
             .unwrap_or_default();
         let mut io = HostIo::new(Some(host), ticket, state, opened.module.anchored());
         match opened.module.ready(Instant::now(), &mut io) {
-            Step::Pending => {
+            // This call's own request in flight, or ANOTHER call's fetch of the same document or
+            // key set: either way `ready` is woken when it settles (the other call's fetch wakes
+            // its waiters) and judges its outcome then — never approving the boot unseen.
+            Step::Pending | Step::Wait => {
                 self.readying
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .insert(ticket, io.into_state());
                 Poll::Pending
             }
-            // Another call's fetch of the same document: it serves this instance too.
-            Step::Ready(Ok(())) | Step::Wait => Poll::Ready(Ok(())),
+            Step::Ready(Ok(())) => Poll::Ready(Ok(())),
             Step::Ready(Err(e)) => Poll::Ready(Err(Refusal::failed(e))),
         }
     }
