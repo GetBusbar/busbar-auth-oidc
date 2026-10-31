@@ -34,7 +34,9 @@ pub const MAX_PRINCIPAL_BYTES: usize = 8 * 1024;
 
 /// The bytes `p` holds: its id, name and roles.
 fn size_of(p: &Principal) -> usize {
-    p.id.len() + p.name.as_ref().map_or(0, String::len) + p.roles.iter().map(String::len).sum::<usize>()
+    p.id.len()
+        + p.name.as_ref().map_or(0, String::len)
+        + p.roles.iter().map(String::len).sum::<usize>()
 }
 
 /// A cache hit: the identity held, and the TTL it has LEFT at the hit (`None` when its module

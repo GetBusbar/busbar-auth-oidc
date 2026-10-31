@@ -404,12 +404,20 @@ fn a_refresh_rediscovers_the_issuer_s_document() {
     let idp = Idp::new(doc.to_string());
     let oidc = Oidc::open(&settings, &lent(b""), 1).expect("opens");
     let url = |oidc: &Oidc| {
-        ready(oidc.now().module.jwks_url(Instant::now(), &mut idp.at_once(Some(ME))))
-            .map(std::borrow::Cow::into_owned)
+        ready(
+            oidc.now()
+                .module
+                .jwks_url(Instant::now(), &mut idp.at_once(Some(ME))),
+        )
+        .map(std::borrow::Cow::into_owned)
     };
     assert_eq!(url(&oidc).as_deref(), Ok("https://jwks.test/keys"));
     assert_eq!(idp.calls(), 1);
     oidc.refresh(&settings, &lent(b""), 2).expect("refreshes");
     assert_eq!(url(&oidc).as_deref(), Ok("https://jwks.test/keys"));
-    assert_eq!(idp.calls(), 2, "the refresh has the document asked for again");
+    assert_eq!(
+        idp.calls(),
+        2,
+        "the refresh has the document asked for again"
+    );
 }

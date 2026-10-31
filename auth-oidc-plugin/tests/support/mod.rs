@@ -41,8 +41,8 @@ use busbar_contract::transport::ConnFacts;
 use busbar_plugin_loader::dispatch::kinds::auth::Auth;
 use busbar_plugin_loader::dispatch::{
     in_head, load_dropped, load_dropped_bytes, load_linked, now_ns, out_head, Bind, ConnTable,
-    Diagnostic, DispatchConfig, Dispatcher, Done, Dropped, EnvelopeSink, Frame, InFrame,
-    LinkedRow, LoadError, Metric, OutFrame, Plugin, NO_BLOB,
+    Diagnostic, DispatchConfig, Dispatcher, Done, Dropped, EnvelopeSink, Frame, InFrame, LinkedRow,
+    LoadError, Metric, OutFrame, Plugin, NO_BLOB,
 };
 
 mod issuer;

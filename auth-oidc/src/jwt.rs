@@ -185,7 +185,9 @@ pub fn verify_signature(parts: &Parts, key: &Jwk) -> Result<(), String> {
         if key.crv.as_deref() != Some("P-256") {
             return Err(format!(
                 "{ALG_ES256} requires curve P-256, JWKS key has crv {}",
-                key.crv.as_deref().map_or("(none)".to_string(), crate::untrusted)
+                key.crv
+                    .as_deref()
+                    .map_or("(none)".to_string(), crate::untrusted)
             ));
         }
         // Point decoded ONCE and memoised (see `Jwk::material`) — no per-request re-decode/alloc.

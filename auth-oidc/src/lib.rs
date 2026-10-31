@@ -85,7 +85,8 @@ const MAX_CACHE_TTL_SECS: i64 = 300;
 const CLOCK_SANITY_FLOOR_UNIX: i64 = 1_767_225_600; // 2026-01-01T00:00:00Z
 
 /// Why no token can be judged while the host clock reads `i64::MAX` ([`clock_or_fail_closed`]).
-const CLOCK_UNREADABLE: &str = "the host clock is unreadable or reads before 2026-01-01 (the clock \
+const CLOCK_UNREADABLE: &str =
+    "the host clock is unreadable or reads before 2026-01-01 (the clock \
      sanity floor), so no token can be judged; fix the host clock";
 
 /// The operator's `identity-providers:` settings for this module, deserialized from the JSON the engine passes to
@@ -720,13 +721,8 @@ impl OidcModule {
         };
         // The key set cannot be had (fetched, or its URL discovered): an outage, logged by
         // `verify_with`, answered as the error.
-        let verdict = step_ok!(self.verify_with(
-            &self.login_verifier,
-            id_token,
-            now_unix,
-            now_mono,
-            io
-        ));
+        let verdict =
+            step_ok!(self.verify_with(&self.login_verifier, id_token, now_unix, now_mono, io));
         Step::Ready(Ok(match verdict {
             AuthVerdict::Identify(p) => LoginOutcome::Identify(p),
             // A non-JWT / bad-sig / bad-claim id_token in a login callback is a hard failure —
@@ -844,7 +840,10 @@ impl OidcModule {
         // can be judged, and that is the host's fault, not the caller's — a FAILURE (the login's
         // outage), never a reject.
         if now_unix == i64::MAX {
-            tracing::warn!(module = "oidc", "the host clock is unreadable; the token cannot be judged");
+            tracing::warn!(
+                module = "oidc",
+                "the host clock is unreadable; the token cannot be judged"
+            );
             return Step::Ready(Err(CLOCK_UNREADABLE.to_string()));
         }
         // Ours: a header that does not decode is this provider's to refuse.
@@ -1020,8 +1019,9 @@ pub(crate) struct TokenResponse {
 impl TokenResponse {
     /// `body` parsed; the error never echoes it.
     pub(crate) fn parse(body: &str) -> Result<Self, String> {
-        serde_json::from_str(body)
-            .map_err(busbar_contract::abi::sdk::auth_kit::json_error("token response"))
+        serde_json::from_str(body).map_err(busbar_contract::abi::sdk::auth_kit::json_error(
+            "token response",
+        ))
     }
 }
 

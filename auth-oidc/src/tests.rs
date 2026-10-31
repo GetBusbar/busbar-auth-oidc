@@ -722,8 +722,7 @@ fn a_token_with_no_kid_uses_the_one_usable_key_for_its_alg() {
     let sig = key.kp.sign(&key.rng, input.as_bytes()).unwrap();
     let token = format!("{input}.{}", URL_SAFE_NO_PAD.encode(sig.as_ref()));
     let ec = || serde_json::from_str::<Value>(&key.jwks()).unwrap()["keys"][0].clone();
-    let rsa = serde_json::from_str::<Value>(&RsaTestKey::generate("r1").jwks()).unwrap()["keys"]
-        [0]
+    let rsa = serde_json::from_str::<Value>(&RsaTestKey::generate("r1").jwks()).unwrap()["keys"][0]
         .clone();
     let set = |keys: Vec<Value>| serde_json::json!({ "keys": keys }).to_string();
 
@@ -733,13 +732,15 @@ fn a_token_with_no_kid_uses_the_one_usable_key_for_its_alg() {
     ] {
         let m = Module::new(&cfg("groups"), FixtureFetcher::new(set(keys)));
         assert!(
-            matches!(m.verify(&token, now, Instant::now()), AuthVerdict::Identify(_)),
+            matches!(
+                m.verify(&token, now, Instant::now()),
+                AuthVerdict::Identify(_)
+            ),
             "{what}: the one usable key verifies a kid-less token"
         );
     }
-    let mut other = serde_json::from_str::<Value>(&TestKey::generate("k2").jwks()).unwrap()
-        ["keys"][0]
-        .clone();
+    let mut other =
+        serde_json::from_str::<Value>(&TestKey::generate("k2").jwks()).unwrap()["keys"][0].clone();
     other["kid"] = serde_json::json!("k2");
     let m = Module::new(&cfg("groups"), FixtureFetcher::new(set(vec![ec(), other])));
     assert!(
@@ -762,7 +763,10 @@ fn a_cache_hit_answers_the_remaining_ttl() {
     };
     assert_eq!(ttl(now), Some(300));
     assert_eq!(ttl(now + 100), Some(200), "the hit answers what is left");
-    assert_eq!(m.m.cached(&token, now + 299).map(|h| h.ttl_secs), Some(Some(1)));
+    assert_eq!(
+        m.m.cached(&token, now + 299).map(|h| h.ttl_secs),
+        Some(Some(1))
+    );
 }
 
 /// L12 (S5): a rejected token is the caller's, not the operator's: logged ONCE at info with a
@@ -790,7 +794,11 @@ fn a_rejected_token_is_logged_at_info_with_a_reason() {
             });
             assert!(matches!(verdict, AuthVerdict::Reject), "{what}");
         }
-        assert!(warn.messages().is_empty(), "{what}: not at warn: {:?}", warn.messages());
+        assert!(
+            warn.messages().is_empty(),
+            "{what}: not at warn: {:?}",
+            warn.messages()
+        );
         assert_eq!(
             all.count(reason),
             1,
@@ -853,7 +861,11 @@ fn an_unknown_kid_is_rejected_with_its_refetch_rate_limited() {
         m.verify(&token, now, Instant::now()),
         AuthVerdict::Reject
     ));
-    assert_eq!(m.idp.calls(), 1, "the initial fetch only: the refetch is rate-limited");
+    assert_eq!(
+        m.idp.calls(),
+        1,
+        "the initial fetch only: the refetch is rate-limited"
+    );
 }
 
 // ── claim-policy tests (drive the verifier directly) ──────────────────────────────────────────────
@@ -2153,7 +2165,12 @@ fn only_an_rfc_6749_credential_error_at_the_token_endpoint_is_a_decline() {
             "{status} {code}: declined, got {outcome:?}"
         );
         assert!(all.contains(code), "{code} is logged: {:?}", all.messages());
-        assert_eq!(warn.contains(code), at_warn, "{code}: {:?}", warn.messages());
+        assert_eq!(
+            warn.contains(code),
+            at_warn,
+            "{code}: {:?}",
+            warn.messages()
+        );
     }
     let (outcome, _, all) = answered(400, r#"{"error":"SECRET-made-up"}"#);
     assert!(matches!(outcome, Ok(LoginOutcome::Reject)), "{outcome:?}");
@@ -2209,7 +2226,11 @@ fn a_begin_login_with_no_nonce_is_refused_and_logged() {
             Err(e) => assert!(e.contains("nonce"), "{nonce:?}: {e}"),
             other => panic!("{nonce:?}: a login with no nonce is refused, got {other:?}"),
         }
-        assert!(cap.contains("nonce"), "{nonce:?}: logged: {:?}", cap.messages());
+        assert!(
+            cap.contains("nonce"),
+            "{nonce:?}: logged: {:?}",
+            cap.messages()
+        );
     }
 }
 
@@ -2500,7 +2521,9 @@ fn the_token_response_holds_its_tokens_in_wiped_holders() {
     .expect("a token response parses, unknown members ignored");
     let held: &zeroize::Zeroizing<String> = r.id_token.as_ref().expect("an id_token");
     assert_eq!(held.as_str(), "a.b.c");
-    let err = TokenResponse::parse("not json SECRET").err().expect("refused");
+    let err = TokenResponse::parse("not json SECRET")
+        .err()
+        .expect("refused");
     assert!(!err.contains("SECRET"), "{err}");
 }
 
@@ -2537,7 +2560,10 @@ fn a_logged_idp_url_drops_its_userinfo() {
     assert!(logged.contains("JWKS fetch failed"), "{logged}");
     assert!(logged.contains("serving the previous key set"), "{logged}");
     assert!(logged.contains("OIDC discovery failed"), "{logged}");
-    assert!(!logged.contains("SECRETPW"), "a URL's userinfo is logged: {logged}");
+    assert!(
+        !logged.contains("SECRETPW"),
+        "a URL's userinfo is logged: {logged}"
+    );
 }
 
 /// L14: the JWKS entries a fetch skips as unusable are not dropped silently: one warn per fetch

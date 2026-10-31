@@ -1098,7 +1098,11 @@ fn verify_in_flight<'b>(b: &'b Bound, token: &str) -> impl FnOnce() -> String + 
 fn until_pended(idp: &Idp, n: u32) {
     let until = std::time::Instant::now() + Duration::from_secs(10);
     while idp.pended() < n {
-        assert!(std::time::Instant::now() < until, "never pended: {:?}", idp.sent());
+        assert!(
+            std::time::Instant::now() < until,
+            "never pended: {:?}",
+            idp.sent()
+        );
         std::thread::sleep(Duration::from_millis(1));
     }
 }
@@ -1119,11 +1123,15 @@ fn a_verify_meeting_the_verdict_cache_on_re_entry_still_lands_its_fetch() {
     cfg["jwks_ttl_secs"] = serde_json::json!(1);
     cfg["jwks_min_refetch_secs"] = serde_json::json!(2);
     open(&b.plugin, &cfg.to_string(), None).expect("opens");
-    assert!(b.verify(Some(&old.sign(&claims(AUDIENCE))), None).starts_with("verdict 1 "));
+    assert!(b
+        .verify(Some(&old.sign(&claims(AUDIENCE))), None)
+        .starts_with("verdict 1 "));
 
     // The set goes stale and the rate limit lets a refresh through; the IdP has rotated.
     std::thread::sleep(Duration::from_millis(2100));
-    let keys = |i: &Issuer| serde_json::from_str::<serde_json::Value>(i.jwks()).unwrap()["keys"][0].clone();
+    let keys = |i: &Issuer| {
+        serde_json::from_str::<serde_json::Value>(i.jwks()).unwrap()["keys"][0].clone()
+    };
     let both = serde_json::json!({ "keys": [keys(&old), keys(&new)] }).to_string();
     idp.answer("/keys", 200, &both);
     idp.pend_for(Duration::from_millis(800));
@@ -1139,7 +1147,8 @@ fn a_verify_meeting_the_verdict_cache_on_re_entry_still_lands_its_fetch() {
     assert_eq!(a(), "verdict 1");
 
     assert!(
-        b.verify(Some(&new.sign(&claims(AUDIENCE))), None).starts_with("verdict 1 "),
+        b.verify(Some(&new.sign(&claims(AUDIENCE))), None)
+            .starts_with("verdict 1 "),
         "the refresh the first verify claimed landed the rotated key"
     );
     assert_eq!(idp.sent_to("/keys").len(), 2, "{:?}", idp.sent());
@@ -1157,7 +1166,9 @@ fn a_tick_during_the_last_tick_s_fetch_does_not_fetch_again() {
     cfg["jwks_ttl_secs"] = serde_json::json!(3);
     cfg["jwks_min_refetch_secs"] = serde_json::json!(1);
     open(&b.plugin, &cfg.to_string(), None).expect("opens");
-    assert!(b.verify(Some(&key.sign(&claims(AUDIENCE))), None).starts_with("verdict 1 "));
+    assert!(b
+        .verify(Some(&key.sign(&claims(AUDIENCE))), None)
+        .starts_with("verdict 1 "));
     assert_eq!(idp.sent_to("/keys").len(), 1);
 
     let driver = b.dispatcher.driver(&b.plugin, 0).expect("a driver ticket");
@@ -1202,7 +1213,11 @@ fn ready_waits_on_another_op_s_discovery_and_a_failure_refuses_the_boot() {
         "the boot is refused with the discovery's failure: {readied:?}"
     );
     assert!(a().starts_with("Failed"));
-    assert_eq!(idp.sent_to(DISCOVERY_PATH).len(), 1, "ready made no fetch of its own");
+    assert_eq!(
+        idp.sent_to(DISCOVERY_PATH).len(),
+        1,
+        "ready made no fetch of its own"
+    );
 }
 
 /// T2: a login's id_token is judged for expiry at the HOST's wall clock (`clock.now`), through the
