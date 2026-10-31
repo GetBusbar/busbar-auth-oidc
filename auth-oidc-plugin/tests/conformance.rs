@@ -970,6 +970,7 @@ fn red_the_statement_declares_six_outbound_http_needs_in_their_classes() {
 /// which the host faults.
 #[test]
 fn a_bearer_that_is_not_utf8_passes_with_a_decision_and_its_line_named() {
+    let _one = support::serial();
     let key = Issuer::start(UNUSED_ISSUER, KID);
     let lib = cdylib();
     let stated = row().statement;
