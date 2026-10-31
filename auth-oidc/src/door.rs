@@ -194,11 +194,7 @@ struct Opened {
 
 impl Opened {
     fn new(settings: &[u8], secrets: &[&[u8]]) -> Result<Self, Refusal> {
-        let module = module(text(settings)?).map_err(Refusal::failed)?;
-        // `module` opened these settings, so they parse and their `jwks_url` checks.
-        let flagged = config(text(settings)?)
-            .ok()
-            .and_then(|c| crate::check_jwks_url(&c).ok().flatten());
+        let (module, flagged) = module(text(settings)?).map_err(Refusal::failed)?;
         // An empty lent secret is none (a provider with no `browser_login.client_secret`): the
         // token exchange then sends no secret field, as 1.5.5's core sent none.
         let secret = lent_secret(secrets);
@@ -268,7 +264,15 @@ impl Opened {
                 .identity_from_token_response(response, io.wall_now(), now, io))
             {
                 Ok(LoginOutcome::Identify(p)) => Login::Identity(p),
-                Ok(_) => Login::Bad,
+                // Enumerated (not `_`) so a future `LoginOutcome` variant is a compile error here.
+                Ok(LoginOutcome::Reject) => Login::Bad,
+                Ok(
+                    LoginOutcome::Authorize(_)
+                    | LoginOutcome::Prompt(_)
+                    | LoginOutcome::Exchange(_)
+                    | LoginOutcome::Outage
+                    | LoginOutcome::SecurityCheckFailed,
+                ) => Login::Bad,
                 Err(e) => Login::Outage(e),
             },
         )

@@ -60,22 +60,23 @@ pub use open::config;
 /// The default role/group claim name — the token claim read into the principal's ROLES when the
 /// operator does not set `role_claim`, and the value the Entra >200-groups overage guard keys on.
 const DEFAULT_ROLE_CLAIM: &str = "groups";
-/// Default JWKS refetch bound (the kid-rotation rate limit) and TTL.
+/// Default JWKS refetch bound (the kid-rotation rate limit) and JWKS TTL (not the verdict
+/// cache's: [`verdicts`]).
 const DEFAULT_MIN_REFETCH_SECS: u64 = 60;
-const DEFAULT_TTL_SECS: u64 = 3600;
+const DEFAULT_JWKS_TTL_SECS: u64 = 3600;
 /// Small clock-skew tolerance applied to `exp`/`nbf` (seconds) — standard practice so a few seconds of
 /// clock drift between busbar and the IdP does not spuriously reject a just-issued / near-expiry token.
 const CLOCK_SKEW_SECS: i64 = 60;
 /// Ceiling on the credential-cache TTL this module suggests via `Principal::ttl_secs`, the TTL its
-/// own verdict cache ([`verdicts`]) holds an identity for. This is the default cache TTL, and it
-/// must only ever SHORTEN it, never lengthen it: a token derives its TTL from its own remaining
-/// `exp`, but a standard access token's `exp` is often itself ~3600s out, and suggesting that as the
-/// cache TTL would take the stale-revocation window from 5 minutes to up to an hour. `min`-ing
-/// against this bounds the over-cache window while still shortening the TTL for a token that
-/// expires sooner than this.
+/// own verdict cache ([`verdicts`]) holds an identity for. It equals that cache's default TTL (300
+/// s, `verdicts`' own constant) and must only ever SHORTEN it, never lengthen it: a token derives
+/// its TTL from its own remaining `exp`, but a standard access token's `exp` is often itself ~3600s
+/// out, and suggesting that as the cache TTL would take the stale-revocation window from 5 minutes
+/// to up to an hour. `min`-ing against this bounds the over-cache window while still shortening
+/// the TTL for a token that expires sooner than this.
 const MAX_CACHE_TTL_SECS: i64 = 300;
 /// A host clock reading before this instant means the clock cannot be trusted at all — used to make
-/// `now_unix()` fail CLOSED not just on a sub-epoch clock (`SystemTime::now()` returning `Err`), but
+/// [`clock_or_fail_closed`] (every clock reading: the request's timestamp, the host's `clock.now`) fail CLOSED not just on a sub-epoch clock (`SystemTime::now()` returning `Err`), but
 /// on the far more realistic broken-clock states: a dead RTC booting a host at the epoch, or an
 /// NTP/RTC fault landing the clock in 1970-2000. Both of those return `Ok(small_value)`, never hit the
 /// `unwrap_or` fallback, and would otherwise still make `exp` checks pass for virtually any real
@@ -102,7 +103,7 @@ pub struct OidcConfig {
     /// op that needs it.
     #[serde(default)]
     pub jwks_url: Option<String>,
-    /// Which token claim carries the caller's roles/groups → the principal's GROUPS. Default
+    /// Which token claim carries the caller's roles/groups → the principal's ROLES. Default
     /// `groups`; set `roles` to use Entra app-roles (the bounded-count alternative that sidesteps the
     /// >200-groups overage).
     #[serde(default = "default_role_claim")]
@@ -153,7 +154,7 @@ fn default_min_refetch_secs() -> u64 {
     DEFAULT_MIN_REFETCH_SECS
 }
 fn default_ttl_secs() -> u64 {
-    DEFAULT_TTL_SECS
+    DEFAULT_JWKS_TTL_SECS
 }
 
 /// The pure token VERIFIER: config-derived policy (issuer/audience/role_claim) plus the current time
@@ -205,7 +206,7 @@ impl OidcVerifier {
     /// overage marker (REJECT, never call Graph), and reads `role_claim` into the principal's groups.
     /// `now_unix` is the current UNIX time in seconds.
     pub fn validate_claims(&self, claims: &Value, now_unix: i64) -> Result<Principal, String> {
-        // `now_unix()`'s broken-clock sentinel: refused outright, so an `exp` that saturates cannot
+        // `clock_or_fail_closed`'s broken-clock sentinel: refused outright, so an `exp` that saturates cannot
         // pass it, and the refusal names the clock rather than the token.
         if now_unix == i64::MAX {
             return Err(CLOCK_UNREADABLE.to_string());
@@ -264,7 +265,10 @@ impl OidcVerifier {
         let exp = match as_numeric_date_floor(claims.get("exp")) {
             Some(exp) if exp.saturating_add(CLOCK_SKEW_SECS) >= now_unix => exp,
             Some(_) => return Err("token has expired".to_string()),
-            None => return Err("token has no 'exp' claim".to_string()),
+            None if claims.get("exp").is_none() => {
+                return Err("token has no 'exp' claim".to_string())
+            }
+            None => return Err("token has an 'exp' claim that is not a NumericDate".to_string()),
         };
 
         // nbf — optional; if present, must not be in the future (with skew tolerance). Same
@@ -356,12 +360,11 @@ impl OidcVerifier {
         let mut principal = Principal::from_id(format!("oidc:{subject}"));
         principal.name = name;
         principal.roles = groups;
-        // Bound the engine's credential-cache lifetime to the token's OWN remaining validity instead
-        // of the engine's blanket default (300s): this module is the only component that knows the
-        // real `exp`, and the ABI crosses here, so this is the only place the bound can be set. Without
-        // it, a token cached at T with exp=T+10 keeps authenticating from cache until T+300 — a replay
-        // window that outlives the token by up to five minutes and never re-enters this module's expiry
-        // check. `saturating_sub` + `max(0)`: exp can be within CLOCK_SKEW_SECS in the past and still
+        // Bound the verdict cache's lifetime for this identity ([`verdicts`], and the TTL the door
+        // states to the host) to the token's OWN remaining validity instead of the cache's blanket
+        // default (300s): only this module knows the real `exp`. Without it, a token cached at T
+        // with exp=T+10 keeps authenticating from cache until T+300 — a replay window that outlives
+        // the token by up to five minutes and never re-enters this module's expiry check. `saturating_sub` + `max(0)`: exp can be within CLOCK_SKEW_SECS in the past and still
         // pass the check above, which must not underflow into a huge u64. Also `min`-ed against
         // MAX_CACHE_TTL_SECS: an un-ceilinged suggestion would, for a standard ~3600s-lived access
         // token, WIDEN the cache window instead of shortening it (the default is 300s). This can
@@ -451,8 +454,8 @@ fn as_numeric_date(v: Option<&Value>, round: impl Fn(f64) -> f64) -> Option<i64>
     v.as_i64().or_else(|| v.as_f64().map(|f| round(f) as i64))
 }
 
-/// Read a claim as a list of strings. Accepts a JSON array of strings OR a single string (a
-/// space-free scalar role). Anything else yields an empty list.
+/// Read a claim as a list of strings. Accepts a JSON array of strings OR a single string (one
+/// role, taken whole). Anything else yields an empty list.
 fn extract_string_list(v: Option<&Value>) -> Vec<String> {
     match v {
         Some(Value::Array(a)) => a
@@ -1169,7 +1172,8 @@ pub fn token_form(
     }
 }
 
-/// Current UNIX time in seconds. Fails CLOSED on a clock this module cannot trust: `validate_claims`'s
+/// TESTS' current UNIX time in seconds (production reads the request's timestamp and the host's
+/// `clock.now`, through [`clock_or_fail_closed`]). Fails CLOSED on a clock it cannot trust: `validate_claims`'s
 /// `exp` check is `exp + skew >= now_unix`, so a `now_unix` that reads too LOW makes every token
 /// appear unexpired (fail OPEN) — the exact failure this guards against. Two cases, both mapped to
 /// `i64::MAX` (which `validate_claims` refuses outright, naming the clock):
