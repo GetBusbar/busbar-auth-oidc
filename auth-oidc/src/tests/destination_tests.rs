@@ -245,3 +245,38 @@ fn a_refused_idp_fetch_is_audited() {
         "{guard}"
     );
 }
+
+/// L7: a DISCOVERED `authorization_endpoint` is held to the same scheme rule as a discovered
+/// `jwks_uri` or `token_endpoint` (https, plain http only to a loopback host): the browser is never
+/// sent to a plaintext authorize URL a discovery document names on a public host. It is refused,
+/// naming its host and the rule, and the refusal is reported for the door to audit; https and
+/// loopback http are taken.
+#[test]
+fn a_discovered_plain_http_authorization_endpoint_is_refused() {
+    let idp = Idp::new(doc(
+        "authorization_endpoint",
+        "http://login.example.com/authorize?p=x",
+    ));
+    let m = OidcModule::new(&cfg());
+    let answered = ready(m.authorization_endpoint(Instant::now(), &mut idp.at_once(Some(ME))));
+    let Err(why) = answered else {
+        panic!("a plain http authorize URL on a public host is refused, got {answered:?}");
+    };
+    assert!(
+        why.contains("login.example.com") && why.contains("https"),
+        "{why}"
+    );
+    assert_eq!(idp.refusals().len(), 1, "{:?}", idp.refusals());
+
+    for url in [
+        "https://login.example.com/authorize",
+        "http://127.0.0.1:8080/authorize",
+    ] {
+        let idp = Idp::new(doc("authorization_endpoint", url));
+        let m = OidcModule::new(&cfg());
+        assert_eq!(
+            ready(m.authorization_endpoint(Instant::now(), &mut idp.at_once(Some(ME)))),
+            Ok(Some(url.to_string()))
+        );
+    }
+}

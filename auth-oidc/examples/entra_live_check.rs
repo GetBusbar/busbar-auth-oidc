@@ -67,7 +67,9 @@ fn verify(module: &OidcModule, token: &str) -> AuthVerdict {
         .as_secs() as i64;
     match module.verify(Some(token), now, Instant::now(), &mut Blocking(client)) {
         Step::Ready(Ok(v)) => v,
-        Step::Ready(Err(e)) => panic!("real Entra discovery failed: {e}"),
+        // The key set (or its discovery) could not be had: an outage, never a verdict, so a
+        // network blip can never pass for a rejected signature below.
+        Step::Ready(Err(e)) => panic!("real Entra discovery or JWKS fetch failed: {e}"),
         Step::Pending | Step::Wait => unreachable!("a blocking fetch answers at once"),
     }
 }
@@ -146,7 +148,9 @@ fn main() {
     );
 
     // Tamper check: a corrupted signature over the SAME real Entra JWKS must be rejected, so this
-    // isn't a rubber stamp that accepts anything shaped like a JWT.
+    // isn't a rubber stamp that accepts anything shaped like a JWT. Only the signature can reject
+    // it: its claims are the real token's, and a key set that cannot be had panics in `verify`
+    // (an outage is not a `Reject`), so a JWKS fetch failure cannot pass this check.
     let (header, payload, sig) = {
         let mut parts = id_token.split('.');
         (

@@ -531,6 +531,36 @@ fn malformed_but_dotted_bearers_pass() {
     }
 }
 
+/// L4: issuer routing reads the payload's `iss` BEFORE the header is decoded: a three-segment
+/// token whose payload names THIS issuer is this provider's to judge, so a malformed header
+/// (not base64url, not JSON, a mistyped member) is a REJECT, not a Pass to the next auth. One whose
+/// payload names another issuer, or cannot be read, still passes.
+#[test]
+fn a_token_naming_this_issuer_with_a_malformed_header_is_rejected_not_passed() {
+    let key = TestKey::generate(KID);
+    let m = module_with(&key, "groups");
+    let now = 1_700_000_000;
+    let payload = |iss: &str| {
+        let mut c = base_claims(now);
+        c["iss"] = serde_json::json!(iss);
+        URL_SAFE_NO_PAD.encode(serde_json::to_vec(&c).unwrap())
+    };
+    let mistyped = URL_SAFE_NO_PAD.encode(br#"{"alg":"ES256","kid":12345}"#);
+    let not_json = URL_SAFE_NO_PAD.encode(b"not json");
+    for header in ["!!not-base64!!", not_json.as_str(), mistyped.as_str()] {
+        let ours = format!("{header}.{}.c2ln", payload(ISSUER));
+        assert!(
+            matches!(m.verify(&ours, now, Instant::now()), AuthVerdict::Reject),
+            "{header:?}: a token naming this issuer is ours to refuse"
+        );
+        let theirs = format!("{header}.{}.c2ln", payload("https://other.example"));
+        assert!(
+            matches!(m.verify(&theirs, now, Instant::now()), AuthVerdict::Pass),
+            "{header:?}: a token naming another issuer passes"
+        );
+    }
+}
+
 #[test]
 fn no_credential_passes() {
     let key = TestKey::generate(KID);
@@ -639,8 +669,188 @@ fn a_verified_identity_is_answered_from_the_verdict_cache_for_its_ttl() {
     ));
 }
 
+/// L8 (RFC 7517 §4.3, §4.4): a JWK whose `alg` is present and is not the token's, or whose
+/// `key_ops` is present without `verify`, is never used to verify a signature; the matching key
+/// with `alg` equal to the token's, or `key_ops` naming `verify`, still verifies.
 #[test]
-fn unknown_kid_after_refetch_is_rejected() {
+fn a_jwk_whose_alg_or_key_ops_forbid_it_does_not_verify() {
+    let key = TestKey::generate(KID);
+    let now = 1_700_000_000;
+    let token = key.mint(&base_claims(now));
+    let with = |member: &str, value: Value| {
+        let mut set: Value = serde_json::from_str(&key.jwks()).unwrap();
+        set["keys"][0][member] = value;
+        Module::new(&cfg("groups"), FixtureFetcher::new(set.to_string()))
+    };
+    for (member, value) in [
+        ("alg", serde_json::json!("ES384")),
+        ("key_ops", serde_json::json!(["encrypt"])),
+        ("key_ops", serde_json::json!([])),
+    ] {
+        assert!(
+            matches!(
+                with(member, value.clone()).verify(&token, now, Instant::now()),
+                AuthVerdict::Reject
+            ),
+            "{member}: {value} must not verify an ES256 signature"
+        );
+    }
+    for (member, value) in [
+        ("alg", serde_json::json!("ES256")),
+        ("key_ops", serde_json::json!(["verify"])),
+    ] {
+        assert!(
+            matches!(
+                with(member, value.clone()).verify(&token, now, Instant::now()),
+                AuthVerdict::Identify(_)
+            ),
+            "{member}: {value} verifies"
+        );
+    }
+}
+
+/// L9: a token whose header names NO kid is verified by the key set's single usable signing key
+/// for its algorithm (the kty its alg needs, an `alg` that is absent or its own, not
+/// encryption-only), if there is exactly one; with two such keys it is ambiguous and rejected.
+#[test]
+fn a_token_with_no_kid_uses_the_one_usable_key_for_its_alg() {
+    let key = TestKey::generate("k1");
+    let now = 1_700_000_000;
+    let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"ES256","typ":"JWT"}"#);
+    let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&base_claims(now)).unwrap());
+    let input = format!("{header}.{payload}");
+    let sig = key.kp.sign(&key.rng, input.as_bytes()).unwrap();
+    let token = format!("{input}.{}", URL_SAFE_NO_PAD.encode(sig.as_ref()));
+    let ec = || serde_json::from_str::<Value>(&key.jwks()).unwrap()["keys"][0].clone();
+    let rsa = serde_json::from_str::<Value>(&RsaTestKey::generate("r1").jwks()).unwrap()["keys"][0]
+        .clone();
+    let set = |keys: Vec<Value>| serde_json::json!({ "keys": keys }).to_string();
+
+    for (what, keys) in [
+        ("one EC key", vec![ec()]),
+        ("one EC key beside an RSA key", vec![rsa.clone(), ec()]),
+    ] {
+        let m = Module::new(&cfg("groups"), FixtureFetcher::new(set(keys)));
+        assert!(
+            matches!(
+                m.verify(&token, now, Instant::now()),
+                AuthVerdict::Identify(_)
+            ),
+            "{what}: the one usable key verifies a kid-less token"
+        );
+    }
+    let mut other =
+        serde_json::from_str::<Value>(&TestKey::generate("k2").jwks()).unwrap()["keys"][0].clone();
+    other["kid"] = serde_json::json!("k2");
+    let m = Module::new(&cfg("groups"), FixtureFetcher::new(set(vec![ec(), other])));
+    assert!(
+        matches!(m.verify(&token, now, Instant::now()), AuthVerdict::Reject),
+        "two usable EC keys: ambiguous"
+    );
+}
+
+/// L10: an identity answered from the verdict cache states the TTL it has LEFT, not the one it
+/// was first verified with: a hit 100 s after a 300 s verdict answers 200 s.
+#[test]
+fn a_cache_hit_answers_the_remaining_ttl() {
+    let key = TestKey::generate(KID);
+    let m = module_with(&key, "groups");
+    let now = 1_700_000_000;
+    let token = key.mint(&base_claims(now));
+    let ttl = |at: i64| match m.verify(&token, at, Instant::now()) {
+        AuthVerdict::Identify(p) => p.ttl_secs,
+        other => panic!("expected Identify, got {other:?}"),
+    };
+    assert_eq!(ttl(now), Some(300));
+    assert_eq!(ttl(now + 100), Some(200), "the hit answers what is left");
+    assert_eq!(
+        m.m.cached(&token, now + 299).map(|h| h.ttl_secs),
+        Some(Some(1))
+    );
+}
+
+/// L12 (S5): a rejected token is the caller's, not the operator's: logged ONCE at info with a
+/// reason word, never at warn — a token that fails its claims (expired) as one that fails its
+/// signature.
+#[test]
+fn a_rejected_token_is_logged_at_info_with_a_reason() {
+    let key = TestKey::generate(KID);
+    let m = module_with(&key, "groups");
+    let now = 1_700_000_000;
+    let mut expired = base_claims(now);
+    expired["exp"] = serde_json::json!(now - 3600);
+    let forged = TestKey::generate(KID).mint(&base_claims(now));
+    for (what, token, reason) in [
+        ("expired", key.mint(&expired), "reason=claims"),
+        ("forged", forged, "reason=signature"),
+    ] {
+        let (warn, all) = (
+            busbar_test_kit::warn_capture::WarnCapture::default(),
+            busbar_test_kit::warn_capture::WarnCapture::capturing_debug(),
+        );
+        for cap in [&warn, &all] {
+            let verdict = tracing::subscriber::with_default(cap.clone(), || {
+                m.verify(&token, now, Instant::now())
+            });
+            assert!(matches!(verdict, AuthVerdict::Reject), "{what}");
+        }
+        assert!(
+            warn.messages().is_empty(),
+            "{what}: not at warn: {:?}",
+            warn.messages()
+        );
+        assert_eq!(
+            all.count(reason),
+            1,
+            "{what}: once, with its reason: {:?}",
+            all.messages()
+        );
+    }
+}
+
+/// L13: a host clock that cannot be read (the `i64::MAX` sentinel `clock_or_fail_closed` maps it
+/// to) is the host's fault, not the token's: a bearer of this issuer FAILS its verify and a login's
+/// id_token is an OUTAGE, each with a reason naming the clock and a warn — never a 401.
+#[test]
+fn an_unreadable_host_clock_is_a_failure_not_a_bad_credential() {
+    let key = TestKey::generate(KID);
+    let m = module_with(&key, "groups");
+    let token = key.mint(&base_claims(now_unix()));
+    let cap = busbar_test_kit::warn_capture::WarnCapture::default();
+    let (bearer, login) = tracing::subscriber::with_default(cap.clone(), || {
+        let bearer = ready(m.m.verify(
+            Some(&token),
+            i64::MAX,
+            Instant::now(),
+            &mut m.idp.at_once(Some(ME)),
+        ));
+        let resp = LoginHttpResponse {
+            status: 200,
+            body: serde_json::json!({ "id_token": token }).to_string(),
+        };
+        let login = ready(m.m.identity_from_token_response(
+            &resp,
+            i64::MAX,
+            Instant::now(),
+            &mut m.idp.at_once(Some(ME)),
+        ));
+        (bearer, login)
+    });
+    for (what, answered) in [("bearer", bearer.map(|_| ())), ("login", login.map(|_| ()))] {
+        match answered {
+            Err(e) => assert!(e.contains("clock"), "{what}: {e}"),
+            Ok(()) => panic!("{what}: an unreadable clock is a failure, not a verdict"),
+        }
+    }
+    assert!(cap.contains("clock"), "warned: {:?}", cap.messages());
+}
+
+/// A kid absent from the key set is rejected, and the bounded rotation refetch it triggers is
+/// rate-limited: on a cold cache the one fetch is the initial one, and the refetch inside the same
+/// `jwks_min_refetch_secs` window is not made. (The refetch itself, past the window, is
+/// `kid_rotation_triggers_bounded_refetch`'s.)
+#[test]
+fn an_unknown_kid_is_rejected_with_its_refetch_rate_limited() {
     let key = TestKey::generate("real-kid");
     let m = module_with(&key, "groups");
     let now = 1_700_000_000;
@@ -651,6 +861,11 @@ fn unknown_kid_after_refetch_is_rejected() {
         m.verify(&token, now, Instant::now()),
         AuthVerdict::Reject
     ));
+    assert_eq!(
+        m.idp.calls(),
+        1,
+        "the initial fetch only: the refetch is rate-limited"
+    );
 }
 
 // ── claim-policy tests (drive the verifier directly) ──────────────────────────────────────────────
@@ -765,48 +980,77 @@ fn audience_array_form_accepted() {
     assert!(verifier("groups").validate_claims(&c, now).is_ok());
 }
 
-// ── multi-valued aud + azp (OIDC Core 1.0 §3.1.3.7) ────────────────────────────────────────────────
+// ── aud on the two paths: RFC 9068 access tokens, OIDC Core 1.0 §3.1.3.7 id_tokens ─────────────
 
-/// A multi-valued `aud` that lists an audience the client does NOT trust is accepted ONLY when an
-/// `azp` claim names the trusted client. This is the spec's authorized-party gate.
+/// O2: a BEARER (an RFC 9068 access token) is accepted when its `aud` CONTAINS the configured
+/// audience (RFC 7519 §4.1.3, RFC 9068 §4), however many other audiences it lists and whatever its
+/// `azp` names: `azp` is the client that asked for the token, never the resource audience, and the
+/// OIDC multi-audience rule is the id_token's (Keycloak access tokens carry
+/// `aud: ["busbar-api", "account"]`, `azp: "web-frontend"`). An `aud` not containing it is refused.
 #[test]
-fn multivalued_aud_with_untrusted_extra_is_accepted_when_azp_names_the_trusted_client() {
+fn a_bearer_aud_must_contain_the_audience_and_needs_no_azp() {
     let now = 1_700_000_000;
     let mut c = base_claims(now);
-    c["aud"] = serde_json::json!([AUDIENCE, "api://some-other-app"]);
-    c["azp"] = serde_json::json!(AUDIENCE);
+    c["aud"] = serde_json::json!([AUDIENCE, "account"]);
     assert!(
         verifier("groups").validate_claims(&c, now).is_ok(),
-        "a multi-aud token whose azp is the trusted client must be accepted"
+        "a multi-audience access token containing the audience, no azp"
     );
-}
-
-/// Under a bare `.any(trusted)` check, a token minted for the trusted client AND an
-/// attacker-controlled app sails through on the mere presence of the trusted audience. As
-/// implemented, an untrusted extra audience with NO `azp` is rejected.
-#[test]
-fn multivalued_aud_with_untrusted_extra_and_no_azp_is_rejected() {
-    let now = 1_700_000_000;
-    let mut c = base_claims(now);
-    c["aud"] = serde_json::json!([AUDIENCE, "api://attacker-app"]);
-    // no azp
+    c["azp"] = serde_json::json!("web-frontend");
+    assert!(
+        verifier("groups").validate_claims(&c, now).is_ok(),
+        "a multi-audience access token whose azp is the requesting client"
+    );
+    c["aud"] = serde_json::json!(["api://some-other-app", "account"]);
     let err = verifier("groups")
         .validate_claims(&c, now)
-        .expect_err("a multi-aud token with an untrusted extra and no azp must be rejected");
+        .expect_err("an aud not containing the audience");
     assert!(err.contains("audience"), "got: {err}");
 }
 
-/// The `azp` must equal the TRUSTED client, not merely be present: an `azp` naming the attacker app
-/// must not authorize the extra audience.
+/// O2: the browser-login `id_token` keeps OIDC Core 1.0 §3.1.3.7 against the `client_id`: a
+/// multi-valued `aud` with an audience the client does not trust needs an `azp` naming the client
+/// (step 4), and an `azp` that is PRESENT must name the client whatever the `aud` (step 5).
 #[test]
-fn multivalued_aud_with_wrong_azp_is_rejected() {
+fn an_id_token_aud_follows_the_oidc_azp_rules_against_the_client_id() {
+    let key = TestKey::generate(KID);
+    let mut c = cfg("groups");
+    c.audience = "api://x".to_string();
+    c.client_id = Some("cid".to_string());
+    let m = Module::new(&c, FixtureFetcher::new(key.jwks()));
     let now = 1_700_000_000;
-    let mut c = base_claims(now);
-    c["aud"] = serde_json::json!([AUDIENCE, "api://attacker-app"]);
-    c["azp"] = serde_json::json!("api://attacker-app");
+    let login = |aud: Value, azp: Option<&str>| {
+        let mut claims = base_claims(now);
+        claims["aud"] = aud;
+        if let Some(azp) = azp {
+            claims["azp"] = serde_json::json!(azp);
+        }
+        let resp = LoginHttpResponse {
+            status: 200,
+            body: serde_json::json!({ "id_token": key.mint(&claims) }).to_string(),
+        };
+        m.identity_from_token_response(&resp, now, Instant::now())
+    };
+    let multi = || serde_json::json!(["cid", "api://attacker-app"]);
+    assert!(matches!(
+        login(multi(), Some("cid")),
+        LoginOutcome::Identify(_)
+    ));
+    assert!(matches!(login(multi(), None), LoginOutcome::Reject));
+    assert!(matches!(
+        login(multi(), Some("api://attacker-app")),
+        LoginOutcome::Reject
+    ));
+    assert!(matches!(
+        login(serde_json::json!("cid"), Some("cid")),
+        LoginOutcome::Identify(_)
+    ));
     assert!(
-        verifier("groups").validate_claims(&c, now).is_err(),
-        "an azp that is not the trusted client must not authorize the untrusted extra audience"
+        matches!(
+            login(serde_json::json!("cid"), Some("someone-else")),
+            LoginOutcome::Reject
+        ),
+        "an azp present with a single aud must name the client (§3.1.3.7 step 5)"
     );
 }
 
@@ -1190,32 +1434,6 @@ fn ttl_secs_still_shortens_for_a_token_expiring_sooner_than_the_ceiling() {
 
 // ── clock-failure fail-closed (realistic broken-clock states, not just sub-epoch) ──────────────────
 
-#[test]
-fn now_unix_fails_closed_below_the_sanity_floor() {
-    // Below CLOCK_SANITY_FLOOR_UNIX simulates a dead RTC / NTP fault landing the clock in the past —
-    // the realistic broken-clock case, which `SystemTime::now()` reports as `Ok(small_value)` and
-    // never touches the `unwrap_or` branch at all. A token whose exp is comfortably in the "future"
-    // relative to that bogus small `now` must NOT be treated as valid.
-    let now = CLOCK_SANITY_FLOOR_UNIX - 1;
-    let mut c = base_claims(0);
-    c["exp"] = serde_json::json!(now + 3600); // "unexpired" relative to the broken clock
-    c["nbf"] = serde_json::json!(now - 10);
-    // Directly exercises validate_claims with the bogus `now` a broken now_unix() would have
-    // produced BEFORE this fix (i.e. proves the check rejects once now_unix correctly reports
-    // i64::MAX instead) by asserting the module-level now_unix() itself is what's under test:
-    assert!(
-        now_unix() >= CLOCK_SANITY_FLOOR_UNIX,
-        "the REAL now_unix() (real host clock) must read above the sanity floor for this test to \
-         mean anything"
-    );
-    // Simulate what now_unix() returns for a host clock below the floor: i64::MAX, fed straight into
-    // validate_claims, exactly as authenticate() would.
-    let err = verifier("groups")
-        .validate_claims(&c, i64::MAX)
-        .expect_err("a below-sanity-floor clock must fail the exp check, not pass it");
-    assert!(err.contains("expired"), "got: {err}");
-}
-
 /// The fail-closed MAPPING `now_unix` applies (OIDC-13): below the floor the reading becomes
 /// `i64::MAX` (every token then fails `exp`), at or above it the reading passes through. Pinning
 /// the mapping, not just the comparison, is what catches a `now_unix` that returns the raw reading.
@@ -1514,13 +1732,12 @@ fn identity_from_token_response_verifies_id_token() {
     ));
 }
 
-/// A KEY SET THAT CANNOT BE HAD AT LOGIN is a declined login, as in 1.5.5 (ARCHITECT ruling: v1.0.6
-/// `identity_from_token_response` answered `Reject` for a key set it could not fetch; v1.5.5
-/// `auth/token.rs:543-549` rendered that 401 "Sign-in was declined", 502 being only for a token
-/// hop that failed). Both ways it cannot be had: the JWKS fetch fails, or (no `jwks_url`) the
-/// discovery naming it fails. Each logs 1.5.5's warn with the cause.
+/// O1 (OWNER-SIGNED 2026-10-30: an IdP outage is never a 401): A KEY SET THAT CANNOT BE HAD AT
+/// LOGIN is an OUTAGE, not a declined login. Both ways it cannot be had: the JWKS fetch fails, or
+/// (no `jwks_url`) the discovery naming it fails. The module answers the error (the door's
+/// `LOGIN_OUTAGE`), naming the cause, and logs it at warn; it never answers `Reject`.
 #[test]
-fn a_key_set_that_cannot_be_had_at_login_is_a_declined_login_as_in_1_5_5() {
+fn a_key_set_that_cannot_be_had_at_login_is_an_outage_not_a_decline() {
     let key = TestKey::generate(KID);
     let now = now_unix();
     let response = LoginHttpResponse {
@@ -1544,22 +1761,72 @@ fn a_key_set_that_cannot_be_had_at_login_is_a_declined_login_as_in_1_5_5() {
                 &mut down.at_once(Some(ME)),
             ))
         });
-        assert!(
-            matches!(outcome, Ok(LoginOutcome::Reject)),
-            "{cause}: a declined login, never an outage: {outcome:?}"
-        );
-        assert_eq!(
-            cap.count("OIDC token signature verification failed"),
-            1,
-            "{cause}: 1.5.5's warn: {:?}",
-            cap.messages()
-        );
+        match outcome {
+            Err(e) => assert!(e.contains(cause), "{cause}: the error names why: {e}"),
+            other => panic!("{cause}: an outage, never a declined login: {other:?}"),
+        }
         assert!(
             cap.contains(cause),
-            "{cause}: the warn names why: {:?}",
+            "{cause}: a warn names why: {:?}",
             cap.messages()
         );
     }
+}
+
+/// O1 (OWNER-SIGNED 2026-10-30): on the BEARER path a key set that cannot be had is an outage —
+/// the verify answers its error (the door's FAILED with a reason line), never `Reject` — however it
+/// cannot be had: a cold-cache fetch failure, the same caller again while the rate limit holds the
+/// next attempt off, and a rotation refetch that fails while older keys are still held. A key
+/// MISMATCH stays a `Reject`: a bad signature, and a kid absent from a FRESHLY fetched set.
+#[test]
+fn a_key_set_that_cannot_be_had_fails_a_bearer_verify_and_a_mismatch_rejects_it() {
+    let key = TestKey::generate(KID);
+    let now = 1_700_000_000;
+    let token = key.mint(&base_claims(now));
+    let verify = |m: &OidcModule, idp: &Idp, token: &str, at: Instant| {
+        ready(m.verify(Some(token), now, at, &mut idp.at_once(Some(ME))))
+    };
+    let t0 = Instant::now();
+
+    // Cold cache, the IdP down: an outage, and again while the rate limit holds the retry off.
+    let m = OidcModule::new(&cfg("groups"));
+    let down = Idp::answering(Err("jwks unreachable".to_string()));
+    for at in [t0, t0 + Duration::from_secs(1)] {
+        match verify(&m, &down, &token, at) {
+            Err(e) => assert!(!e.is_empty()),
+            other => panic!("a key set that cannot be had is an outage: {other:?}"),
+        }
+    }
+
+    // Keys held, then the provider rotates while it is down: the rotation refetch fails, so a
+    // token naming the new kid cannot be judged — an outage, not "unknown kid".
+    let idp = Idp::new(key.jwks());
+    let m = OidcModule::new(&cfg("groups"));
+    assert!(matches!(
+        verify(&m, &idp, &token, t0),
+        Ok(AuthVerdict::Identify(_))
+    ));
+    idp.set_answer(Err("jwks unreachable".to_string()));
+    let rotated = TestKey::generate("rotated-kid").mint(&base_claims(now));
+    match verify(&m, &idp, &rotated, t0 + Duration::from_secs(61)) {
+        Err(e) => assert!(!e.is_empty()),
+        other => panic!("a failed rotation refetch is an outage: {other:?}"),
+    }
+
+    // The provider is up: a kid absent from the set it has just answered is a mismatch, and so
+    // is a signature that does not verify.
+    let idp = Idp::new(key.jwks());
+    let m = OidcModule::new(&cfg("groups"));
+    let ghost = TestKey::generate("ghost-kid").mint(&base_claims(now));
+    assert!(matches!(
+        verify(&m, &idp, &ghost, t0),
+        Ok(AuthVerdict::Reject)
+    ));
+    let forged = TestKey::generate(KID).mint(&base_claims(now));
+    assert!(matches!(
+        verify(&m, &idp, &forged, t0),
+        Ok(AuthVerdict::Reject)
+    ));
 }
 
 /// OIDC-1 (OIDC Core 1.0 §3.1.3.7 step 3): the browser-login `id_token`'s `aud` must contain
@@ -1766,20 +2033,13 @@ fn begin_and_complete_login_drive_the_full_flow() {
     }
 }
 
-/// `complete_login`'s `token_response` arm, driven through `complete_login` ITSELF rather than
-/// through the inner helper.
-///
-/// The round-trip test above reaches this behaviour via `identity_from_token_response` because the
-/// helper takes an injectable clock and `complete_login` does not. That left the arm in
-/// `complete_login` executed by no test at all: replacing its whole body with an unconditional
-/// `LoginOutcome::Identify(...)` (that is, handing out an identity for ANY token-endpoint response,
-/// with no signature and no claim check) kept the entire suite green. The e2e tests do not cover it
-/// either, since they drive `authenticate`, not the login flow.
-///
-/// Mints against the REAL clock so `complete_login`'s internal `now_unix()` accepts it, and pairs
-/// the positive case with a wrong-key negative so the test cannot pass on an unconditional accept.
+/// The module's token-response verification ([`OidcModule::identity_from_token_response`], which
+/// the door's `complete_login` calls), driven through this file's 1.5.5-shaped `complete_login`
+/// wrapper at the real clock, with a wrong-key negative so it cannot pass on an unconditional
+/// accept. The door's own `complete_login` (its exchange, nonce binding and verdicts) is driven
+/// through the real loader by the plugin crate's conformance tests, not here.
 #[test]
-fn complete_login_verifies_the_token_response_and_rejects_a_forged_one() {
+fn the_module_verifies_a_token_response_and_rejects_a_forged_one() {
     let key = TestKey::generate(KID);
     let real_now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1861,6 +2121,119 @@ fn an_idp_5xx_or_429_at_the_token_endpoint_is_an_outage_not_a_decline() {
     assert!(matches!(answered(400), Ok(LoginOutcome::Reject)));
 }
 
+/// O4 (OWNER-SIGNED 2026-10-30: only RFC 6749 §5.2 credential errors answer 401): a 400 or 401
+/// from the token endpoint carrying a §5.2 JSON `error` is a declined login, logged with the
+/// allow-listed code — `invalid_client`/`unauthorized_client` at warn (the operator's client is
+/// misconfigured), `invalid_grant` and the rest at info — and an unlisted code never echoed. Any
+/// other non-2xx (a redirect, 403, 404, 408, a 4xx with no §5.2 body) is the IdP not answering the
+/// exchange: an OUTAGE naming the status.
+#[test]
+fn only_an_rfc_6749_credential_error_at_the_token_endpoint_is_a_decline() {
+    let m = OidcModule::new(&cfg("groups"));
+    let idp = Idp::new(String::new());
+    let answered = |status: u16, body: &str| {
+        let response = LoginHttpResponse {
+            status,
+            body: body.to_string(),
+        };
+        let (warn, all) = (
+            busbar_test_kit::warn_capture::WarnCapture::default(),
+            busbar_test_kit::warn_capture::WarnCapture::capturing_debug(),
+        );
+        let mut outcome = None;
+        for cap in [&warn, &all] {
+            outcome = Some(tracing::subscriber::with_default(cap.clone(), || {
+                ready(m.identity_from_token_response(
+                    &response,
+                    1_700_000_000,
+                    Instant::now(),
+                    &mut idp.at_once(Some(ME)),
+                ))
+            }));
+        }
+        (outcome.expect("answered"), warn, all)
+    };
+    for (status, code, at_warn) in [
+        (400, "invalid_grant", false),
+        (400, "invalid_request", false),
+        (401, "invalid_client", true),
+        (400, "unauthorized_client", true),
+    ] {
+        let (outcome, warn, all) = answered(status, &format!(r#"{{"error":"{code}"}}"#));
+        assert!(
+            matches!(outcome, Ok(LoginOutcome::Reject)),
+            "{status} {code}: declined, got {outcome:?}"
+        );
+        assert!(all.contains(code), "{code} is logged: {:?}", all.messages());
+        assert_eq!(
+            warn.contains(code),
+            at_warn,
+            "{code}: {:?}",
+            warn.messages()
+        );
+    }
+    let (outcome, _, all) = answered(400, r#"{"error":"SECRET-made-up"}"#);
+    assert!(matches!(outcome, Ok(LoginOutcome::Reject)), "{outcome:?}");
+    assert!(
+        !all.contains("SECRET"),
+        "an unlisted code is not echoed: {:?}",
+        all.messages()
+    );
+    for (status, body) in [
+        (302, ""),
+        (403, r#"{"error":"invalid_grant"}"#),
+        (404, "{}"),
+        (408, ""),
+        (400, "<html>bad gateway</html>"),
+        (401, "{}"),
+        (400, r#"{"error":42}"#),
+    ] {
+        let (outcome, warn, _) = answered(status, body);
+        let Err(cause) = outcome else {
+            panic!("{status} {body:?} is not a credential error: an outage, got {outcome:?}");
+        };
+        assert!(cause.contains(&status.to_string()), "{cause}");
+        assert!(
+            warn.contains(&status.to_string()),
+            "{status}: logged at warn: {:?}",
+            warn.messages()
+        );
+    }
+}
+
+/// L3: a `begin_login` the host lends NO nonce (absent or empty) is refused — FAILED, logged —
+/// rather than answering an authorize URL without one: `complete_login` requires the id_token to
+/// carry the login's nonce, so such a login could only ever fail its security check.
+#[test]
+fn a_begin_login_with_no_nonce_is_refused_and_logged() {
+    let mut c = cfg("groups");
+    c.authorization_endpoint = Some("https://idp.test/authorize".to_string());
+    let m = OidcModule::new(&c);
+    let idp = Idp::new(String::new());
+    for nonce in [None, Some(String::new())] {
+        let begin = BeginLogin {
+            redirect_uri: "https://busbar.test/auth/token".to_string(),
+            state: "st".to_string(),
+            code_challenge: "ch".to_string(),
+            nonce: nonce.clone(),
+            scopes: Vec::new(),
+        };
+        let cap = busbar_test_kit::warn_capture::WarnCapture::default();
+        let begun = tracing::subscriber::with_default(cap.clone(), || {
+            ready(m.begin_login(&begin, Instant::now(), &mut idp.at_once(Some(ME))))
+        });
+        match begun {
+            Err(e) => assert!(e.contains("nonce"), "{nonce:?}: {e}"),
+            other => panic!("{nonce:?}: a login with no nonce is refused, got {other:?}"),
+        }
+        assert!(
+            cap.contains("nonce"),
+            "{nonce:?}: logged: {:?}",
+            cap.messages()
+        );
+    }
+}
+
 /// Fail-closed: a module with no login endpoints configured whose issuer's discovery document names
 /// none either (a verify-only deployment) rejects both login steps rather than emitting a malformed
 /// authorize URL or exchange.
@@ -1873,7 +2246,7 @@ fn login_fails_closed_without_endpoints() {
         redirect_uri: "https://busbar.test/auth/token".to_string(),
         state: "st".to_string(),
         code_challenge: "ch".to_string(),
-        nonce: None,
+        nonce: Some("nc".to_string()),
         scopes: Vec::new(),
     };
     assert!(matches!(m.begin_login(&begin), LoginOutcome::Reject));
@@ -1895,6 +2268,91 @@ fn login_fails_closed_without_endpoints() {
 
 // ── log-injection: untrusted header strings are escaped in errors that reach a log (OIDC-3) ──────
 
+/// O7: every far-end string (a JWKS key's `kty`/`crv`, a discovery document's `issuer`) and every
+/// attacker string (a token header's `alg`, `kid`, `crit`) an error or log repeats is escaped AND
+/// capped at 64 characters (then `…`), through one helper: a 300-character value with a newline and
+/// a terminal escape never reaches a log line whole.
+#[test]
+fn far_end_and_attacker_strings_are_escaped_and_capped_in_errors() {
+    let hostile = format!("{}\n\u{1b}[31m", "A".repeat(300));
+    let check = |what: &str, err: &str| {
+        assert!(
+            !err.contains('\n') && !err.contains('\u{1b}'),
+            "{what}: not escaped: {err:?}"
+        );
+        assert!(
+            !err.contains(&"A".repeat(65)),
+            "{what}: not capped: {} chars",
+            err.len()
+        );
+        assert!(
+            err.contains(&format!("{}…", "A".repeat(64))),
+            "{what}: named up to the cap: {err:?}"
+        );
+    };
+    let key = TestKey::generate(KID);
+    let now = 1_700_000_000;
+
+    let c = crate::cache::JwksCache::new(Duration::from_secs(60), Duration::from_secs(3600));
+    let idp = FixtureFetcher::new(key.jwks());
+    let err = ready(c.with_key(
+        "https://jwks.test/keys",
+        &hostile,
+        Instant::now(),
+        &mut idp.at_once(Some(ME)),
+        |_| Ok(()),
+    ))
+    .expect_err("an unknown kid");
+    check("kid", err.message());
+
+    let jwk = jwks::JwkSet::parse(&key.jwks()).unwrap().keys[0].clone();
+    let token = token_with_alg(KID, &hostile, &base_claims(now), b"sig");
+    let parts = jwt::split(&token).unwrap();
+    check("alg", &jwt::verify_signature(&parts, &jwk).unwrap_err());
+
+    let parts_with = |alg: &str, crit: Option<Vec<String>>| jwt::Parts {
+        header: jwt::Header {
+            alg: alg.to_string(),
+            kid: None,
+            crit,
+        },
+        payload: Vec::new(),
+        signature: Vec::new(),
+        signing_input: "h.p",
+    };
+    check(
+        "crit",
+        &jwt::verify_signature(&parts_with("ES256", Some(vec![hostile.clone()])), &jwk)
+            .unwrap_err(),
+    );
+    let mut odd = jwk.clone();
+    odd.kty = hostile.clone();
+    odd.alg = None;
+    check(
+        "kty",
+        &jwt::verify_signature(&parts_with("RS256", None), &odd).unwrap_err(),
+    );
+    match odd.material() {
+        jwks::KeyMaterial::Unusable(e) => check("kty (material)", e),
+        _ => panic!("an unknown kty is unusable"),
+    }
+    let mut curve = jwk.clone();
+    curve.crv = Some(hostile.clone());
+    check(
+        "crv",
+        &jwt::verify_signature(&parts_with("ES256", None), &curve).unwrap_err(),
+    );
+
+    let doc = serde_json::json!({ "issuer": hostile }).to_string();
+    let err = discovery::check_document(
+        &discovery_cfg(),
+        "https://login.microsoftonline.com/x",
+        Ok(doc),
+    )
+    .unwrap_err();
+    check("discovery issuer", &err);
+}
+
 /// `kid` and `alg` come from the UNSIGNED header of an untrusted bearer, and the errors that carry
 /// them reach `tracing::warn!` before any signature is accepted. A newline or a terminal escape in
 /// either must not survive into the error text (a forged log record / recoloured terminal).
@@ -1912,11 +2370,11 @@ fn untrusted_kid_and_alg_are_escaped_in_error_text() {
     ))
     .expect_err("an unknown kid must not verify");
     assert!(
-        !err.contains('\n') && !err.contains('\u{1b}'),
+        !err.message().contains('\n') && !err.message().contains('\u{1b}'),
         "the unknown-kid error must escape the header's kid: {err:?}"
     );
     assert!(
-        err.contains("a\\nb"),
+        err.message().contains("a\\nb"),
         "the kid is still named, escaped: {err:?}"
     );
 
@@ -2050,6 +2508,86 @@ fn an_id_token_binds_only_to_the_logins_nonce() {
         "n-1"
     ));
     assert!(!nonce_binds(&body("garbage".to_string()), "n-1"));
+}
+
+/// O5: the token endpoint's answer is parsed into a typed struct whose tokens live in wiped
+/// holders (`Zeroizing`), its other members ignored, and a body that does not parse is never
+/// echoed.
+#[test]
+fn the_token_response_holds_its_tokens_in_wiped_holders() {
+    let r = TokenResponse::parse(
+        r#"{"id_token":"a.b.c","access_token":"at","refresh_token":"rt","token_type":"Bearer","expires_in":3600,"x":{"y":[1]}}"#,
+    )
+    .expect("a token response parses, unknown members ignored");
+    let held: &zeroize::Zeroizing<String> = r.id_token.as_ref().expect("an id_token");
+    assert_eq!(held.as_str(), "a.b.c");
+    let err = TokenResponse::parse("not json SECRET")
+        .err()
+        .expect("refused");
+    assert!(!err.contains("SECRET"), "{err}");
+}
+
+/// L11: every log line naming an IdP URL names it as `fetch::shown` does, its userinfo removed:
+/// the JWKS fetch failing (nothing kept, and a previous set kept) and discovery failing.
+#[test]
+fn a_logged_idp_url_drops_its_userinfo() {
+    let key = TestKey::generate(KID);
+    let cap = busbar_test_kit::warn_capture::WarnCapture::default();
+    tracing::subscriber::with_default(cap.clone(), || {
+        let c = crate::cache::JwksCache::new(Duration::from_secs(1), Duration::from_secs(1));
+        let url = "https://jwks-user:SECRETPW@jwks.test/keys";
+        let idp = Idp::answering(Err("down".to_string()));
+        let t0 = Instant::now();
+        let _ = ready(c.with_key(url, KID, t0, &mut idp.at_once(Some(ME)), |_| Ok(())));
+        idp.set_body(key.jwks());
+        let later = t0 + Duration::from_secs(2);
+        let _ = ready(c.with_key(url, KID, later, &mut idp.at_once(Some(ME)), |_| Ok(())));
+        idp.set_answer(Err("down".to_string()));
+        let _ = ready(c.with_key(
+            url,
+            KID,
+            later + Duration::from_secs(2),
+            &mut idp.at_once(Some(ME)),
+            |_| Ok(()),
+        ));
+
+        let mut d = discovery_cfg();
+        d.issuer = "https://issuer-user:SECRETPW@login.example/v2.0".to_string();
+        let m = OidcModule::new(&d);
+        let _ = ready(m.jwks_url(Instant::now(), &mut idp.at_once(Some(ME))));
+    });
+    let logged = cap.messages().join("\n");
+    assert!(logged.contains("JWKS fetch failed"), "{logged}");
+    assert!(logged.contains("serving the previous key set"), "{logged}");
+    assert!(logged.contains("OIDC discovery failed"), "{logged}");
+    assert!(
+        !logged.contains("SECRETPW"),
+        "a URL's userinfo is logged: {logged}"
+    );
+}
+
+/// L14: the JWKS entries a fetch skips as unusable are not dropped silently: one warn per fetch
+/// names how many (and never their content); a set with none skipped says nothing.
+#[test]
+fn skipped_jwks_entries_are_counted_in_one_warn() {
+    let key = TestKey::generate(KID);
+    let good = serde_json::from_str::<Value>(&key.jwks()).unwrap()["keys"][0].clone();
+    let body = serde_json::json!({
+        "keys": [good, {"kid": "no-kty-SECRET"}, {"kty": 7}],
+    })
+    .to_string();
+    let cap = busbar_test_kit::warn_capture::WarnCapture::default();
+    let set = tracing::subscriber::with_default(cap.clone(), || jwks::JwkSet::parse(&body))
+        .expect("the usable key parses");
+    assert_eq!(set.keys.len(), 1);
+    assert_eq!(cap.messages().len(), 1, "one warn: {:?}", cap.messages());
+    assert!(cap.contains("skipped=2"), "{:?}", cap.messages());
+    assert!(!cap.contains("SECRET"), "{:?}", cap.messages());
+
+    let quiet = busbar_test_kit::warn_capture::WarnCapture::default();
+    tracing::subscriber::with_default(quiet.clone(), || jwks::JwkSet::parse(&key.jwks()))
+        .expect("parses");
+    assert!(quiet.messages().is_empty(), "{:?}", quiet.messages());
 }
 
 /// Every refusal of the browser login's token response is explained in the plugin's log, by status
@@ -2321,14 +2859,24 @@ fn a_token_claiming_the_first_providers_issuer_with_a_bad_signature_is_refused_b
 ) {
     let (key_a, a, key_b, b) = two_providers();
     let now = 1_700_000_000;
-    let forged = key_b.mint(&claims_of(ISSUER, AUDIENCE, now));
-    let cap = busbar_test_kit::warn_capture::WarnCapture::default();
+    // Signed by B's key but naming A's kid, so A finds its key and the SIGNATURE fails (not an
+    // unknown kid).
+    let forged = {
+        let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"ES256","typ":"JWT","kid":"kid-a"}"#);
+        let payload =
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims_of(ISSUER, AUDIENCE, now)).unwrap());
+        let input = format!("{header}.{payload}");
+        let sig = key_b.kp.sign(&key_b.rng, input.as_bytes()).unwrap();
+        format!("{input}.{}", URL_SAFE_NO_PAD.encode(sig.as_ref()))
+    };
+    let cap = busbar_test_kit::warn_capture::WarnCapture::capturing_debug();
     let walked = tracing::subscriber::with_default(cap.clone(), || chain(&[&a, &b], &forged, now));
     assert_eq!(walked, Walked::Refused(0));
     assert_eq!(b.idp.calls(), 0, "B never judged it");
     assert!(
-        cap.contains("signature verification failed"),
-        "A's refusal names its reason"
+        cap.contains("OIDC token rejected") && cap.contains("JWT signature verification failed"),
+        "A's refusal names the signature: {:?}",
+        cap.messages()
     );
     // Our issuer with a wrong audience, or expired, is refused by A too: never handed on.
     for c in [
@@ -2376,7 +2924,7 @@ fn a_begin_login_with_no_authorize_endpoint_is_logged() {
         redirect_uri: "https://busbar.test/auth/token".to_string(),
         state: "st".to_string(),
         code_challenge: "ch".to_string(),
-        nonce: None,
+        nonce: Some("nc".to_string()),
         scopes: Vec::new(),
     };
     let cap = busbar_test_kit::warn_capture::WarnCapture::capturing_debug();

@@ -51,7 +51,7 @@ pub mod jwt;
 mod open;
 pub mod verdicts;
 
-pub use cache::JwksCache;
+pub use cache::{JwksCache, KeyError};
 pub use discovery::Discovery;
 pub use fetch::Fetch;
 pub use flight::Step;
@@ -60,28 +60,34 @@ pub use open::config;
 /// The default role/group claim name — the token claim read into the principal's ROLES when the
 /// operator does not set `role_claim`, and the value the Entra >200-groups overage guard keys on.
 const DEFAULT_ROLE_CLAIM: &str = "groups";
-/// Default JWKS refetch bound (the kid-rotation rate limit) and TTL.
+/// Default JWKS refetch bound (the kid-rotation rate limit) and JWKS TTL (not the verdict
+/// cache's: [`verdicts`]).
 const DEFAULT_MIN_REFETCH_SECS: u64 = 60;
-const DEFAULT_TTL_SECS: u64 = 3600;
+const DEFAULT_JWKS_TTL_SECS: u64 = 3600;
 /// Small clock-skew tolerance applied to `exp`/`nbf` (seconds) — standard practice so a few seconds of
 /// clock drift between busbar and the IdP does not spuriously reject a just-issued / near-expiry token.
 const CLOCK_SKEW_SECS: i64 = 60;
 /// Ceiling on the credential-cache TTL this module suggests via `Principal::ttl_secs`, the TTL its
-/// own verdict cache ([`verdicts`]) holds an identity for. This is the default cache TTL, and it
-/// must only ever SHORTEN it, never lengthen it: a token derives its TTL from its own remaining
-/// `exp`, but a standard access token's `exp` is often itself ~3600s out, and suggesting that as the
-/// cache TTL would take the stale-revocation window from 5 minutes to up to an hour. `min`-ing
-/// against this bounds the over-cache window while still shortening the TTL for a token that
-/// expires sooner than this.
+/// own verdict cache ([`verdicts`]) holds an identity for. It equals that cache's default TTL (300
+/// s, `verdicts`' own constant) and must only ever SHORTEN it, never lengthen it: a token derives
+/// its TTL from its own remaining `exp`, but a standard access token's `exp` is often itself ~3600s
+/// out, and suggesting that as the cache TTL would take the stale-revocation window from 5 minutes
+/// to up to an hour. `min`-ing against this bounds the over-cache window while still shortening
+/// the TTL for a token that expires sooner than this.
 const MAX_CACHE_TTL_SECS: i64 = 300;
 /// A host clock reading before this instant means the clock cannot be trusted at all — used to make
-/// `now_unix()` fail CLOSED not just on a sub-epoch clock (`SystemTime::now()` returning `Err`), but
+/// [`clock_or_fail_closed`] (every clock reading: the request's timestamp, the host's `clock.now`) fail CLOSED not just on a sub-epoch clock (`SystemTime::now()` returning `Err`), but
 /// on the far more realistic broken-clock states: a dead RTC booting a host at the epoch, or an
 /// NTP/RTC fault landing the clock in 1970-2000. Both of those return `Ok(small_value)`, never hit the
 /// `unwrap_or` fallback, and would otherwise still make `exp` checks pass for virtually any real
 /// token — the exact fail-open failure mode this whole guard exists to close. Updated occasionally is
 /// fine; it only needs to stay behind "now".
 const CLOCK_SANITY_FLOOR_UNIX: i64 = 1_767_225_600; // 2026-01-01T00:00:00Z
+
+/// Why no token can be judged while the host clock reads `i64::MAX` ([`clock_or_fail_closed`]).
+const CLOCK_UNREADABLE: &str =
+    "the host clock is unreadable or reads before 2026-01-01 (the clock \
+     sanity floor), so no token can be judged; fix the host clock";
 
 /// The operator's `identity-providers:` settings for this module, deserialized from the JSON the engine passes to
 /// the plugin's `open`.
@@ -98,7 +104,7 @@ pub struct OidcConfig {
     /// op that needs it.
     #[serde(default)]
     pub jwks_url: Option<String>,
-    /// Which token claim carries the caller's roles/groups → the principal's GROUPS. Default
+    /// Which token claim carries the caller's roles/groups → the principal's ROLES. Default
     /// `groups`; set `roles` to use Entra app-roles (the bounded-count alternative that sidesteps the
     /// >200-groups overage).
     #[serde(default = "default_role_claim")]
@@ -149,7 +155,7 @@ fn default_min_refetch_secs() -> u64 {
     DEFAULT_MIN_REFETCH_SECS
 }
 fn default_ttl_secs() -> u64 {
-    DEFAULT_TTL_SECS
+    DEFAULT_JWKS_TTL_SECS
 }
 
 /// The pure token VERIFIER: config-derived policy (issuer/audience/role_claim) plus the current time
@@ -159,12 +165,17 @@ pub struct OidcVerifier {
     issuer: String,
     audience: String,
     role_claim: String,
+    /// Whether this verifier judges a browser-login `id_token` (OIDC Core 1.0 §3.1.3.7's
+    /// authorized-party rules against `audience`, the client_id) rather than a bearer access token
+    /// (RFC 9068 §4: `aud` contains the resource audience, no `azp` rule).
+    id_token: bool,
 }
 
 /// The result of validating a token's CLAIMS (post-signature): the resolved principal, or a denial
 /// reason. Kept separate from the signature step so tests can exercise claim policy directly.
 impl OidcVerifier {
-    /// The verifier requiring `issuer` and `audience` exactly, reading roles from `role_claim`.
+    /// The BEARER verifier: `issuer` exactly, an `aud` containing `audience` (RFC 7519 §4.1.3,
+    /// RFC 9068 §4), roles from `role_claim`.
     pub fn new(
         issuer: impl Into<String>,
         audience: impl Into<String>,
@@ -174,6 +185,20 @@ impl OidcVerifier {
             issuer: issuer.into(),
             audience: audience.into(),
             role_claim: role_claim.into(),
+            id_token: false,
+        }
+    }
+
+    /// The browser-login `id_token` verifier: as [`Self::new`] with the OAuth `client_id` as the
+    /// audience, plus OIDC Core 1.0 §3.1.3.7's authorized-party rules against it.
+    pub fn for_id_token(
+        issuer: impl Into<String>,
+        client_id: impl Into<String>,
+        role_claim: impl Into<String>,
+    ) -> Self {
+        Self {
+            id_token: true,
+            ..Self::new(issuer, client_id, role_claim)
         }
     }
 
@@ -182,46 +207,42 @@ impl OidcVerifier {
     /// overage marker (REJECT, never call Graph), and reads `role_claim` into the principal's groups.
     /// `now_unix` is the current UNIX time in seconds.
     pub fn validate_claims(&self, claims: &Value, now_unix: i64) -> Result<Principal, String> {
-        // `now_unix()`'s broken-clock sentinel: refused outright, so an `exp` that saturates cannot
+        // `clock_or_fail_closed`'s broken-clock sentinel: refused outright, so an `exp` that saturates cannot
         // pass it, and the refusal names the clock rather than the token.
         if now_unix == i64::MAX {
-            return Err("the host clock is unreadable or reads before 2026-01-01 (the clock sanity floor), so every token is treated as expired; fix the host clock".to_string());
+            return Err(CLOCK_UNREADABLE.to_string());
         }
         // iss — exact match. A wrong issuer is a different tenant / a token minted elsewhere.
         match claims.get("iss").and_then(Value::as_str) {
             Some(iss) if iss == self.issuer => {}
             Some(other) => {
                 return Err(format!(
-                    "token issuer '{other}' does not match the configured issuer"
+                    "token issuer '{}' does not match the configured issuer",
+                    untrusted(other)
                 ))
             }
             None => return Err("token has no 'iss' claim".to_string()),
         }
 
         // aud — `aud` may be a single string or an array of strings (RFC 7519). The configured
-        // audience MUST be present. For the MULTI-VALUED array form, OIDC Core 1.0 §3.1.3.7 is
-        // stricter than "any match": a token that also lists audiences the client does not trust MUST
-        // be rejected UNLESS an `azp` (authorized party) claim is present and equals the trusted
-        // client — the `.any(trusted)` shortcut would otherwise wave through a token minted for the
-        // trusted client AND some attacker-controlled app. A single-string `aud`, or an array whose
-        // only value is the trusted audience, needs no `azp`.
+        // audience MUST be present (RFC 7519 §4.1.3). A BEARER needs nothing more (RFC 9068 §4: an
+        // access token may name several resource audiences, and its `azp` is the client that asked
+        // for it, never the resource). An ID TOKEN follows OIDC Core 1.0 §3.1.3.7 against the
+        // client_id: a multi-valued `aud` that also lists audiences the client does not trust is
+        // rejected UNLESS `azp` names the client (step 4) — the `.any(trusted)` shortcut would wave
+        // through a token minted for the client AND an attacker-controlled app — and an `azp` that
+        // is present must name the client whatever the `aud` (step 5).
         let trusted = self.audience.as_str();
+        let azp = claims.get("azp").and_then(Value::as_str);
         let aud_ok = match claims.get("aud") {
             Some(Value::String(s)) => s == trusted,
             Some(Value::Array(a)) => {
                 let trusted_present = a.iter().any(|v| v.as_str() == Some(trusted));
                 let has_untrusted_extra = a.iter().any(|v| v.as_str() != Some(trusted));
-                if !trusted_present {
-                    false
-                } else if has_untrusted_extra {
-                    // Multiple audiences, at least one untrusted: require azp == the trusted client.
-                    claims.get("azp").and_then(Value::as_str) == Some(trusted)
-                } else {
-                    true
-                }
+                trusted_present && !(self.id_token && has_untrusted_extra && azp != Some(trusted))
             }
             _ => false,
-        };
+        } && !(self.id_token && claims.get("azp").is_some() && azp != Some(trusted));
         if !aud_ok {
             return Err(
                 "token audience does not match the configured audience (or lists an untrusted \
@@ -245,7 +266,10 @@ impl OidcVerifier {
         let exp = match as_numeric_date_floor(claims.get("exp")) {
             Some(exp) if exp.saturating_add(CLOCK_SKEW_SECS) >= now_unix => exp,
             Some(_) => return Err("token has expired".to_string()),
-            None => return Err("token has no 'exp' claim".to_string()),
+            None if claims.get("exp").is_none() => {
+                return Err("token has no 'exp' claim".to_string())
+            }
+            None => return Err("token has an 'exp' claim that is not a NumericDate".to_string()),
         };
 
         // nbf — optional; if present, must not be in the future (with skew tolerance). Same
@@ -337,12 +361,11 @@ impl OidcVerifier {
         let mut principal = Principal::from_id(format!("oidc:{subject}"));
         principal.name = name;
         principal.roles = groups;
-        // Bound the engine's credential-cache lifetime to the token's OWN remaining validity instead
-        // of the engine's blanket default (300s): this module is the only component that knows the
-        // real `exp`, and the ABI crosses here, so this is the only place the bound can be set. Without
-        // it, a token cached at T with exp=T+10 keeps authenticating from cache until T+300 — a replay
-        // window that outlives the token by up to five minutes and never re-enters this module's expiry
-        // check. `saturating_sub` + `max(0)`: exp can be within CLOCK_SKEW_SECS in the past and still
+        // Bound the verdict cache's lifetime for this identity ([`verdicts`], and the TTL the door
+        // states to the host) to the token's OWN remaining validity instead of the cache's blanket
+        // default (300s): only this module knows the real `exp`. Without it, a token cached at T
+        // with exp=T+10 keeps authenticating from cache until T+300 — a replay window that outlives
+        // the token by up to five minutes and never re-enters this module's expiry check. `saturating_sub` + `max(0)`: exp can be within CLOCK_SKEW_SECS in the past and still
         // pass the check above, which must not underflow into a huge u64. Also `min`-ed against
         // MAX_CACHE_TTL_SECS: an un-ceilinged suggestion would, for a standard ~3600s-lived access
         // token, WIDEN the cache window instead of shortening it (the default is 300s). This can
@@ -352,8 +375,24 @@ impl OidcVerifier {
     }
 }
 
-/// The longest token issuer a log line repeats: the claim is unverified caller input.
-const ISSUER_LOG_MAX: usize = 128;
+/// The longest far-end or attacker string an error or log line repeats, in characters.
+const UNTRUSTED_MAX: usize = 64;
+
+/// A FAR-END string (a JWKS key's `kty`/`crv`, a discovery document's `issuer`) or an ATTACKER one
+/// (a token's `alg`, `kid`, `crit`, `iss`) as an error or log line repeats it: escaped (a newline or
+/// a terminal escape cannot forge or colour a record) and capped at [`UNTRUSTED_MAX`] characters,
+/// then `…`. The one helper every such site uses.
+pub fn untrusted(s: &str) -> String {
+    let mut shown: String = s
+        .chars()
+        .take(UNTRUSTED_MAX)
+        .flat_map(char::escape_debug)
+        .collect();
+    if s.chars().nth(UNTRUSTED_MAX).is_some() {
+        shown.push('…');
+    }
+    shown
+}
 
 /// Issuer routing: `None` when the (UNVERIFIED) claims `payload` names exactly `issuer` as its
 /// `iss`, so the token is this provider's to verify; otherwise the issuer it names instead, as a
@@ -367,12 +406,7 @@ fn foreign_issuer(payload: &[u8], issuer: &str) -> Option<String> {
         .and_then(Value::as_str)
     {
         Some(iss) if iss == issuer => None,
-        Some(iss) => Some(
-            iss.chars()
-                .take(ISSUER_LOG_MAX)
-                .flat_map(char::escape_debug)
-                .collect(),
-        ),
+        Some(iss) => Some(untrusted(iss)),
         None => Some("<none>".to_string()),
     }
 }
@@ -421,8 +455,8 @@ fn as_numeric_date(v: Option<&Value>, round: impl Fn(f64) -> f64) -> Option<i64>
     v.as_i64().or_else(|| v.as_f64().map(|f| round(f) as i64))
 }
 
-/// Read a claim as a list of strings. Accepts a JSON array of strings OR a single string (a
-/// space-free scalar role). Anything else yields an empty list.
+/// Read a claim as a list of strings. Accepts a JSON array of strings OR a single string (one
+/// role, taken whole). Anything else yields an empty list.
 fn extract_string_list(v: Option<&Value>) -> Vec<String> {
     match v {
         Some(Value::Array(a)) => a
@@ -464,7 +498,7 @@ impl OidcModule {
     pub fn new(cfg: &OidcConfig) -> Self {
         Self {
             verifier: OidcVerifier::new(&cfg.issuer, &cfg.audience, &cfg.role_claim),
-            login_verifier: OidcVerifier::new(
+            login_verifier: OidcVerifier::for_id_token(
                 &cfg.issuer,
                 resolved_client_id(cfg),
                 &cfg.role_claim,
@@ -489,6 +523,12 @@ impl OidcModule {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(why.to_string())
+    }
+
+    /// Have the issuer's discovery document asked for again at its next use (`refresh`), the one
+    /// held serving until then.
+    pub fn rediscover(&self) {
+        self.discovery.expire();
     }
 
     /// Drop every cached verdict (`refresh`, the admin cache flush): how many there were.
@@ -571,10 +611,11 @@ impl OidcModule {
         let Some(url) = doc.get(field).and_then(Value::as_str) else {
             return Step::Ready(Ok(None));
         };
-        // A key set or a token exchange the DOCUMENT names, on any host, is taken over https only;
-        // WHERE it goes is the destination guard's (the needs' classes). The authorize URL is a
-        // browser redirect, never fetched.
-        if let Some(setting) = fetched_setting(field) {
+        // A key set, a token exchange or an authorize URL the DOCUMENT names, on any host, is taken
+        // over https only (plain http only to loopback); WHERE a fetched one goes is the
+        // destination guard's (the needs' classes). The authorize URL is a browser redirect, never
+        // fetched, but the browser is never sent to it in plaintext.
+        if let Some(setting) = discovered_setting(field) {
             if let Err(why) = discovered_secure(field, setting, url) {
                 io.refused(&why);
                 return Step::Ready(Err(why));
@@ -610,18 +651,18 @@ impl OidcModule {
     /// [`OidcVerifier::validate_claims`] for iss/aud/exp/nbf) to produce a [`Principal`]. The `aud`
     /// checked is the OAuth `client_id`, not the bearer `audience` (OIDC Core 1.0 §3.1.3.7 step 3).
     /// A missing/malformed body, a missing `id_token`, or any signature/claim failure is a
-    /// fail-closed `Reject`. So is an `id_token` whose key set cannot be had — fetched, or its URL
-    /// discovered: a key set that cannot be had is a `Reject`, which the host renders as the
-    /// declined sign-in, with a warn naming why.
+    /// fail-closed `Reject`. An `id_token` whose key set cannot be had — fetched, or its URL
+    /// discovered — is an OUTAGE (OWNER-SIGNED 2026-10-30: an IdP outage is never a 401): the
+    /// error, which the door answers `LOGIN_OUTAGE`, with a warn naming why.
     ///
-    /// NOTE: OIDC `nonce` is minted by the CORE at begin and is NOT carried back on
-    /// the callback, so nonce binding is the core's to enforce; this reuses the existing
-    /// signature+claims path (iss/aud/exp) that the verify module already trusts.
+    /// The OIDC `nonce` is minted by the CORE at begin and lent again on the callback; the door
+    /// binds the token response to it ([`nonce_binds`]) before this verifies the id_token, and
+    /// [`Self::begin_login`] refuses a login the host lends no nonce.
     ///
     /// # Errors
-    /// The identity provider could not answer: its token endpoint answered 5xx or 429. That is an
-    /// outage (the host answers 503, retryable), never a declined login. Every
-    /// other failure is a `Reject`.
+    /// The identity provider could not answer: its token endpoint answered 5xx or 429, or the
+    /// id_token's key set cannot be had. That is an outage (the host answers 503, retryable), never
+    /// a declined login. Every other failure is a `Reject`.
     pub fn identity_from_token_response(
         &self,
         resp: &LoginHttpResponse,
@@ -629,11 +670,31 @@ impl OidcModule {
         now_mono: Instant,
         io: &mut dyn Fetch,
     ) -> Step<Result<LoginOutcome, String>> {
-        // A non-2xx token-endpoint response (e.g. invalid_grant) never carries a usable id_token.
-        // A 5xx or 429 is the IdP unable to answer: an outage, logged with its status (the
-        // operator's to see: warn). Any other non-2xx refuses the user's code (an end-user
-        // decline: info).
-        if resp.status >= 500 || resp.status == 429 {
+        // A non-2xx token-endpoint response never carries a usable id_token. OWNER-SIGNED
+        // 2026-10-30: only an RFC 6749 §5.2 credential error answers 401 — a 400 or 401 carrying a
+        // §5.2 JSON `error` is a declined login, logged with the allow-listed code (the client's own
+        // misconfiguration at warn, the user's code at info). Any other non-2xx — 5xx, 429, a
+        // redirect, 403, 404, 408, a 4xx with no §5.2 body — is the IdP not answering the
+        // exchange: an outage, logged with its status (the operator's to see: warn).
+        if !(200..300).contains(&resp.status) {
+            if let (400 | 401, Some(code)) = (resp.status, oauth_error(&resp.body)) {
+                if matches!(code, "invalid_client" | "unauthorized_client") {
+                    tracing::warn!(
+                        module = "oidc",
+                        status = resp.status,
+                        error = code,
+                        "OIDC token endpoint refused this client (check client_id and the client secret); login declined"
+                    );
+                } else {
+                    tracing::info!(
+                        module = "oidc",
+                        status = resp.status,
+                        error = code,
+                        "OIDC token endpoint refused the login's code; login declined"
+                    );
+                }
+                return Step::Ready(Ok(LoginOutcome::Reject));
+            }
             tracing::warn!(
                 module = "oidc",
                 status = resp.status,
@@ -644,45 +705,24 @@ impl OidcModule {
                 resp.status
             )));
         }
-        if !(200..300).contains(&resp.status) {
-            tracing::info!(
-                module = "oidc",
-                status = resp.status,
-                "OIDC token endpoint answered a non-2xx status; login declined"
-            );
-            return Step::Ready(Ok(LoginOutcome::Reject));
-        }
-        let body = match serde_json::from_str::<Value>(&resp.body).map_err(
-            busbar_contract::abi::sdk::auth_kit::json_error("token response"),
-        ) {
+        let body = match TokenResponse::parse(&resp.body) {
             Ok(b) => b,
             Err(e) => {
                 tracing::warn!(module = "oidc", error = %e, "OIDC token endpoint response is not JSON; login declined");
                 return Step::Ready(Ok(LoginOutcome::Reject));
             }
         };
-        let Some(id_token) = body.get("id_token").and_then(Value::as_str) else {
+        let Some(id_token) = body.id_token.as_deref().map(String::as_str) else {
             tracing::warn!(
                 module = "oidc",
                 "OIDC token endpoint response carries no id_token; login declined"
             );
             return Step::Ready(Ok(LoginOutcome::Reject));
         };
-        let verdict = match step!(self.verify_with(
-            &self.login_verifier,
-            id_token,
-            now_unix,
-            now_mono,
-            io
-        )) {
-            Ok(v) => v,
-            // The key set's URL could not be discovered: the key set cannot be had, which is
-            // answered as a key set that could not be fetched — a declined login, logged.
-            Err(e) => {
-                tracing::warn!(module = "oidc", error = %e, "OIDC token signature verification failed");
-                AuthVerdict::Reject
-            }
-        };
+        // The key set cannot be had (fetched, or its URL discovered): an outage, logged by
+        // `verify_with`, answered as the error.
+        let verdict =
+            step_ok!(self.verify_with(&self.login_verifier, id_token, now_unix, now_mono, io));
         Step::Ready(Ok(match verdict {
             AuthVerdict::Identify(p) => LoginOutcome::Identify(p),
             // A non-JWT / bad-sig / bad-claim id_token in a login callback is a hard failure —
@@ -702,12 +742,13 @@ impl OidcModule {
     /// The full verification of one presented bearer credential → an [`AuthVerdict`]: none
     /// presented, one that is not a JWT, or a JWT whose (unverified) `iss` is not this provider's
     /// issuer, is not ours (`Pass`, to the next auth in the chain); a JWT naming this provider's
-    /// issuer is verified in full, and any failure is a `Reject`. An identity is cached for its TTL
+    /// issuer is verified in full, and any failure of the token is a `Reject`. An identity is cached for its TTL
     /// and answered from the cache until it expires or a `refresh` drops it; a REJECT or a PASS is
     /// never cached.
     ///
     /// # Errors
-    /// The JWKS url could not be discovered.
+    /// The key set cannot be had: the JWKS url could not be discovered, or the key set could not be
+    /// fetched (an IdP outage, never a `Reject`).
     pub fn verify(
         &self,
         token: Option<&str>,
@@ -715,22 +756,25 @@ impl OidcModule {
         now_mono: Instant,
         io: &mut dyn Fetch,
     ) -> Step<Result<AuthVerdict, String>> {
-        if let Some(principal) = token.and_then(|t| self.cached(t, now_unix)) {
-            return Step::Ready(Ok(AuthVerdict::Identify(Principal::clone(&principal))));
+        if let Some(hit) = token.and_then(|t| self.cached(t, now_unix)) {
+            let mut principal = Principal::clone(&hit.principal);
+            principal.ttl_secs = hit.ttl_secs;
+            return Step::Ready(Ok(AuthVerdict::Identify(principal)));
         }
         self.judge(token, now_unix, now_mono, io)
     }
 
     /// The credential cache: the identity a bearer this module identified within its TTL
-    /// verified as, answered with no decode, parse or signature check and no request.
-    pub fn cached(&self, token: &str, now_unix: i64) -> Option<std::sync::Arc<Principal>> {
+    /// verified as, and the TTL it has left, answered with no decode, parse or signature check and
+    /// no request.
+    pub fn cached(&self, token: &str, now_unix: i64) -> Option<verdicts::Hit> {
         self.verdicts.get(token, now_unix)
     }
 
     /// [`Self::verify`] past its cache: the credential judged, an identity cached.
     ///
     /// # Errors
-    /// The JWKS url could not be discovered.
+    /// As [`Self::verify`].
     pub fn judge(
         &self,
         token: Option<&str>,
@@ -763,27 +807,28 @@ impl OidcModule {
         now_mono: Instant,
         io: &mut dyn Fetch,
     ) -> Step<Result<AuthVerdict, String>> {
-        let parts = match jwt::split(token) {
-            Ok(p) => p,
-            // Not a well-formed JWT ⇒ not our credential shape. `Pass` so a later chain module (or
-            // the mode default) can handle it — a random opaque bearer is not an OIDC failure.
-            Err(_) => {
-                tracing::debug!(
-                    module = "oidc",
-                    "bearer is not a JWT: not this provider's credential; passed to the next auth"
-                );
-                return Step::Ready(Ok(AuthVerdict::Pass));
-            }
+        // Not shaped as a compact JWS (three segments, a base64url payload) ⇒ not our credential
+        // shape. `Pass` so a later chain module (or the mode default) can handle it — a random
+        // opaque bearer is not an OIDC failure.
+        let Some(payload) = jwt::payload(token) else {
+            tracing::debug!(
+                module = "oidc",
+                "bearer is not a JWT: not this provider's credential; passed to the next auth"
+            );
+            return Step::Ready(Ok(AuthVerdict::Pass));
         };
-        // ISSUER ROUTING (multi-issuer resource servers): the token's UNVERIFIED `iss` routes it.
+        // ISSUER ROUTING (multi-issuer resource servers): the token's UNVERIFIED `iss` routes it,
+        // read from the payload BEFORE the header is decoded.
         // One naming another issuer, or none, is not this provider's credential: `Pass`, so a
         // second identity provider later in the chain can judge it, and the chain's end refuses a
         // token no provider claims. Nothing is fetched for it. One naming THIS issuer is this
         // provider's alone and is verified in full below; any failure is a `Reject` that stops the
         // chain, never a fall-through. The unverified claim only ever narrows: it selects which
         // provider judges, never what that provider accepts.
-        if let Some(other) = foreign_issuer(&parts.payload, &verifier.issuer) {
-            tracing::info!(
+        if let Some(other) = foreign_issuer(&payload, &verifier.issuer) {
+            // Debug: in a multi-provider chain every other provider's token is routed past here
+            // on every request, which is no event for the operator.
+            tracing::debug!(
                 module = "oidc",
                 token_issuer = %other,
                 "OIDC token names an issuer that is not this provider's issuer: not this \
@@ -791,23 +836,57 @@ impl OidcModule {
             );
             return Step::Ready(Ok(AuthVerdict::Pass));
         }
+        // Ours, and the host's clock cannot be read (`clock_or_fail_closed`'s sentinel): no token
+        // can be judged, and that is the host's fault, not the caller's — a FAILURE (the login's
+        // outage), never a reject.
+        if now_unix == i64::MAX {
+            tracing::warn!(
+                module = "oidc",
+                "the host clock is unreadable; the token cannot be judged"
+            );
+            return Step::Ready(Err(CLOCK_UNREADABLE.to_string()));
+        }
+        // Ours: a header that does not decode is this provider's to refuse.
+        let parts = match jwt::split(token) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::info!(module = "oidc", reason = "malformed", error = %e, "OIDC token naming this provider's issuer is malformed; rejected");
+                return Step::Ready(Ok(AuthVerdict::Reject));
+            }
+        };
         let kid = parts.header.kid.as_deref().unwrap_or_default();
-        let url = step_ok!(self.jwks_url(now_mono, io));
+        // The key set's URL could not be discovered: the key set cannot be had, an OUTAGE.
+        let url = match step!(self.jwks_url(now_mono, io)) {
+            Ok(url) => url,
+            Err(e) => {
+                tracing::warn!(module = "oidc", error = %e, "OIDC key set is unavailable; the token cannot be judged");
+                return Step::Ready(Err(e));
+            }
+        };
 
         // Verify the signature against the JWKS key for this kid (fetching / rotation-refetching as
-        // needed). A signature or key error is a REJECT — a presented-but-invalid credential.
-        let signed = step!(self.jwks.with_key(&url, kid, now_mono, io, |key| {
+        // needed). No key that verifies is a REJECT — a presented-but-invalid credential; a key set
+        // that cannot be had is an OUTAGE (OWNER-SIGNED 2026-10-30: never a 401).
+        let alg = Some(parts.header.alg.as_str());
+        let signed = step!(self.jwks.with_key_for(&url, kid, alg, now_mono, io, |key| {
             jwt::verify_signature(&parts, key)
         }));
-        if let Err(e) = signed {
-            tracing::warn!(module = "oidc", error = %e, "OIDC token signature verification failed");
-            return Step::Ready(Ok(AuthVerdict::Reject));
+        match signed {
+            Ok(()) => {}
+            Err(KeyError::Unavailable(e)) => {
+                tracing::warn!(module = "oidc", error = %e, "OIDC key set is unavailable; the token cannot be judged");
+                return Step::Ready(Err(e));
+            }
+            Err(KeyError::Mismatch(e)) => {
+                tracing::info!(module = "oidc", reason = "signature", error = %e, "OIDC token rejected: no key in the key set verifies it");
+                return Step::Ready(Ok(AuthVerdict::Reject));
+            }
         }
 
         let claims = match jwt::claims(&parts) {
             Ok(c) => c,
             Err(e) => {
-                tracing::warn!(module = "oidc", error = %e, "OIDC token claims are malformed");
+                tracing::info!(module = "oidc", reason = "malformed", error = %e, "OIDC token rejected: its claims are malformed");
                 return Step::Ready(Ok(AuthVerdict::Reject));
             }
         };
@@ -815,7 +894,7 @@ impl OidcModule {
         Step::Ready(Ok(match verifier.validate_claims(&claims, now_unix) {
             Ok(principal) => AuthVerdict::Identify(principal),
             Err(e) => {
-                tracing::warn!(module = "oidc", error = %e, "OIDC token claim validation failed");
+                tracing::info!(module = "oidc", reason = "claims", error = %e, "OIDC token rejected: its claims do not validate");
                 AuthVerdict::Reject
             }
         }))
@@ -826,13 +905,26 @@ impl OidcModule {
     /// `authorization_endpoint` is configured or discovered — this module is verify-only then.
     ///
     /// # Errors
-    /// The endpoint had to be discovered, and discovery failed.
+    /// The host lent no nonce (absent or empty: the login's id_token could never bind to it, so
+    /// `complete_login` would refuse it), logged; or the endpoint had to be discovered, and
+    /// discovery failed.
     pub fn begin_login(
         &self,
         req: &BeginLogin,
         now: Instant,
         io: &mut dyn Fetch,
     ) -> Step<Result<LoginOutcome, String>> {
+        let Some(nonce) = req.nonce.as_deref().filter(|n| !n.is_empty()) else {
+            tracing::warn!(
+                module = "oidc",
+                "begin_login carries no nonce; browser login refused"
+            );
+            return Step::Ready(Err(
+                "oidc: begin_login carries no nonce, so the login's id_token could never be bound \
+                 to it; browser login refused"
+                    .to_string(),
+            ));
+        };
         let Some(endpoint) = step_ok!(self.authorization_endpoint(now, io)) else {
             tracing::info!(
                 module = "oidc",
@@ -851,7 +943,7 @@ impl OidcModule {
             &req.redirect_uri,
             &req.state,
             &req.code_challenge,
-            req.nonce.as_deref(),
+            Some(nonce),
         ))))
     }
 
@@ -905,17 +997,48 @@ pub struct TokenRequest {
     pub form: FormBody,
 }
 
+/// THE TOKEN ENDPOINT'S ANSWER (RFC 6749 §5.1, OIDC Core §3.1.3.3), typed: the issued tokens are
+/// held in wiped holders, so no plain copy of one outlives its use; every other member is ignored.
+/// No `Debug`: it holds credentials.
+#[derive(Deserialize)]
+pub(crate) struct TokenResponse {
+    /// The OIDC identity token, the one member the login reads.
+    #[serde(default, deserialize_with = "wiped")]
+    pub(crate) id_token: Option<zeroize::Zeroizing<String>>,
+    /// The access token: never read, but parsed into a wiped holder rather than left to a scratch
+    /// buffer.
+    #[serde(default, deserialize_with = "wiped")]
+    #[allow(dead_code)]
+    access_token: Option<zeroize::Zeroizing<String>>,
+    /// The refresh token: as `access_token`.
+    #[serde(default, deserialize_with = "wiped")]
+    #[allow(dead_code)]
+    refresh_token: Option<zeroize::Zeroizing<String>>,
+}
+
+impl TokenResponse {
+    /// `body` parsed; the error never echoes it.
+    pub(crate) fn parse(body: &str) -> Result<Self, String> {
+        serde_json::from_str(body).map_err(busbar_contract::abi::sdk::auth_kit::json_error(
+            "token response",
+        ))
+    }
+}
+
+/// A token member deserialized straight into a wiped holder.
+fn wiped<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<zeroize::Zeroizing<String>>, D::Error> {
+    Ok(Option::<String>::deserialize(d)?.map(zeroize::Zeroizing::new))
+}
+
 /// The nonce binding: `true` when the token endpoint's `body`
 /// carries no `id_token`, or carries one whose (unverified) payload names `nonce` as its `nonce`
 /// claim, compared in constant time. An `id_token` with no readable `nonce` claim does not bind.
 /// The signature, issuer and audience are checked afterwards, by the verifier.
 pub(crate) fn nonce_binds(body: &str, nonce: &str) -> bool {
     use base64::Engine as _;
-    let Some(id_token) = serde_json::from_str::<Value>(body).ok().and_then(|v| {
-        v.get("id_token")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-    }) else {
+    let Some(id_token) = TokenResponse::parse(body).ok().and_then(|r| r.id_token) else {
         return true;
     };
     let claimed = id_token
@@ -929,6 +1052,34 @@ pub(crate) fn nonce_binds(body: &str, nonce: &str) -> bool {
         .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
         .and_then(|c| c.get("nonce").and_then(Value::as_str).map(str::to_string));
     claimed.is_some_and(|c| busbar_contract::constant_time_eq(&c, nonce))
+}
+
+/// The RFC 6749 §5.2 error codes a token endpoint answers a refused exchange with.
+const OAUTH_ERRORS: &[&str] = &[
+    "invalid_request",
+    "invalid_client",
+    "invalid_grant",
+    "unauthorized_client",
+    "unsupported_grant_type",
+    "invalid_scope",
+];
+
+/// The RFC 6749 §5.2 error a token-endpoint `body` carries, as a log may print it: the allow-listed
+/// code, `(unlisted)` for any other string (an extension code is never echoed); `None` when the
+/// body is not a JSON object with a string `error` (no §5.2 body at all).
+fn oauth_error(body: &str) -> Option<&'static str> {
+    #[derive(Deserialize)]
+    struct ErrorBody {
+        error: String,
+    }
+    let code = serde_json::from_str::<ErrorBody>(body).ok()?.error;
+    Some(
+        OAUTH_ERRORS
+            .iter()
+            .find(|c| **c == code)
+            .copied()
+            .unwrap_or("(unlisted)"),
+    )
 }
 
 /// The OAuth `client_id` to present: the explicit `client_id`, else the `audience` (the common
@@ -1021,7 +1172,8 @@ pub fn token_form(
     }
 }
 
-/// Current UNIX time in seconds. Fails CLOSED on a clock this module cannot trust: `validate_claims`'s
+/// TESTS' current UNIX time in seconds (production reads the request's timestamp and the host's
+/// `clock.now`, through [`clock_or_fail_closed`]). Fails CLOSED on a clock it cannot trust: `validate_claims`'s
 /// `exp` check is `exp + skew >= now_unix`, so a `now_unix` that reads too LOW makes every token
 /// appear unexpired (fail OPEN) — the exact failure this guards against. Two cases, both mapped to
 /// `i64::MAX` (which `validate_claims` refuses outright, naming the clock):
@@ -1051,12 +1203,14 @@ pub(crate) fn clock_or_fail_closed(t: i64) -> i64 {
 }
 
 /// The setting an operator configures to name a discovered endpoint's URL themselves: the discovery
-/// fields whose URL the module FETCHES (`jwks_uri`, `token_endpoint`), and so holds to https
-/// ([`discovered_secure`]). `None` for any other field.
-fn fetched_setting(field: &str) -> Option<&'static str> {
+/// fields whose URL the module FETCHES (`jwks_uri`, `token_endpoint`) or sends the browser to
+/// (`authorization_endpoint`), and so holds to https ([`discovered_secure`]). `None` for any other
+/// field.
+fn discovered_setting(field: &str) -> Option<&'static str> {
     match field {
         "jwks_uri" => Some("jwks_url"),
         "token_endpoint" => Some("token_endpoint"),
+        "authorization_endpoint" => Some("authorization_endpoint"),
         _ => None,
     }
 }

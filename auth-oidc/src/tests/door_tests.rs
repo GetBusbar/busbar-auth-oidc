@@ -187,6 +187,30 @@ fn kept_for(n: u32, at: Instant) -> Reached {
     }
 }
 
+/// T1: an identity kept for a short buffer's re-call is served ONLY to the same callback: a
+/// re-call on the ticket naming another state, another code, or both, is not served it (a recycled
+/// ticket must never hand one user's identity to another callback).
+#[test]
+fn a_kept_identity_serves_only_its_own_state_and_code() {
+    let kept = kept_for(1, Instant::now());
+    assert!(kept.serves(b"s1", b"c1"), "its own callback");
+    for (state, code) in [
+        (&b"s2"[..], &b"c1"[..]),
+        (b"s1", b"c2"),
+        (b"s2", b"c2"),
+        (b"", b""),
+        (b"s1", b""),
+        (b"s", b"c1"),
+    ] {
+        assert!(
+            !kept.serves(state, code),
+            "{:?}/{:?} is another callback",
+            String::from_utf8_lossy(state),
+            String::from_utf8_lossy(code)
+        );
+    }
+}
+
 /// A full short-answer map makes room by dropping its OLDEST entry only: every other identity a
 /// short buffer reached still waits for its re-call (clearing the map would refuse them all).
 #[test]
@@ -223,6 +247,30 @@ fn a_ticket_kept_again_does_not_evict() {
     keep(&mut map, 2, ticket(2), kept_for(2, t0));
     assert_eq!(map.len(), 2);
     assert!(map.contains_key(&ticket(1)));
+}
+
+/// L16: an identity kept for a short-buffer re-call (it carries the callback's state and code)
+/// is not held forever: an entry older than 10 minutes goes on the next access of the map, a
+/// newer one stays.
+#[test]
+fn a_kept_identity_older_than_ten_minutes_goes() {
+    let t0 = Instant::now();
+    let mut map = HashMap::new();
+    keep(&mut map, REACHED_MAX, ticket(1), kept_for(1, t0));
+    keep(
+        &mut map,
+        REACHED_MAX,
+        ticket(2),
+        kept_for(2, t0 + std::time::Duration::from_secs(9 * 60)),
+    );
+    keep(
+        &mut map,
+        REACHED_MAX,
+        ticket(3),
+        kept_for(3, t0 + std::time::Duration::from_secs(10 * 60 + 1)),
+    );
+    assert!(!map.contains_key(&ticket(1)), "older than 10 minutes: gone");
+    assert!(map.contains_key(&ticket(2)) && map.contains_key(&ticket(3)));
 }
 
 /// A blank `issuer` or `audience` is REFUSED at `validate` and at `open`, FAILED and naming the
@@ -341,5 +389,35 @@ fn bad_settings_are_refused_in_the_contracts_settings_line_form() {
     assert_eq!(
         refused.text().unwrap_or_default(),
         "secrets: `client_secret` is not UTF-8"
+    );
+}
+
+/// L15: a `refresh` that keeps the opened module (the admin cache flush, unchanged settings) has
+/// the issuer's discovery document asked for again on its next use, as a `refresh` with new
+/// settings would.
+#[test]
+fn a_refresh_rediscovers_the_issuer_s_document() {
+    let settings = serde_json::json!({ "issuer": ISSUER, "audience": AUDIENCE })
+        .to_string()
+        .into_bytes();
+    let doc = serde_json::json!({ "issuer": ISSUER, "jwks_uri": "https://jwks.test/keys" });
+    let idp = Idp::new(doc.to_string());
+    let oidc = Oidc::open(&settings, &lent(b""), 1).expect("opens");
+    let url = |oidc: &Oidc| {
+        ready(
+            oidc.now()
+                .module
+                .jwks_url(Instant::now(), &mut idp.at_once(Some(ME))),
+        )
+        .map(std::borrow::Cow::into_owned)
+    };
+    assert_eq!(url(&oidc).as_deref(), Ok("https://jwks.test/keys"));
+    assert_eq!(idp.calls(), 1);
+    oidc.refresh(&settings, &lent(b""), 2).expect("refreshes");
+    assert_eq!(url(&oidc).as_deref(), Ok("https://jwks.test/keys"));
+    assert_eq!(
+        idp.calls(),
+        2,
+        "the refresh has the document asked for again"
     );
 }

@@ -50,6 +50,34 @@ enum Point {
     Rotation,
 }
 
+/// Why [`JwksCache::with_key`] could not answer `f`'s result: the KEY SET could not be had (an
+/// IdP outage: a fetch that failed, the rate limit holding off the retry after one, a set past its
+/// staleness ceiling, a rotation refetch that failed), or it was had and no key in it verifies the
+/// token (a bad signature, an alg/key mismatch, a kid absent from the set the IdP last answered).
+/// OWNER-SIGNED 2026-10-30: an IdP outage is never a 401, so the two are answered apart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyError {
+    /// The key set cannot be had: an outage, never the token's fault.
+    Unavailable(String),
+    /// The key set is had and no key in it verifies the token.
+    Mismatch(String),
+}
+
+impl std::fmt::Display for KeyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.message())
+    }
+}
+
+impl KeyError {
+    /// The words of the error, whichever it is.
+    pub fn message(&self) -> &str {
+        match self {
+            Self::Unavailable(m) | Self::Mismatch(m) => m,
+        }
+    }
+}
+
 /// A JWKS cache. Holds the last-fetched key set, the timestamps that bound refresh and the fetch in
 /// flight.
 pub struct JwksCache {
@@ -81,6 +109,9 @@ struct Inner {
     flight: Option<(Flight, Point)>,
     /// The ops waiting on the flight ([`Step::Wait`]): woken when it settles.
     waiters: Vec<Ticket>,
+    /// Whether the latest settled fetch FAILED: a kid missing from the set in hand is then not the
+    /// token's fault, since the IdP's current set could not be had.
+    failing: bool,
 }
 
 impl JwksCache {
@@ -98,7 +129,9 @@ impl JwksCache {
     /// Run `f` against the key matching `kid`, the JWKS fetched from `url` through `io`. If the
     /// cache is empty or stale, fetch first. If `kid` still misses after that (key ROTATION),
     /// refetch ONCE — rate-limited by `min_refetch_interval` — and retry. `f` receives the found
-    /// key; a miss after the bounded refetch is a precise error.
+    /// key; a miss after the bounded refetch is a precise error. The error says whether the key
+    /// set could not be had ([`KeyError::Unavailable`]) or no key in it verifies
+    /// ([`KeyError::Mismatch`]).
     ///
     /// PENDING while this caller's fetch is in flight (re-enter with the same `io` state: the call
     /// carries on from where it fetched, at the instant it claimed the fetch); WAIT while another
@@ -110,7 +143,22 @@ impl JwksCache {
         now: Instant,
         io: &mut dyn Fetch,
         f: impl Fn(&Jwk) -> Result<T, String>,
-    ) -> Step<Result<T, String>> {
+    ) -> Step<Result<T, KeyError>> {
+        self.with_key_for(url, kid, None, now, io, f)
+    }
+
+    /// [`Self::with_key`] for a token signed with `alg`: a token naming NO kid (`kid` empty) is
+    /// verified by the set's single usable signing key for `alg` ([`JwkSet::select`]), if there is
+    /// exactly one.
+    pub fn with_key_for<T>(
+        &self,
+        url: &str,
+        kid: &str,
+        alg: Option<&str>,
+        now: Instant,
+        io: &mut dyn Fetch,
+        f: impl Fn(&Jwk) -> Result<T, String>,
+    ) -> Step<Result<T, KeyError>> {
         // RESUME: this caller's own fetch, then on from the point it claimed it. One lock reads
         // both the flight and the snapshot.
         let (mine, snapshot) = {
@@ -120,9 +168,12 @@ impl JwksCache {
         };
         let (keys, now) = match mine {
             Some((flight, point)) => {
-                let keys = step_ok!(self.land(io, url, flight.at));
+                let keys = match step!(self.land(io, url, flight.at)) {
+                    Ok(keys) => keys,
+                    Err(e) => return Step::Ready(Err(KeyError::Unavailable(e))),
+                };
                 if point == Point::Rotation {
-                    return Step::Ready(Self::after_rotation(keys.as_deref(), kid, &f));
+                    return Step::Ready(self.after_rotation(keys.as_deref(), url, kid, alg, &f));
                 }
                 (keys, flight.at)
             }
@@ -141,7 +192,10 @@ impl JwksCache {
                 // verify tokens, and waiting on the refresh is what turns a slow IdP into an outage.
                 if keys.is_none() || stale {
                     let wait = keys.is_none();
-                    keys = step_ok!(self.refresh(io, url, now, wait, Point::Refresh));
+                    keys = match step!(self.refresh(io, url, now, wait, Point::Refresh)) {
+                        Ok(keys) => keys,
+                        Err(e) => return Step::Ready(Err(KeyError::Unavailable(e))),
+                    };
                 }
                 (keys, now)
             }
@@ -150,22 +204,25 @@ impl JwksCache {
         // deliberately not asking again yet. Say that, rather than the "unknown kid" error below —
         // which would blame the token for the provider being down.
         let Some(set) = keys else {
-            return Step::Ready(Err(format!(
+            return Step::Ready(Err(KeyError::Unavailable(format!(
                 "no JWKS has been fetched from {} yet (the last fetch attempt failed and the \
                  refetch rate limit is holding off the next one); cannot verify any token",
                 crate::fetch::shown(url)
-            )));
+            ))));
         };
         // First lookup. More than one key can share `kid` (RFC 7517 §4.5 — e.g. an RSA and an EC key
         // coexisting under one `kid` during an algorithm migration), so try every match and return
         // the first that verifies; keep the last error if none do.
-        if let Some(result) = Self::try_all(&set, kid, &f) {
-            return Step::Ready(result);
+        if let Some(result) = Self::try_all(&set, kid, alg, &f) {
+            return Step::Ready(result.map_err(KeyError::Mismatch));
         }
         // Miss ⇒ possible key rotation. Refetch ONCE if the rate limit permits, then retry. Never
         // waits: a caller in this branch is about to reject the token anyway.
-        let keys = step_ok!(self.refresh(io, url, now, false, Point::Rotation));
-        Step::Ready(Self::after_rotation(keys.as_deref(), kid, &f))
+        let keys = match step!(self.refresh(io, url, now, false, Point::Rotation)) {
+            Ok(keys) => keys,
+            Err(e) => return Step::Ready(Err(KeyError::Unavailable(e))),
+        };
+        Step::Ready(self.after_rotation(keys.as_deref(), url, kid, alg, &f))
     }
 
     /// THE WARM-UP (`ready`, at boot): fetch the key set once when the cache holds none, so the
@@ -221,38 +278,52 @@ impl JwksCache {
             .is_none_or(|t| now.saturating_duration_since(t) >= self.ttl.saturating_sub(lead))
     }
 
-    /// The lookup after the bounded rotation refetch: a match, or the unknown-`kid` error.
+    /// The lookup after the bounded rotation refetch: a match, or the unknown-`kid` error — a
+    /// MISMATCH when the set in hand is the one the IdP last answered, an OUTAGE when its latest
+    /// fetch failed (the rotated key may be in the set that could not be had).
     fn after_rotation<T>(
+        &self,
         keys: Option<&JwkSet>,
+        url: &str,
         kid: &str,
+        alg: Option<&str>,
         f: &impl Fn(&Jwk) -> Result<T, String>,
-    ) -> Result<T, String> {
-        if let Some(result) = keys.and_then(|set| Self::try_all(set, kid, f)) {
-            return result;
+    ) -> Result<T, KeyError> {
+        if let Some(result) = keys.and_then(|set| Self::try_all(set, kid, alg, f)) {
+            return result.map_err(KeyError::Mismatch);
+        }
+        if self.lock().failing {
+            return Err(KeyError::Unavailable(format!(
+                "no cached JWKS key matches the token's kid '{}' and the latest fetch of the key \
+                 set from {} failed, so the token cannot be judged",
+                crate::untrusted(kid),
+                crate::fetch::shown(url)
+            )));
         }
         // `kid` comes from the UNSIGNED header of an untrusted bearer and this error reaches a
-        // warn log before any signature has been accepted, so it is escaped: a kid carrying a
-        // newline or a terminal escape must not forge or colour log records. Printable kids are
-        // byte-identical.
-        Err(format!(
+        // log before any signature has been accepted, so it is escaped and capped
+        // ([`crate::untrusted`]): a kid carrying a newline or a terminal escape must not forge or
+        // colour log records. Short printable kids are byte-identical.
+        Err(KeyError::Mismatch(format!(
             "no JWKS key matches the token's kid '{}' (a rotation refetch is bounded by \
              jwks_min_refetch_secs, so the key set may not have been refetched for this token); the \
              signing key is unknown to the configured jwks_url",
-            kid.escape_debug()
-        ))
+            crate::untrusted(kid)
+        )))
     }
 
-    /// Try `f` against every key in `set` matching `kid`, returning the first `Ok`. If at least one
-    /// key matched but all errored, returns the LAST error. Returns `None` when zero keys matched
-    /// `kid` at all, so the caller can distinguish "no key with this kid" from "keys existed but none
-    /// verified".
+    /// Try `f` against every key in `set` selected for `kid` and `alg` ([`JwkSet::select`]),
+    /// returning the first `Ok`. If at least one key matched but all errored, returns the LAST
+    /// error. Returns `None` when zero keys matched at all, so the caller can distinguish "no key
+    /// with this kid" from "keys existed but none verified".
     fn try_all<T>(
         set: &JwkSet,
         kid: &str,
+        alg: Option<&str>,
         f: &impl Fn(&Jwk) -> Result<T, String>,
     ) -> Option<Result<T, String>> {
         let mut last_err = None;
-        for k in set.find_all(kid) {
+        for k in set.select(kid, alg) {
             match f(k) {
                 Ok(v) => return Some(Ok(v)),
                 Err(e) => last_err = Some(e),
@@ -380,10 +451,16 @@ impl JwksCache {
             Ok(set) if inner.fetched_at.is_none_or(|t| t <= at) => {
                 inner.keys = Some(Arc::new(set));
                 inner.fetched_at = Some(at);
+                inner.failing = false;
                 Ok(inner.keys.clone())
             }
             Ok(_) => Ok(inner.keys.clone()),
             Err(e) => {
+                // A late failure of a flight claimed before the set in hand was fetched says
+                // nothing about that set.
+                if inner.fetched_at.is_none_or(|t| t <= at) {
+                    inner.failing = true;
+                }
                 let too_stale = self.past_ceiling(&inner, at);
                 match inner.keys.clone() {
                     Some(keys) if !too_stale => {
@@ -405,7 +482,7 @@ impl JwksCache {
             // The error names the URL and the cause only.
             tracing::warn!(
                 module = "oidc",
-                url = %url,
+                url = %crate::fetch::shown(url),
                 error = %e,
                 "JWKS refresh failed; serving the previous key set"
             );
@@ -415,7 +492,7 @@ impl JwksCache {
             // discard it, which would leave a cold-cache failure unlogged.
             tracing::warn!(
                 module = "oidc",
-                url = %url,
+                url = %crate::fetch::shown(url),
                 error = %e,
                 "JWKS fetch failed; no key set to serve"
             );

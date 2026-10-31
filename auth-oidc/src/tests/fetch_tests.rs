@@ -259,23 +259,11 @@ const PRIVATE_HTTP: &[&str] = &[
 /// HTTP TO A PRIVATE IdP HOST IS ADMITTED, as 1.5.5's `vet_hop_url` admitted it (1.5.5
 /// `auth/token.rs:867-880`: "http only for loopback/private (a local/on-prem IdP)"): the module
 /// passes the request to the host, and the class the token need declares lets the connector dial it.
-///
-/// RED under the classes this need held before: `open-web` (#24) refuses every plaintext dial and
-/// `loopback-allowed` (#25) refuses one off loopback, so `http://10.1.2.3/token`, which 1.5.5
-/// accepted, would be refused.
 #[test]
 fn http_to_a_private_idp_token_endpoint_is_admitted() {
     let class = token_class();
     for url in PRIVATE_HTTP {
         assert!(token_admitted(class, url), "{url} in class {class}");
-    }
-    // RED: the private (non-loopback) case is refused under either earlier class.
-    for old in [EGRESS_OPEN_WEB, EGRESS_LOOPBACK_ALLOWED] {
-        assert!(
-            !token_admitted(old, "http://10.1.2.3/token"),
-            "class {old} must refuse a private plaintext token endpoint"
-        );
-        assert!(!token_admitted(old, "http://192.168.1.20:8443/token"));
     }
 }
 

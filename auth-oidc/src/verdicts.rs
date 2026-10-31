@@ -10,7 +10,8 @@
 //! - an identity is held for its own `ttl_secs` (the token's remaining life, at most 300 s:
 //!   [`crate::OidcVerifier::validate_claims`]), absent = 300 s, never past 3600 s;
 //! - a REJECT is never cached, and neither is a PASS (`abi::auth`: Pass buffering is the kernel's);
-//! - at most 4096 entries: at capacity the expired ones go, then the oldest-inserted;
+//! - at most 4096 entries: at capacity the expired ones go, then the oldest-inserted; an identity
+//!   over 8 KiB, or one with no TTL left, is not held;
 //! - [`VerdictCache::flush`] drops everything and answers how many it held: the admin flush's
 //!   `{"flushed": N}`, reported on `refresh`. A FLUSH GENERATION ([`VerdictCache::generation`]) is captured before a verify judges and handed to
 //!   [`VerdictCache::put`], which drops the insert when a flush landed in between, so a verdict
@@ -27,6 +28,26 @@ const DEFAULT_TTL_SECS: u64 = 300;
 const MAX_TTL_SECS: u64 = 3600;
 /// The most entries held.
 pub const MAX_ENTRIES: usize = 4096;
+/// The largest identity held, bytes of its id, name and roles: a bigger one is judged afresh
+/// each time, so the entry bound also bounds the memory held (4096 × 8 KiB).
+pub const MAX_PRINCIPAL_BYTES: usize = 8 * 1024;
+
+/// The bytes `p` holds: its id, name and roles.
+fn size_of(p: &Principal) -> usize {
+    p.id.len()
+        + p.name.as_ref().map_or(0, String::len)
+        + p.roles.iter().map(String::len).sum::<usize>()
+}
+
+/// A cache hit: the identity held, and the TTL it has LEFT at the hit (`None` when its module
+/// suggested none, as when it was first answered).
+#[derive(Debug, Clone)]
+pub struct Hit {
+    /// The identity held.
+    pub principal: Arc<Principal>,
+    /// Its remaining TTL, seconds.
+    pub ttl_secs: Option<u64>,
+}
 
 /// A flush generation: the cache's flush counter at one moment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,12 +97,18 @@ impl VerdictCache {
         Generation(self.read().flushes)
     }
 
-    /// The identity cached for `credential` at UNIX second `now`; an expired entry is a miss and
-    /// goes.
-    pub fn get(&self, credential: &str, now: i64) -> Option<Arc<Principal>> {
+    /// The identity cached for `credential` at UNIX second `now`, with the TTL it has left; an
+    /// expired entry is a miss and goes.
+    pub fn get(&self, credential: &str, now: i64) -> Option<Hit> {
         let k = key(credential);
         match self.read().entries.get(&k) {
-            Some(e) if e.expires_at > now => return Some(Arc::clone(&e.principal)),
+            Some(e) if e.expires_at > now => {
+                let left = u64::try_from(e.expires_at.saturating_sub(now)).unwrap_or(0);
+                return Some(Hit {
+                    principal: Arc::clone(&e.principal),
+                    ttl_secs: e.principal.ttl_secs.map(|_| left),
+                });
+            }
             Some(_) => {}
             None => return None,
         }
@@ -99,6 +126,10 @@ impl VerdictCache {
             .ttl_secs
             .unwrap_or(DEFAULT_TTL_SECS)
             .min(MAX_TTL_SECS);
+        // A zero TTL could never be served: it would only hold a slot.
+        if ttl == 0 || size_of(principal) > MAX_PRINCIPAL_BYTES {
+            return;
+        }
         let k = key(credential);
         let mut state = self.lock();
         if state.flushes != generation.0 {
