@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! THE ISSUER'S DISCOVERY DOCUMENT (`<issuer>/.well-known/openid-configuration`), fetched once, on
-//! the first op that needs it, sans-IO single-flight like the JWKS ([`crate::cache`]): the claimer's
-//! op pends on its exchange, a caller arriving meanwhile waits and is woken when the document is
-//! resolved ([`Fetch::wake`]), and every later op reads the resolved document. It names the JWKS url when `jwks_url` is not configured, and whichever login
+//! THE ISSUER'S DISCOVERY DOCUMENT (`<issuer>/.well-known/openid-configuration`), fetched on the
+//! first op that needs it and again a day later ([`REDISCOVER`]) or after a `refresh`, sans-IO
+//! single-flight like the JWKS ([`crate::cache`]): the claimer's op pends on its exchange, a caller
+//! arriving meanwhile waits (or, during a re-discovery, is served the previous document) and is
+//! woken when the document is resolved ([`Fetch::wake`]), and every later op reads the resolved
+//! document. It names the JWKS url when `jwks_url` is not configured, and whichever login
 //! endpoint is not. A failed fetch is remembered with its error for `jwks_min_refetch_secs`, so an
 //! unreachable issuer is asked again at the JWKS cache's own retry bound, never per request.
 //!
@@ -54,7 +56,7 @@ pub fn check_document(
         Some(other) => Err(format!(
             "OIDC discovery document's issuer '{}' does not match the configured issuer '{}' \
              ({url}); refusing to trust its jwks_uri",
-            other.escape_debug(),
+            crate::untrusted(other),
             cfg.issuer
         )),
         None => Err(format!(
@@ -63,15 +65,22 @@ pub fn check_document(
     }
 }
 
+/// How long a fetched document is held before the issuer is asked again: an IdP that moves its
+/// keys or endpoints is followed within a day.
+pub const REDISCOVER: Duration = Duration::from_secs(24 * 3600);
+
 /// Where the document stands.
 enum State {
     /// Never fetched.
     Idle,
-    /// A caller's fetch is in flight.
-    Flight(Flight),
-    /// Fetched and valid.
-    Done(Arc<Value>),
-    /// The last fetch failed at `at`, with `error`.
+    /// A caller's fetch is in flight, and the document it re-discovers (served meanwhile), if any.
+    Flight(Flight, Option<Arc<Value>>),
+    /// Fetched and valid; asked for again at `due` (`None`: at its next use, after a `refresh`).
+    Done {
+        doc: Arc<Value>,
+        due: Option<Instant>,
+    },
+    /// The last fetch failed at `at`, with `error`, and there was no document to keep.
     Failed { error: String, at: Instant },
 }
 
@@ -96,8 +105,17 @@ impl Discovery {
         self.state.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    /// The validated document of `cfg`'s issuer, fetched through `io` when nobody has yet: PENDING
-    /// while this caller's fetch is in flight, WAIT while another's is.
+    /// Have the document asked for again at its next use (a `refresh`), the one held serving
+    /// until then and meanwhile.
+    pub fn expire(&self) {
+        if let State::Done { due, .. } = &mut self.lock().0 {
+            *due = None;
+        }
+    }
+
+    /// The validated document of `cfg`'s issuer, fetched through `io` when nobody has yet, or
+    /// again once it is due ([`REDISCOVER`], [`Self::expire`]): PENDING while this caller's fetch
+    /// is in flight, WAIT while another's is and there is no document to serve meanwhile.
     pub fn document(
         &self,
         cfg: &OidcConfig,
@@ -110,9 +128,14 @@ impl Discovery {
             let mut guard = self.lock();
             let (state, waiters) = &mut *guard;
             match &*state {
-                State::Done(doc) => return Step::Ready(Ok(Arc::clone(doc))),
-                State::Flight(fl) if fl.mine(me) => {}
-                State::Flight(fl) if fl.held_against(me, now) => {
+                State::Done { doc, due } if due.is_some_and(|d| now < d) => {
+                    return Step::Ready(Ok(Arc::clone(doc)));
+                }
+                State::Flight(fl, _) if fl.mine(me) => {}
+                State::Flight(fl, Some(prev)) if fl.held_against(me, now) => {
+                    return Step::Ready(Ok(Arc::clone(prev)));
+                }
+                State::Flight(fl, None) if fl.held_against(me, now) => {
                     let Some(me) = me else {
                         return Step::Ready(
                             check_document(cfg, &url, Err(io.cannot_pend(&url))).map(Arc::new),
@@ -127,12 +150,22 @@ impl Discovery {
                     return Step::Ready(Err(error.clone()));
                 }
                 _ => {
+                    let prev = match &*state {
+                        State::Done { doc, .. } | State::Flight(_, Some(doc)) => {
+                            Some(Arc::clone(doc))
+                        }
+                        _ => None,
+                    };
                     let Some(owner) = me else {
+                        // A call on no ticket may not fetch; a document held is still served.
+                        if let Some(prev) = prev {
+                            return Step::Ready(Ok(prev));
+                        }
                         return Step::Ready(
                             check_document(cfg, &url, Err(io.cannot_pend(&url))).map(Arc::new),
                         );
                     };
-                    *state = State::Flight(Flight { owner, at: now });
+                    *state = State::Flight(Flight { owner, at: now }, prev);
                 }
             }
         }
@@ -143,36 +176,60 @@ impl Discovery {
         let checked = check_document(cfg, &url, fetched).map(Arc::new);
         let mut guard = self.lock();
         let (state, waiters) = &mut *guard;
-        // A document resolves whenever it is not already Done (any valid issuer-matched one is
-        // good). A failure ends only this caller's own flight: a late error from an abandoned
-        // flight must not overwrite the one another caller has since taken over.
+        // A document resolves whenever another caller's has not already (any valid
+        // issuer-matched one is good). A failure ends only this caller's own flight: a late error
+        // from an abandoned flight must not overwrite the one another caller has since taken
+        // over. A failed RE-discovery keeps the document it would have replaced, and asks again
+        // after the retry bound.
         let mut failed = None;
-        let waiters = match (&checked, &*state) {
-            (_, State::Done(_)) => Vec::new(),
+        let mut kept = None;
+        let (answer, waiters) = match (checked, &*state) {
+            (Ok(_), State::Done { doc, due }) if due.is_some_and(|d| now < d) => {
+                (Ok(Arc::clone(doc)), Vec::new())
+            }
             (Ok(doc), _) => {
-                *state = State::Done(Arc::clone(doc));
-                std::mem::take(waiters)
-            }
-            (Err(error), State::Flight(fl)) if fl.mine(me) => {
-                *state = State::Failed {
-                    error: error.clone(),
-                    at: now,
+                *state = State::Done {
+                    doc: Arc::clone(&doc),
+                    due: Some(now + REDISCOVER),
                 };
-                failed = Some(error.clone());
-                std::mem::take(waiters)
+                (Ok(doc), std::mem::take(waiters))
             }
-            (Err(_), _) => Vec::new(),
+            (Err(error), State::Flight(fl, prev)) if fl.mine(me) => {
+                let answer = match prev.clone() {
+                    Some(prev) => {
+                        kept = Some(error.clone());
+                        *state = State::Done {
+                            doc: Arc::clone(&prev),
+                            due: Some(now + self.retry),
+                        };
+                        Ok(prev)
+                    }
+                    None => {
+                        failed = Some(error.clone());
+                        *state = State::Failed {
+                            error: error.clone(),
+                            at: now,
+                        };
+                        Err(error)
+                    }
+                };
+                (answer, std::mem::take(waiters))
+            }
+            (Err(error), _) => (Err(error), Vec::new()),
         };
         drop(guard);
         if let Some(e) = failed {
             // The tick discards a discovery failure, so say it here, once per attempt.
-            tracing::warn!(module = "oidc", url = %url, error = %e, "OIDC discovery failed");
+            tracing::warn!(module = "oidc", url = %crate::fetch::shown(&url), error = %e, "OIDC discovery failed");
+        }
+        if let Some(e) = kept {
+            tracing::warn!(module = "oidc", url = %crate::fetch::shown(&url), error = %e, "OIDC re-discovery failed; serving the previous document");
         }
         // The waiters re-enter on this wake and read the document (or its failure).
         if !waiters.is_empty() {
             io.wake(&waiters);
         }
-        Step::Ready(checked)
+        Step::Ready(answer)
     }
 }
 

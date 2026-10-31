@@ -436,6 +436,12 @@ impl<'h> HostIo<'h> {
         self.wanted
     }
 
+    /// Whether the op resumed with an exchange of its own still in flight: it must carry that
+    /// fetch on (and settle the flight it claimed) before it answers.
+    pub fn in_flight(&self) -> bool {
+        self.state.current.is_some()
+    }
+
     /// What to park across PENDING.
     pub fn into_state(self) -> IoState {
         self.state

@@ -65,7 +65,10 @@ impl KeyMaterial {
                 point.extend_from_slice(&y);
                 Self::Ec { point }
             }
-            other => Self::Unusable(format!("JWKS key has unsupported kty {other}")),
+            other => Self::Unusable(format!(
+                "JWKS key has unsupported kty {}",
+                crate::untrusted(other)
+            )),
         }
     }
 }
@@ -79,7 +82,7 @@ fn b64(field: Option<&str>, what: &str) -> Result<Vec<u8>, String> {
 }
 
 /// One JSON Web Key, the subset busbar's supported algorithms need. Unknown fields are ignored
-/// (`use`, `alg`, `x5c`, …) — a JWKS carries more than we consume.
+/// (`x5c`, …) — a JWKS carries more than we consume.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Jwk {
     /// Key type: `RSA` or `EC`. Selects which of the field groups below is populated.
@@ -108,6 +111,14 @@ pub struct Jwk {
     /// never be accepted for signature verification — enforced in [`crate::jwt::verify_signature`].
     #[serde(rename = "use", default)]
     pub key_use: Option<String>,
+    /// The algorithm the key is for (RFC 7517 §4.4): when present, the key verifies only a token
+    /// signed with exactly it ([`crate::jwt::verify_signature`]).
+    #[serde(default)]
+    pub alg: Option<String>,
+    /// The operations the key is for (RFC 7517 §4.3): when present, the key verifies a signature
+    /// only if it names `verify` ([`crate::jwt::verify_signature`]).
+    #[serde(default)]
+    pub key_ops: Option<Vec<String>>,
     /// Memoised base64url-decoded key material — decoded once on first verify and reused for every
     /// later request against this same cached key (see [`KeyMaterial`]). Not part of the JWKS wire
     /// form; skipped in deserialization and rebuilt per JWKS refresh.
@@ -116,6 +127,24 @@ pub struct Jwk {
 }
 
 impl Jwk {
+    /// Whether this key may verify a token signed with `alg`: the key type `alg` needs (`RS256`:
+    /// RSA, `ES256`: EC), an `alg` absent or equal to it, not encryption-only, and `key_ops` absent
+    /// or naming `verify`.
+    pub fn signs(&self, alg: &str) -> bool {
+        let kty = match alg {
+            "RS256" => "RSA",
+            "ES256" => "EC",
+            _ => return false,
+        };
+        self.kty == kty
+            && self.alg.as_deref().is_none_or(|a| a == alg)
+            && self.key_use.as_deref() != Some("enc")
+            && self
+                .key_ops
+                .as_ref()
+                .is_none_or(|ops| ops.iter().any(|op| op == "verify"))
+    }
+
     /// The decoded, verify-ready key material for this key — decoded once, then memoised, so the hot
     /// per-request verify path never re-decodes the base64url fields.
     pub fn material(&self) -> &KeyMaterial {
@@ -124,32 +153,26 @@ impl Jwk {
 }
 
 /// A parsed JWKS: the provider's current set of signing keys.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct JwkSet {
-    /// The keys. Deserialized from the top-level `keys` array of a JWKS document. An entry that is
-    /// not a usable [`Jwk`] (no `kty`, a non-string member, …) is SKIPPED rather than failing the
-    /// whole document: RFC 7517 §5 says a JWK Set consumer SHOULD ignore keys it cannot use, and
-    /// one odd entry must not take every other key (and so every token) down with it.
-    #[serde(deserialize_with = "skip_unusable_keys")]
+    /// The keys, from the top-level `keys` array of a JWKS document. An entry that is not a usable
+    /// [`Jwk`] (no `kty`, a non-string member, …) is SKIPPED rather than failing the whole
+    /// document: RFC 7517 §5 says a JWK Set consumer SHOULD ignore keys it cannot use, and one odd
+    /// entry must not take every other key (and so every token) down with it. How many were
+    /// skipped is said once per document, at warn ([`JwkSet::parse`]).
     pub keys: Vec<Jwk>,
 }
 
-/// Deserialize the `keys` array entry by entry, keeping only the entries that deserialize as a
-/// [`Jwk`]. The array itself must still be present and be an array.
-fn skip_unusable_keys<'de, D>(d: D) -> Result<Vec<Jwk>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let raw: Vec<serde_json::Value> = Deserialize::deserialize(d)?;
-    Ok(raw
-        .into_iter()
-        .filter_map(|v| serde_json::from_value::<Jwk>(v).ok())
-        .collect())
+/// A JWKS document as it arrives: its `keys` array, each entry not yet read as a [`Jwk`]. The
+/// array itself must be present and be an array.
+#[derive(Deserialize)]
+struct RawSet {
+    keys: Vec<serde_json::Value>,
 }
 
 impl JwkSet {
     /// Parse a JWKS document (the body of a `jwks_uri` GET). Entries that are not usable JWKs are
-    /// skipped (see [`JwkSet::keys`]).
+    /// skipped (see [`JwkSet::keys`]), one warn naming how many.
     ///
     /// A document that parses but carries ZERO usable keys is an ERROR, not an empty success. An
     /// identity provider that can sign tokens always publishes at least one key, so `{"keys":[]}` is a
@@ -160,9 +183,26 @@ impl JwkSet {
     /// empty body does. The caller's error path already preserves the previous keys; this makes the
     /// degenerate document take that path instead of the success path.
     pub fn parse(body: &str) -> Result<Self, String> {
-        let set: Self = serde_json::from_str(body).map_err(
+        let raw: RawSet = serde_json::from_str(body).map_err(
             busbar_contract::abi::sdk::auth_kit::json_error("invalid JWKS document"),
         )?;
+        let entries = raw.keys.len();
+        let set = Self {
+            keys: raw
+                .keys
+                .into_iter()
+                .filter_map(|v| serde_json::from_value::<Jwk>(v).ok())
+                .collect(),
+        };
+        let skipped = entries - set.keys.len();
+        if skipped > 0 {
+            // Once per fetched document, the count only: an entry's content is far-end input.
+            tracing::warn!(
+                module = "oidc",
+                skipped,
+                "JWKS document carries entries that are not usable keys; they are skipped"
+            );
+        }
         if set.keys.is_empty() {
             return Err(
                 "JWKS document contains no keys; refusing to replace the cached key set with an \
@@ -171,6 +211,24 @@ impl JwkSet {
             );
         }
         Ok(set)
+    }
+
+    /// The keys a token naming `kid`, signed with `alg`, is tried against: every key whose `kid`
+    /// matches ([`Self::find_all`]); for a token naming NO kid (`kid` empty) with its `alg` known,
+    /// the set's single usable signing key for that alg ([`Jwk::signs`]) if there is exactly one,
+    /// else none (ambiguous). `alg` `None` selects by `kid` alone.
+    pub fn select<'a>(&'a self, kid: &'a str, alg: Option<&str>) -> Vec<&'a Jwk> {
+        match alg {
+            Some(alg) if kid.is_empty() => {
+                let usable: Vec<&Jwk> = self.keys.iter().filter(|k| k.signs(alg)).collect();
+                if usable.len() == 1 {
+                    usable
+                } else {
+                    Vec::new()
+                }
+            }
+            _ => self.find_all(kid).collect(),
+        }
     }
 
     /// Find ALL keys whose `kid` matches `kid`. A JWT header names the `kid` that signed it; selecting

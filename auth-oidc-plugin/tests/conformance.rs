@@ -712,13 +712,13 @@ fn red_an_oversized_error_reply_names_its_status_and_is_cut_off_at_the_cap() {
     );
 }
 
-/// THE LOGIN WHOSE KEY SET CANNOT BE HAD, through the real dispatcher (ARCHITECT ruling: 1.5.5's
-/// answer). The token endpoint answers an identity token, but the key set's URL is to be
-/// discovered and the issuer's discovery answers 503: the door answers `LOGIN_BAD_CREDENTIAL`
-/// (the host's 401 "Sign-in was declined", as 1.5.5 rendered a key set its plugin could not
-/// fetch), never `LOGIN_OUTAGE` (502, which 1.5.5 kept for a token hop that failed).
+/// THE LOGIN WHOSE KEY SET CANNOT BE HAD, through the real dispatcher (OWNER-SIGNED 2026-10-30:
+/// an IdP outage is never a 401). The token endpoint answers an identity token, but the key set's
+/// URL is to be discovered and the issuer's discovery answers 503: the door answers
+/// `LOGIN_OUTAGE` (the IdP could not be had), never `LOGIN_BAD_CREDENTIAL` (1.5.5 rendered this
+/// as the declined sign-in; the owner reversed that).
 #[test]
-fn a_login_whose_key_set_cannot_be_had_is_declined_not_an_outage() {
+fn a_login_whose_key_set_cannot_be_had_is_an_outage_not_declined() {
     let _one = support::serial();
     let key = Issuer::start(UNUSED_ISSUER, KID);
     let idp = Idp::new(&key);
@@ -731,8 +731,8 @@ fn a_login_whose_key_set_cannot_be_had_is_declined_not_an_outage() {
     open(&b.plugin, &cfg.to_string(), Some(CLIENT_SECRET)).expect("opens");
 
     let answer = b.complete("code-1", ("st", NONCE), REDIRECT, "the-verifier", None);
-    assert_eq!(answer.trim_end(), format!("verdict {LOGIN_BAD_CREDENTIAL}"));
-    assert_ne!(answer.trim_end(), format!("verdict {LOGIN_OUTAGE}"));
+    assert_eq!(answer.trim_end(), format!("verdict {LOGIN_OUTAGE}"));
+    assert_ne!(answer.trim_end(), format!("verdict {LOGIN_BAD_CREDENTIAL}"));
     assert_eq!(idp.sent_to("/token").len(), 1, "the code was redeemed");
     assert_eq!(
         idp.sent_to(DISCOVERY_PATH).len(),
@@ -970,6 +970,7 @@ fn red_the_statement_declares_six_outbound_http_needs_in_their_classes() {
 /// which the host faults.
 #[test]
 fn a_bearer_that_is_not_utf8_passes_with_a_decision_and_its_line_named() {
+    let _one = support::serial();
     let key = Issuer::start(UNUSED_ISSUER, KID);
     let lib = cdylib();
     let stated = row().statement;
@@ -1062,4 +1063,226 @@ fn a_token_s_expiry_is_judged_at_the_request_s_timestamp() {
             "at {at}: {verdict}"
         );
     }
+}
+
+/// A `verify` of `token` submitted on its own ticket and left in flight; the closure waits for
+/// its answer (`verdict N`, or the outcome). `token` must outlive the call of the closure.
+fn verify_in_flight<'b>(b: &'b Bound, token: &str) -> impl FnOnce() -> String + 'b {
+    let bytes: &'static mut [u8] = Box::leak(vec![0_u8; IDENTITY_BUF_BYTES].into_boxed_slice());
+    let groups: &'static mut [Span] =
+        Box::leak(vec![z::<Span>(); IDENTITY_GROUPS as usize].into_boxed_slice());
+    let ticket = b.dispatcher.mint(0).expect("a ticket");
+    let mut out: IdentifyOut = z();
+    out.head = out_head();
+    let reply = b.dispatcher.submit(
+        &b.plugin,
+        ticket,
+        slot::VERIFY,
+        Frame::new(verify_in(Some(token), identity_buf(bytes, groups)), out),
+        busbar_contract::abi::mechanism::call::DeadlineClass::Call,
+        now_ns() + 20_000_000_000,
+    );
+    move || {
+        let done = reply
+            .wait(Duration::from_secs(30))
+            .expect("the op completes");
+        b.dispatcher.recycle(ticket);
+        match (done.outcome, done.frame) {
+            (Outcome::Ready, Some(f)) => format!("verdict {}", f.out.verdict),
+            (other, _) => format!("{other:?}"),
+        }
+    }
+}
+
+/// Wait until the IdP has pended `n` reads in all.
+fn until_pended(idp: &Idp, n: u32) {
+    let until = std::time::Instant::now() + Duration::from_secs(10);
+    while idp.pended() < n {
+        assert!(
+            std::time::Instant::now() < until,
+            "never pended: {:?}",
+            idp.sent()
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+/// L1: a verify that claimed the key set's refresh and pended on it, re-entered after ANOTHER
+/// verify cached the same token's identity meanwhile, still LANDS its own fetch: the rotated key
+/// the IdP answered is installed, so a token signed by it verifies at once. (Before, the re-entry
+/// answered from the verdict cache and dropped the fetch: the flight stayed claimed, the new key
+/// never arrived and the rate limit refused the rotation refetch.)
+#[test]
+fn a_verify_meeting_the_verdict_cache_on_re_entry_still_lands_its_fetch() {
+    let _one = support::serial();
+    let old = Issuer::start(UNUSED_ISSUER, KID);
+    let new = Issuer::start(UNUSED_ISSUER, "rotated-kid");
+    let idp = Idp::new(&old);
+    let b = bind(&Arm::Linked, &idp);
+    let mut cfg: serde_json::Value = serde_json::from_str(&config(AUDIENCE)).unwrap();
+    cfg["jwks_ttl_secs"] = serde_json::json!(1);
+    cfg["jwks_min_refetch_secs"] = serde_json::json!(2);
+    open(&b.plugin, &cfg.to_string(), None).expect("opens");
+    assert!(b
+        .verify(Some(&old.sign(&claims(AUDIENCE))), None)
+        .starts_with("verdict 1 "));
+
+    // The set goes stale and the rate limit lets a refresh through; the IdP has rotated.
+    std::thread::sleep(Duration::from_millis(2100));
+    let keys = |i: &Issuer| {
+        serde_json::from_str::<serde_json::Value>(i.jwks()).unwrap()["keys"][0].clone()
+    };
+    let both = serde_json::json!({ "keys": [keys(&old), keys(&new)] }).to_string();
+    idp.answer("/keys", 200, &both);
+    idp.pend_for(Duration::from_millis(800));
+    let pended = idp.pended();
+
+    let mut c = claims(AUDIENCE);
+    c["sub"] = serde_json::json!("cached-meanwhile");
+    let token = old.sign(&c);
+    let a = verify_in_flight(&b, &token);
+    until_pended(&idp, pended + 1);
+    // Another verify of the same token, on the stale set, caches its identity.
+    assert!(b.verify(Some(&token), None).starts_with("verdict 1 "));
+    assert_eq!(a(), "verdict 1");
+
+    assert!(
+        b.verify(Some(&new.sign(&claims(AUDIENCE))), None)
+            .starts_with("verdict 1 "),
+        "the refresh the first verify claimed landed the rotated key"
+    );
+    assert_eq!(idp.sent_to("/keys").len(), 2, "{:?}", idp.sent());
+}
+
+/// L2: a tick arriving while the previous tick's refresh is still in flight on the driver ticket
+/// carries THAT fetch on rather than starting a second exchange for the same key set.
+#[test]
+fn a_tick_during_the_last_tick_s_fetch_does_not_fetch_again() {
+    let _one = support::serial();
+    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let idp = Idp::new(&key);
+    let b = bind(&Arm::Linked, &idp);
+    let mut cfg: serde_json::Value = serde_json::from_str(&config(AUDIENCE)).unwrap();
+    cfg["jwks_ttl_secs"] = serde_json::json!(3);
+    cfg["jwks_min_refetch_secs"] = serde_json::json!(1);
+    open(&b.plugin, &cfg.to_string(), None).expect("opens");
+    assert!(b
+        .verify(Some(&key.sign(&claims(AUDIENCE))), None)
+        .starts_with("verdict 1 "));
+    assert_eq!(idp.sent_to("/keys").len(), 1);
+
+    let driver = b.dispatcher.driver(&b.plugin, 0).expect("a driver ticket");
+    let tick = || {
+        b.dispatcher
+            .tick(&b.plugin, driver, now_ns())
+            .wait(Duration::from_secs(30))
+            .expect("the tick completes")
+            .outcome
+    };
+    std::thread::sleep(Duration::from_millis(2100));
+    idp.pend_for(Duration::from_millis(1500));
+    assert_eq!(tick(), Outcome::Pending, "the refresh is in flight");
+    assert_eq!(idp.sent_to("/keys").len(), 2);
+    tick();
+    std::thread::sleep(Duration::from_millis(2000));
+    assert_eq!(
+        idp.sent_to("/keys").len(),
+        2,
+        "one exchange for the refresh: {:?}",
+        idp.sent()
+    );
+}
+
+/// L6: `ready` meeting another op's discovery in flight WAITS for it (woken when it settles),
+/// rather than approving the boot unseen: a discovery that then fails refuses the boot.
+#[test]
+fn ready_waits_on_another_op_s_discovery_and_a_failure_refuses_the_boot() {
+    let _one = support::serial();
+    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let idp = Idp::new(&key);
+    idp.answer(DISCOVERY_PATH, 503, "{}");
+    idp.pend_for(Duration::from_millis(500));
+    let b = bind(&Arm::Linked, &idp);
+    open(&b.plugin, &config(AUDIENCE), None).expect("opens");
+    let token = key.sign(&claims(AUDIENCE));
+    let a = verify_in_flight(&b, &token);
+    until_pended(&idp, 1);
+    let readied = b.plugin.ready(&b.dispatcher, Duration::from_secs(10));
+    assert!(
+        readied.as_ref().is_err_and(|e| e.contains("503")),
+        "the boot is refused with the discovery's failure: {readied:?}"
+    );
+    assert!(a().starts_with("Failed"));
+    assert_eq!(
+        idp.sent_to(DISCOVERY_PATH).len(),
+        1,
+        "ready made no fetch of its own"
+    );
+}
+
+/// T2: a login's id_token is judged for expiry at the HOST's wall clock (`clock.now`), through the
+/// real door: one that expired, or is not yet valid, is a declined login; a fresh one identifies.
+#[test]
+fn a_login_id_token_s_expiry_is_judged_at_the_host_clock() {
+    let _one = support::serial();
+    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let mut expired = claims(AUDIENCE);
+    expired["exp"] = serde_json::json!(now - 7200);
+    let mut early = claims(AUDIENCE);
+    early["nbf"] = serde_json::json!(now + 7200);
+    for (what, c, identified) in [
+        ("expired", expired, false),
+        ("not yet valid", early, false),
+        ("fresh", claims(AUDIENCE), true),
+    ] {
+        let idp = Idp::new(&key);
+        let body = serde_json::json!({ "id_token": key.sign(&c) }).to_string();
+        idp.answer("/token", 200, &body);
+        let b = bind(&Arm::Linked, &idp);
+        open(&b.plugin, &config(AUDIENCE), Some(CLIENT_SECRET)).expect("opens");
+        let answer = b.complete("code-1", ("st", NONCE), REDIRECT, "the-verifier", None);
+        if identified {
+            assert!(answer.starts_with("verdict 1 "), "{what}: {answer}");
+        } else {
+            assert_eq!(
+                answer.trim_end(),
+                format!("verdict {LOGIN_BAD_CREDENTIAL}"),
+                "{what}"
+            );
+        }
+    }
+}
+
+/// T3: an IdP destination the host's guard REFUSES is audited through the door: the verify fails,
+/// and the door raises its declared `OIDC_IDP_DESTINATION_REFUSED` at error naming the host and
+/// the rule (never the URL's path) — once per module, not once per request.
+#[test]
+fn a_refused_idp_destination_raises_its_declared_diagnostic_once() {
+    let _one = support::serial();
+    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let idp = Idp::new(&key);
+    let b = bind(&Arm::Linked, &idp);
+    let mut cfg: serde_json::Value = serde_json::from_str(&config(AUDIENCE)).unwrap();
+    cfg["jwks_min_refetch_secs"] = serde_json::json!(1);
+    open(&b.plugin, &cfg.to_string(), None).expect("opens");
+    // The JWKS need (anchored set: `ca_cert_pem` is configured) is refused by the guard.
+    idp.refuse(1);
+    let token = key.sign(&claims(AUDIENCE));
+    assert!(b.verify(Some(&token), None).starts_with("Failed"));
+    let raised = idp.diags();
+    assert_eq!(raised.len(), 1, "{raised:?}");
+    assert!(
+        raised[0].starts_with("OIDC_IDP_DESTINATION_REFUSED 2 ")
+            && raised[0].contains("idp.conformance.example")
+            && !raised[0].contains("/keys"),
+        "{raised:?}"
+    );
+    // Past the retry bound the fetch is made, and refused, again: not raised again.
+    std::thread::sleep(Duration::from_millis(1100));
+    assert!(b.verify(Some(&token), None).starts_with("Failed"));
+    assert_eq!(idp.diags().len(), 1, "raised once: {:?}", idp.diags());
 }

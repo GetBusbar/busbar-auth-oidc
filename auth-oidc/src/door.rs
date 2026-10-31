@@ -158,6 +158,15 @@ fn raise_refusals<O: AbiOut>(module: &OidcModule, io: &mut HostIo<'_>, out: &mut
 /// The most short answers kept for their re-call at once.
 const REACHED_MAX: usize = 1024;
 
+/// How long a short answer is kept for its re-call: an older one (its host never came back for
+/// it) goes on the next access of the map.
+const REACHED_TTL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// Drop every kept answer older than [`REACHED_TTL`] at `now`.
+fn expire(map: &mut HashMap<Ticket, Reached>, now: Instant) {
+    map.retain(|_, r| now.saturating_duration_since(r.at) <= REACHED_TTL);
+}
+
 /// The BACKSTOP of an op waiting on another op's fetch, nanoseconds on the host's monotonic clock:
 /// it is woken when that fetch lands ([`Fetch::wake`]), and asks again after this long only if the
 /// fetch never settles — the fetch's own bound, after which its flight may be taken over.
@@ -185,11 +194,7 @@ struct Opened {
 
 impl Opened {
     fn new(settings: &[u8], secrets: &[&[u8]]) -> Result<Self, Refusal> {
-        let module = module(text(settings)?).map_err(Refusal::failed)?;
-        // `module` opened these settings, so they parse and their `jwks_url` checks.
-        let flagged = config(text(settings)?)
-            .ok()
-            .and_then(|c| crate::check_jwks_url(&c).ok().flatten());
+        let (module, flagged) = module(text(settings)?).map_err(Refusal::failed)?;
         // An empty lent secret is none (a provider with no `browser_login.client_secret`): the
         // token exchange then sends no secret field, as 1.5.5's core sent none.
         let secret = lent_secret(secrets);
@@ -259,7 +264,15 @@ impl Opened {
                 .identity_from_token_response(response, io.wall_now(), now, io))
             {
                 Ok(LoginOutcome::Identify(p)) => Login::Identity(p),
-                Ok(_) => Login::Bad,
+                // Enumerated (not `_`) so a future `LoginOutcome` variant is a compile error here.
+                Ok(LoginOutcome::Reject) => Login::Bad,
+                Ok(
+                    LoginOutcome::Authorize(_)
+                    | LoginOutcome::Prompt(_)
+                    | LoginOutcome::Exchange(_)
+                    | LoginOutcome::Outage
+                    | LoginOutcome::SecurityCheckFailed,
+                ) => Login::Bad,
                 Err(e) => Login::Outage(e),
             },
         )
@@ -295,9 +308,11 @@ impl Reached {
     }
 }
 
-/// Keep `r` for `ticket`'s re-call, at most `max` at once: at the cap the OLDEST entry goes, never
-/// the rest (an in-flight short answer awaiting its re-call must survive).
+/// Keep `r` for `ticket`'s re-call, at most `max` at once: entries past [`REACHED_TTL`] go, and at
+/// the cap the OLDEST entry goes, never the rest (an in-flight short answer awaiting its re-call
+/// must survive).
 fn keep(map: &mut HashMap<Ticket, Reached>, max: usize, ticket: Ticket, r: Reached) {
+    expire(map, r.at);
     if map.len() >= max && !map.contains_key(&ticket) {
         let oldest = map.iter().min_by_key(|(_, k)| k.at).map(|(t, _)| *t);
         if let Some(oldest) = oldest {
@@ -402,15 +417,17 @@ impl Life for Oidc {
             .unwrap_or_default();
         let mut io = HostIo::new(Some(host), ticket, state, opened.module.anchored());
         match opened.module.ready(Instant::now(), &mut io) {
-            Step::Pending => {
+            // This call's own request in flight, or ANOTHER call's fetch of the same document or
+            // key set: either way `ready` is woken when it settles (the other call's fetch wakes
+            // its waiters) and judges its outcome then — never approving the boot unseen.
+            Step::Pending | Step::Wait => {
                 self.readying
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .insert(ticket, io.into_state());
                 Poll::Pending
             }
-            // Another call's fetch of the same document: it serves this instance too.
-            Step::Ready(Ok(())) | Step::Wait => Poll::Ready(Ok(())),
+            Step::Ready(Ok(())) => Poll::Ready(Ok(())),
             Step::Ready(Err(e)) => Poll::Ready(Err(Refusal::failed(e))),
         }
     }
@@ -434,8 +451,10 @@ impl Life for Oidc {
             Some(Arc::new(Opened::new(settings, secrets)?))
         };
         let flushed = now.module.flush_verdicts();
-        if let Some(opened) = reopened {
-            *self.now.write().unwrap_or_else(PoisonError::into_inner) = opened;
+        match reopened {
+            Some(opened) => *self.now.write().unwrap_or_else(PoisonError::into_inner) = opened,
+            // The module kept: its discovery document is asked for again, as a re-opened one's is.
+            None => now.module.rediscover(),
         }
         Ok(Refreshed {
             counted: Some(Counted {
@@ -553,6 +572,7 @@ const CARRIERS: &[MarkWord] = &[carrier(AUTHORIZATION)];
 /// §11.13 M-SB: capacity is checked before anything is written).
 fn answer(
     p: Option<&Principal>,
+    ttl: Option<u64>,
     credential: Option<&[u8]>,
     strip: Option<(HostBuf<'_, StripName>, u32)>,
     buf: Lent<'_, IdentityBuf>,
@@ -625,7 +645,7 @@ fn answer(
         |o| &o.identity.groups_len,
         u32::try_from(groups.written()).unwrap_or(u32::MAX),
     );
-    let (flags, ttl) = p.ttl_secs.map_or((0, 0), |t| (IDENTITY_HAS_TTL, t));
+    let (flags, ttl) = ttl.map_or((0, 0), |t| (IDENTITY_HAS_TTL, t));
     out.set(|o| &o.identity.flags, flags);
     out.set(|o| &o.identity.ttl_secs, ttl);
     if !credential.is_empty() {
@@ -662,6 +682,7 @@ impl SafeSlot for Verify {
                 return answer(
                     None,
                     None,
+                    None,
                     Some((input.strip(), DECISION_CONTINUE)),
                     input.field(|i| &i.out_buf),
                     &mut out,
@@ -678,10 +699,16 @@ impl SafeSlot for Verify {
         let ticketless = instance.ticket().is_none();
         let opened = h.life().now();
         let (mut io, parked) = resume(&instance, h, &opened);
-        // A HIT is answered from the cached identity itself, with no copy of it.
-        if let Some(p) = token.and_then(|t| opened.module.cached(t, request_now)) {
+        // A HIT is answered from the cached identity itself, with no copy of it, stating the TTL
+        // it has left — unless the op re-enters with its own fetch in flight: that fetch is
+        // landed (its flight settled, its waiters woken) by judging the token, never dropped.
+        let hit = (!io.in_flight())
+            .then(|| token.and_then(|t| opened.module.cached(t, request_now)))
+            .flatten();
+        if let Some(hit) = hit {
             return answer(
-                Some(&*p),
+                Some(&*hit.principal),
+                hit.ttl_secs,
                 token.map(str::as_bytes),
                 Some((input.strip(), DECISION_CONTINUE)),
                 input.field(|i| &i.out_buf),
@@ -721,6 +748,7 @@ impl SafeSlot for Verify {
         };
         answer(
             p,
+            p.and_then(|p| p.ttl_secs),
             token.map(str::as_bytes),
             Some((input.strip(), decision)),
             input.field(|i| &i.out_buf),
@@ -803,6 +831,7 @@ impl SafeSlot for Complete {
         let code = blob_text(input.field(|i| &i.code));
         let code_bytes = code.map_or(&[][..], str::as_bytes);
         let mut reached = oidc.reached.lock().unwrap_or_else(PoisonError::into_inner);
+        expire(&mut reached, Instant::now());
         let kept = reached
             .remove(&instance.ticket())
             .filter(|r| r.serves(state, code_bytes));
@@ -888,9 +917,18 @@ impl SafeSlot for Tick {
         if ticket.is_none() {
             return Outcome::Ready;
         }
-        // A tick starts its driver ticket's cycle: whatever the last one left in flight is over.
-        *oidc.driving.lock().unwrap_or_else(PoisonError::into_inner) = None;
-        oidc.refresh_ahead(h.host(), ticket, opened, IoState::default())
+        // A refresh the last tick left in flight on this driver ticket is carried on, not
+        // restarted: its flight is still this ticket's, and a fresh exchange would be a second
+        // fetch of the same key set.
+        let parked = oidc
+            .driving
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        match parked {
+            Some((parked, state)) => oidc.refresh_ahead(h.host(), ticket, parked, state),
+            None => oidc.refresh_ahead(h.host(), ticket, opened, IoState::default()),
+        }
     }
 }
 
