@@ -653,8 +653,8 @@ fn cold_verifies(staggered: bool) {
     assert_eq!(idp.sent_to("/keys").len(), 1, "{seen}");
 }
 
-/// THE BODY CAP IS ENFORCED WHILE READING: a discovery reply far past the 1 MiB cap is refused in
-/// 1.5.5's words, and the plugin stopped reading at the cap rather than buffering the SDK's
+/// A discovery reply far past the 1 MiB cap names the document and stops reading at the cap,
+/// rather than buffering the SDK's
 /// 16 MiB reply ceiling first (1.5.5 read at most cap + 1 bytes).
 #[test]
 fn red_an_oversized_reply_is_cut_off_at_the_cap_not_buffered_whole() {
@@ -672,7 +672,7 @@ fn red_an_oversized_reply_is_cut_off_at_the_cap_not_buffered_whole() {
     assert_eq!(
         refused,
         format!(
-            "Failed OIDC discovery fetch failed ({url}): {url} JWKS body exceeds the 1048576-byte \
+            "Failed OIDC discovery fetch failed ({url}): {url} discovery body exceeds the 1048576-byte \
              cap; set jwks_url explicitly"
         )
     );
@@ -681,6 +681,23 @@ fn red_an_oversized_reply_is_cut_off_at_the_cap_not_buffered_whole() {
         "the plugin read {} bytes of a reply capped at 1 MiB",
         idp.served()
     );
+}
+
+#[test]
+fn a_non_utf8_discovery_reply_names_the_document_without_echoing_the_body() {
+    let _one = support::serial();
+    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let token = key.sign(&claims(AUDIENCE));
+    let idp = Idp::new(&key);
+    idp.answer_bytes(DISCOVERY_PATH, 200, b"private-document-contents\xff");
+    let b = bind(&Arm::Linked, &idp);
+    open(&b.plugin, &config(AUDIENCE), None).expect("opens");
+
+    let refused = b.verify(Some(&token), None);
+    assert!(refused.contains("discovery body is not UTF-8"), "{refused}");
+    assert!(!refused.contains("JWKS body"), "{refused}");
+    assert!(!refused.contains("private-document-contents"), "{refused}");
+    assert_eq!(idp.sent_to(DISCOVERY_PATH).len(), 1);
 }
 
 /// THE STATUS IS JUDGED BEFORE THE BODY, as 1.5.5 judged it: a non-2xx discovery reply with a body

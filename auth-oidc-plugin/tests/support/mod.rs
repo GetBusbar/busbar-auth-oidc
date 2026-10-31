@@ -228,10 +228,15 @@ impl Idp {
 
     /// What a request to `path` is answered from now on.
     pub fn answer(&self, path: &str, status: u32, body: &str) {
+        self.answer_bytes(path, status, body.as_bytes());
+    }
+
+    /// A response whose bytes need not be UTF-8.
+    pub fn answer_bytes(&self, path: &str, status: u32, body: &[u8]) {
         self.answers
             .lock()
             .unwrap()
-            .insert(path.to_string(), (status, body.as_bytes().to_vec()));
+            .insert(path.to_string(), (status, body.to_vec()));
     }
 
     /// How long a reply's first read pends before the op's ticket is woken.

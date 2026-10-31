@@ -392,6 +392,112 @@ fn bad_settings_are_refused_in_the_contracts_settings_line_form() {
     );
 }
 
+#[test]
+fn present_blank_optional_settings_are_refused_by_validate_and_open() {
+    for key in [
+        "jwks_url",
+        "role_claim",
+        "ca_cert_pem",
+        "client_id",
+        "authorization_endpoint",
+        "token_endpoint",
+    ] {
+        for blank in ["", " \n\t "] {
+            let mut cfg: serde_json::Value = serde_json::from_slice(&settings()).unwrap();
+            cfg[key] = serde_json::json!(blank);
+            let cfg = cfg.to_string();
+            for refused in [
+                <Oidc as Life>::validate(cfg.as_bytes()).expect_err("validate refuses blank"),
+                Oidc::open(cfg.as_bytes(), &lent(b""), 1).expect_err("open refuses blank"),
+            ] {
+                let text = refused.text().unwrap_or_default();
+                assert!(text.starts_with(&format!("settings.{key}: ")), "{text}");
+                assert!(text.contains("blank"), "{text}");
+                busbar_contract::abi::mechanism::lifecycle::check_validate_refusal(text.as_bytes())
+                    .expect("a well-formed settings refusal");
+            }
+        }
+    }
+    // Omitting optional fields retains the defaults and discovery behavior.
+    let cfg = serde_json::json!({ "issuer": ISSUER, "audience": AUDIENCE }).to_string();
+    assert!(<Oidc as Life>::validate(cfg.as_bytes()).is_ok());
+    assert!(Oidc::open(cfg.as_bytes(), &lent(b""), 1).is_ok());
+}
+
+#[test]
+fn zero_refetch_interval_is_refused_and_positive_intervals_remain_valid() {
+    for secs in [0, 1, 60, u64::MAX] {
+        let mut cfg: serde_json::Value = serde_json::from_slice(&settings()).unwrap();
+        cfg["jwks_min_refetch_secs"] = serde_json::json!(secs);
+        let cfg = cfg.to_string();
+        let validated = <Oidc as Life>::validate(cfg.as_bytes());
+        let opened = Oidc::open(cfg.as_bytes(), &lent(b""), 1);
+        if secs == 0 {
+            for refused in [validated.unwrap_err(), opened.unwrap_err()] {
+                assert_eq!(
+                    refused.text().unwrap_or_default(),
+                    "settings.jwks_min_refetch_secs: must be greater than zero"
+                );
+            }
+        } else {
+            assert!(validated.is_ok(), "{secs}");
+            assert!(opened.is_ok(), "{secs}");
+        }
+    }
+}
+
+#[test]
+fn configured_endpoint_schemes_are_checked_without_echoing_settings_values() {
+    for key in ["issuer", "authorization_endpoint", "token_endpoint"] {
+        for value in [
+            "not-a-url-PrivateMarker",
+            "javascript:PrivateMarker",
+            "ftp://user:PrivateMarker@idp.example/PrivateMarker?q=PrivateMarker",
+            "http://user:PrivateMarker@idp.example/PrivateMarker?q=PrivateMarker",
+            "http://127.0.0.1@evil.example/PrivateMarker",
+        ] {
+            let mut cfg: serde_json::Value = serde_json::from_slice(&settings()).unwrap();
+            cfg[key] = serde_json::json!(value);
+            let cfg = cfg.to_string();
+            for refused in [
+                <Oidc as Life>::validate(cfg.as_bytes()).expect_err("validate checks URL"),
+                Oidc::open(cfg.as_bytes(), &lent(b""), 1).expect_err("open checks URL"),
+            ] {
+                let text = refused.text().unwrap_or_default();
+                assert!(text.starts_with(&format!("settings.{key}: ")), "{text}");
+                assert!(!text.contains("PrivateMarker"), "{text}");
+                assert!(!text.contains(value), "{text}");
+                busbar_contract::abi::mechanism::lifecycle::check_validate_refusal(text.as_bytes())
+                    .expect("a well-formed settings refusal");
+            }
+        }
+        for value in [
+            "https://other.example/tenant",
+            "http://localhost/tenant",
+            "http://127.0.0.1:8080/tenant",
+            "http://[::1]/tenant",
+        ] {
+            let mut cfg: serde_json::Value = serde_json::from_slice(&settings()).unwrap();
+            cfg[key] = serde_json::json!(value);
+            let cfg = cfg.to_string();
+            assert!(
+                <Oidc as Life>::validate(cfg.as_bytes()).is_ok(),
+                "{key}: {value}"
+            );
+            assert!(
+                Oidc::open(cfg.as_bytes(), &lent(b""), 1).is_ok(),
+                "{key}: {value}"
+            );
+        }
+    }
+    // Configured private token endpoints retain the existing plaintext exception.
+    let mut cfg: serde_json::Value = serde_json::from_slice(&settings()).unwrap();
+    cfg["token_endpoint"] = serde_json::json!("http://192.168.1.2/token");
+    let cfg = cfg.to_string();
+    assert!(<Oidc as Life>::validate(cfg.as_bytes()).is_ok());
+    assert!(Oidc::open(cfg.as_bytes(), &lent(b""), 1).is_ok());
+}
+
 /// L15: a `refresh` that keeps the opened module (the admin cache flush, unchanged settings) has
 /// the issuer's discovery document asked for again on its next use, as a `refresh` with new
 /// settings would.

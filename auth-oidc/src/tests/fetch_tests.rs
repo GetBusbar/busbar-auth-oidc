@@ -386,7 +386,7 @@ fn the_form_body_matches_the_url_form_serializer() {
 /// `ca_cert_pem` ADDS A ROOT AND NEVER DISABLES VALIDATION (identity-providers.md: "`ca_cert_pem`
 /// never disables validation"; W20): a module whose settings name one goes out on the ANCHORED needs
 /// alone, each trusting `settings.ca_cert_pem` (`trust_from`, which the host's connector layers on
-/// top of the public roots), a module whose settings name none (or an empty one) on the PUBLIC
+/// top of the public roots), a module whose settings name none on the PUBLIC
 /// needs alone, which trust the public roots and nothing else. No source file of the module names
 /// the contract's unverified-handshake opt-in, or asks for a TLS upgrade at all: every request is
 /// one framed exchange whose connection the host secures and verifies.
@@ -404,8 +404,11 @@ fn ca_cert_pem_only_adds_a_trusted_root_and_never_disables_verification() {
     };
     let pem = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n";
     assert!(crate::OidcModule::new(&settings(Some(pem))).anchored());
-    assert!(!crate::OidcModule::new(&settings(Some(""))).anchored());
     assert!(!crate::OidcModule::new(&settings(None)).anchored());
+    assert!(crate::open::config(
+        r#"{"issuer":"https://idp.corp.example/realms/r","audience":"api://a","ca_cert_pem":""}"#
+    )
+    .is_err());
     for need in [NEED_DISCOVERY, NEED_JWKS, NEED_TOKEN] {
         let anchored = &NEEDS[on(need, true) as usize];
         let public = &NEEDS[on(need, false) as usize];
