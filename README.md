@@ -15,7 +15,6 @@ The OIDC auth module as a droppable busbar plugin: a cdylib exporting the auth C
 **This plugin's version: 1.6.0.** (Versioned in this repo — see
 [Versioning](#versioning) below.)
 
-[![CI](https://github.com/GetBusbar/busbar-auth-oidc/actions/workflows/ci.yml/badge.svg)](https://github.com/GetBusbar/busbar-auth-oidc/actions/workflows/ci.yml)
 [![Coverage](https://codecov.io/gh/GetBusbar/busbar-auth-oidc/branch/dev/graph/badge.svg)](https://codecov.io/gh/GetBusbar/busbar-auth-oidc)
 [![Release](https://img.shields.io/github/v/release/GetBusbar/busbar-auth-oidc)](https://github.com/GetBusbar/busbar-auth-oidc/releases)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
@@ -33,17 +32,6 @@ memory ABI (via
 [`busbar-contract`](https://github.com/GetBusbar/busbar/tree/main/crates/busbar-contract)),
 and is loaded in-process by busbar as a signed plugin — `dlopen`'d, not
 spawned as a separate process. A build can also link the same door in.
-
-### Versioning
-
-This plugin's version is set in this repo. `1.6.0` puts it on the busbar
-1.6 line, above every 1.5.5-era release of it (`v1.0.x`), so an operator's
-version floor or rollback pin never downgrades onto one. Compatibility with
-busbar is stated separately: **requires busbar 1.6.0+** (it speaks busbar
-1.6's memory ABI through `busbar-contract`, pinned in `.busbar-ref`; busbar
-1.5.x speaks an older auth ABI and refuses to load it). Pin both versions
-explicitly in production; do not assume they move together.
-
 
 - **Verifying who's calling**: define an entry under `identity-providers:`
   with its `settings:` pointed at an IdP (Entra ID, Okta, Auth0, Keycloak,
@@ -69,6 +57,25 @@ explicitly in production; do not assume they move together.
   `groups`) becomes the `Principal`'s roles, which busbar's virtual-key
   and policy layer can then gate on — so an operator's existing IdP
   groups drive busbar access without a second identity system.
+- **Outages are not bad credentials**: a token is refused (401) only for
+  what is wrong with it — its signature, its claims, a kid absent from the
+  key set the IdP last answered. When the IdP cannot be had (its JWKS or
+  discovery fetch fails, or the rate limit is holding the retry off after a
+  failure, or the host clock is unreadable) a bearer verify FAILS with the
+  reason and a browser login answers the outage; at the token endpoint only
+  an RFC 6749 §5.2 credential error (a 400/401 carrying `error`) declines a
+  login, any other non-2xx is an outage.
+
+### Versioning
+
+This plugin's version is set in this repo. `1.6.0` puts it on the busbar
+1.6 line, above every 1.5.5-era release of it (`v1.0.x`), so an operator's
+version floor or rollback pin never downgrades onto one. Compatibility with
+busbar is stated separately: **requires busbar 1.6.0+** (it speaks busbar
+1.6's memory ABI through `busbar-contract`, pinned in `.busbar-ref`; busbar
+1.5.x speaks an older auth ABI and refuses to load it). Pin both versions
+explicitly in production; do not assume they move together.
+
 
 ### Design
 
@@ -86,27 +93,35 @@ same-repo sibling crate; see [Dependencies](#dependencies) below), so a
 custom build can also link that logic statically instead of going
 through the plugin ABI.
 
-`jwks_url` in the config is optional: when omitted, it is resolved once
-at boot (the host's `ready`, after `open` and before any listener binds)
+`jwks_url` in the config is optional: when omitted, it is resolved at
+boot (the host's `ready`, after `open` and before any listener binds)
 via the issuer's OIDC discovery document, so boot fails
 loudly if discovery can't find it rather than deferring the failure to
-the first request.
+the first request. The document is asked for again a day later and on
+every `refresh`, the previous one serving meanwhile and if that fails.
 
 ## Config
 
 | Setting | Required | Default | Notes |
 |---|---|---|---|
 | `issuer` | yes | — | The IdP's OIDC issuer URL, exact-matched against the JWT's `iss` claim: a token naming another issuer passes to the next auth in the chain, a token naming this one is verified in full. A blank value is refused at load. |
-| `audience` | yes | — | The expected `aud` claim (busbar's registered client/resource identifier at the IdP). A blank value is refused at load. |
+| `audience` | yes | — | The audience a bearer's `aud` claim must contain (busbar's registered client/resource identifier at the IdP); other audiences beside it are allowed (RFC 9068). A blank value is refused at load. |
 | `jwks_url` | no | discovered from `issuer` | The IdP's JWKS endpoint. Must be an `https` URL. Plain `http` is accepted only for a loopback host (127.0.0.0/8, `::1`, `localhost`); it loads with a warning (also raised as the declared diagnostic `OIDC_JWKS_PLAIN_HTTP`, which the host audits), and since the key set is only ever fetched over https, every token is rejected until the URL is https. Anything else is refused at load. When omitted, resolved once at boot via OIDC discovery (`<issuer>/.well-known/openid-configuration`); a discovery failure refuses the boot. |
 | `role_claim` | no | `groups` | The claim mapped onto the resulting `Principal`'s roles; set `roles` to use Entra app-roles instead. |
 | `jwks_min_refetch_secs` | no | `60` | JWKS refetch rate-limit (seconds) — the bound on how often a kid-rotation refetch can occur. |
 | `jwks_ttl_secs` | no | `3600` | JWKS cache TTL (seconds). |
 | `ca_cert_pem` | no | — | An extra root CA (PEM) to trust for the JWKS/discovery HTTPS fetch, in addition to the built-in public (webpki) roots; the OS trust store is not consulted — for a private CA or a test fixture (this is exactly what `tests/e2e.rs` uses to trust its own self-signed local JWKS server). |
-| `client_id` | no | `audience` | The OAuth `client_id` presented on the browser-login authorize URL and token exchange. The client secret is never written here: the `client_secret` key names a secret reference the host resolves and lends at `open`, and the plugin sends it only in the token exchange's form body (sealed by the SDK, wiped after). |
+| `client_id` | no | `audience` | The OAuth `client_id` presented on the browser-login authorize URL and token exchange; the login's `id_token` must name it in `aud` (and in `azp` when it carries one, OIDC Core §3.1.3.7). |
+| `client_secret` | no | — | A SECRET REFERENCE (never the secret itself): the host resolves it and lends it at `open`, and the plugin sends it only in the token exchange's form body (sealed by the SDK, wiped after). Absent for a public client. |
 | `scopes` | no | `[]` | Extra OAuth scopes requested at browser login, on top of the always-sent `openid`. |
-| `authorization_endpoint` | no | discovered from `issuer` | The IdP authorize endpoint for browser login. When omitted, taken from the issuer's discovery document (fetched at boot when `jwks_url` is omitted too, else on the first browser login); absent and undiscoverable means browser login is refused (token verification is unaffected). |
+| `authorization_endpoint` | no | discovered from `issuer` | The IdP authorize endpoint for browser login. When omitted, taken from the issuer's discovery document (fetched at boot when `jwks_url` is omitted too, else on the first browser login), which must name it over https (plain http only to loopback); absent and undiscoverable means browser login is refused (token verification is unaffected). A login the host lends no nonce is refused. |
 | `token_endpoint` | no | discovered from `issuer` | The IdP token endpoint for the browser-login code exchange. Discovered like `authorization_endpoint` when omitted. |
+
+A discovered `jwks_uri`, `token_endpoint` or `authorization_endpoint` that
+is not https (plain http only to loopback), or one the host's destination
+guard refuses, is refused naming its host and the rule, and raised once
+per instance as the declared diagnostic `OIDC_IDP_DESTINATION_REFUSED`,
+which the host audits.
 
 Unknown config fields are rejected (`deny_unknown_fields`) — a typo'd or
 stray key fails loudly at boot instead of being silently ignored.
