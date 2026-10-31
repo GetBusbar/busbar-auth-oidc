@@ -409,16 +409,16 @@ fn install_oidc_plugin_via_admin_api_and_authenticate() {
 
     let mut child1 = KillOnDrop(
         std::process::Command::new(&busbar_bin)
-        .env("BUSBAR_CONFIG", &config1)
-        .env("BUSBAR_TEST_HARNESS_FIRST_PARTY_KEY", &first_party_pub)
-        .env("BUSBAR_PROVIDERS", &providers)
-        .env("BUSBAR_ADMIN_TOKEN", ADMIN_TOKEN)
-        .env("MOCK_KEY", "unused-mock-provider-key")
-        .env("BUSBAR_STATE_FILE", "")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::inherit())
-        .spawn()
-        .expect("spawn boot 1 (empty auth chain, admin listener up)"),
+            .env("BUSBAR_CONFIG", &config1)
+            .env("BUSBAR_TEST_HARNESS_FIRST_PARTY_KEY", &first_party_pub)
+            .env("BUSBAR_PROVIDERS", &providers)
+            .env("BUSBAR_ADMIN_TOKEN", ADMIN_TOKEN)
+            .env("MOCK_KEY", "unused-mock-provider-key")
+            .env("BUSBAR_STATE_FILE", "")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::inherit())
+            .spawn()
+            .expect("spawn boot 1 (empty auth chain, admin listener up)"),
     );
     assert!(
         wait_for_admin_ready(&client, &admin_addr1, ADMIN_TOKEN, &mut child1.0),
@@ -508,16 +508,18 @@ fn install_oidc_plugin_via_admin_api_and_authenticate() {
 
     let mut child2 = KillOnDrop(
         std::process::Command::new(&busbar_bin)
-        .env("BUSBAR_CONFIG", &config2)
-        .env("BUSBAR_TEST_HARNESS_FIRST_PARTY_KEY", &first_party_pub)
-        .env("BUSBAR_PROVIDERS", &providers)
-        .env("BUSBAR_ADMIN_TOKEN", ADMIN_TOKEN)
-        .env("MOCK_KEY", "unused-mock-provider-key")
-        .env("BUSBAR_STATE_FILE", "")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::inherit())
-        .spawn()
-        .expect("spawn boot 2 (auth.chain: [oidc], picking up the admin-API-installed tarball)"),
+            .env("BUSBAR_CONFIG", &config2)
+            .env("BUSBAR_TEST_HARNESS_FIRST_PARTY_KEY", &first_party_pub)
+            .env("BUSBAR_PROVIDERS", &providers)
+            .env("BUSBAR_ADMIN_TOKEN", ADMIN_TOKEN)
+            .env("MOCK_KEY", "unused-mock-provider-key")
+            .env("BUSBAR_STATE_FILE", "")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::inherit())
+            .spawn()
+            .expect(
+                "spawn boot 2 (auth.chain: [oidc], picking up the admin-API-installed tarball)",
+            ),
     );
     assert!(
         wait_for_admin_ready(&client, &admin_addr2, ADMIN_TOKEN, &mut child2.0),

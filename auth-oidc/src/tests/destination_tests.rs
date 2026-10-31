@@ -262,7 +262,10 @@ fn a_discovered_plain_http_authorization_endpoint_is_refused() {
     let Err(why) = answered else {
         panic!("a plain http authorize URL on a public host is refused, got {answered:?}");
     };
-    assert!(why.contains("login.example.com") && why.contains("https"), "{why}");
+    assert!(
+        why.contains("login.example.com") && why.contains("https"),
+        "{why}"
+    );
     assert_eq!(idp.refusals().len(), 1, "{:?}", idp.refusals());
 
     for url in [

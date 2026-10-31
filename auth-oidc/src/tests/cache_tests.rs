@@ -536,7 +536,9 @@ fn a_waiter_whose_fetch_failed_fails_closed_inside_the_rate_limit() {
     );
     assert_eq!(
         c.with_key(URL, "k1", t0, &mut winner, |_| Ok(())),
-        Step::Ready(Err(KeyError::Unavailable("provider unreachable".to_string())))
+        Step::Ready(Err(KeyError::Unavailable(
+            "provider unreachable".to_string()
+        )))
     );
     let err = ready(c.with_key(URL, "k1", t0, &mut waiter, |_| Ok(()))).unwrap_err();
     assert!(
