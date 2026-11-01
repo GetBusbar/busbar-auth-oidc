@@ -207,7 +207,7 @@ fn ticket(n: u32) -> Ticket {
     }
 }
 
-fn kept_for(n: u32, at: Instant) -> Reached {
+fn kept_for(n: u32, at: u64) -> Reached {
     Reached {
         at,
         state: busbar_contract::abi::sdk::cred::Held::new(format!("s{n}").into_bytes()),
@@ -221,7 +221,7 @@ fn kept_for(n: u32, at: Instant) -> Reached {
 /// ticket must never hand one user's identity to another callback).
 #[test]
 fn a_kept_identity_serves_only_its_own_state_and_code() {
-    let kept = kept_for(1, Instant::now());
+    let kept = kept_for(1, 0);
     assert!(kept.serves(b"s1", b"c1"), "its own callback");
     for (state, code) in [
         (&b"s2"[..], &b"c1"[..]),
@@ -244,8 +244,7 @@ fn a_kept_identity_serves_only_its_own_state_and_code() {
 /// short buffer reached still waits for its re-call (clearing the map would refuse them all).
 #[test]
 fn a_full_reached_map_evicts_only_the_oldest() {
-    let t0 = Instant::now();
-    let at = |n: u32| t0 + std::time::Duration::from_millis(u64::from(n));
+    let at = |n: u32| u64::from(n) * 1_000_000;
     let mut map = HashMap::new();
     let max = u32::try_from(REACHED_MAX).expect("fits");
     for n in 1..=max {
@@ -269,7 +268,7 @@ fn a_full_reached_map_evicts_only_the_oldest() {
 /// A ticket kept again replaces its own entry and evicts no other.
 #[test]
 fn a_ticket_kept_again_does_not_evict() {
-    let t0 = Instant::now();
+    let t0 = 0;
     let mut map = HashMap::new();
     keep(&mut map, 2, ticket(1), kept_for(1, t0));
     keep(&mut map, 2, ticket(2), kept_for(2, t0));
@@ -283,20 +282,20 @@ fn a_ticket_kept_again_does_not_evict() {
 /// newer one stays.
 #[test]
 fn a_kept_identity_older_than_ten_minutes_goes() {
-    let t0 = Instant::now();
+    let t0 = 0;
     let mut map = HashMap::new();
     keep(&mut map, REACHED_MAX, ticket(1), kept_for(1, t0));
     keep(
         &mut map,
         REACHED_MAX,
         ticket(2),
-        kept_for(2, t0 + std::time::Duration::from_secs(9 * 60)),
+        kept_for(2, t0 + 9 * 60 * 1_000_000_000),
     );
     keep(
         &mut map,
         REACHED_MAX,
         ticket(3),
-        kept_for(3, t0 + std::time::Duration::from_secs(10 * 60 + 1)),
+        kept_for(3, t0 + (10 * 60 + 1) * 1_000_000_000),
     );
     assert!(!map.contains_key(&ticket(1)), "older than 10 minutes: gone");
     assert!(map.contains_key(&ticket(2)) && map.contains_key(&ticket(3)));
@@ -332,7 +331,7 @@ fn a_blank_issuer_or_audience_is_refused_naming_the_key() {
 }
 
 /// BIND-AUDIT: a plain http `jwks_url` raises the diagnostic the Statement declares,
-/// `OIDC_JWKS_PLAIN_HTTP`, at warn, in the very words `open` logs, so the host audits the loaded
+/// `BUSBAR-4032`, at warn, in the very words `open` logs, so the host audits the loaded
 /// but flagged instance on the plugin's behalf (`plugin.open`, `degraded`). An https one raises
 /// nothing, and a `refresh` to https stops raising it.
 #[test]
@@ -345,7 +344,7 @@ fn a_plain_http_jwks_url_raises_its_declared_diagnostic() {
     .to_string();
     let oidc = Oidc::open(plain.as_bytes(), &lent(b""), 1).expect("a plain http jwks_url opens");
     let flag = oidc.flagged().expect("it raises its warning");
-    assert_eq!(DIAG_NAMES[flag.id_idx as usize], "OIDC_JWKS_PLAIN_HTTP");
+    assert_eq!(DIAG_NAMES[flag.id_idx as usize], "BUSBAR-4032");
     assert_eq!(
         DIAG_IDS.len(),
         DIAG_NAMES.len(),

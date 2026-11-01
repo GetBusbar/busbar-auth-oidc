@@ -229,7 +229,7 @@ pub const REFUSED: &str = "oidc: IdP destination refused";
 /// THE REFUSAL'S WORDS: the fixed prefix, the URL's host and the rule. Never the URL's path or query
 /// (a discovered URL is remote input, and a URL may carry a tenant or a token in either).
 pub fn refusal(host: &str, rule: &str) -> String {
-    format!("{REFUSED}: host '{}' {rule}", host.escape_debug())
+    format!("{REFUSED}: host '{}' {rule}", crate::untrusted(host))
 }
 
 /// The host `url` names, as the URL client reads it (brackets kept on an IPv6 literal); `?` when it
@@ -252,9 +252,10 @@ pub fn guard_refusal(url: &str) -> String {
     refusal(&host_of(url), GUARD_RULE)
 }
 
-/// `url` as an error or a log line names it: its userinfo (a user name, a password) removed.
+/// `url` as an error or a log line names it: userinfo removed, then the existing untrusted-string
+/// display policy escapes and caps it.
 pub fn shown(url: &str) -> String {
-    match url::Url::parse(url) {
+    let scrubbed = match url::Url::parse(url) {
         Ok(mut u) if !u.username().is_empty() || u.password().is_some() => {
             let _ = u.set_username("");
             let _ = u.set_password(None);
@@ -272,7 +273,8 @@ pub fn shown(url: &str) -> String {
             }
             None => url.to_string(),
         },
-    }
+    };
+    crate::untrusted(&scrubbed)
 }
 
 /// A request to `url` that got no answer: a fixed prefix, then why.
@@ -286,10 +288,14 @@ pub fn failed(url: &str, why: impl Display) -> String {
 /// # Errors
 /// `"{url} returned HTTP {status}"`, or [`capped`]'s.
 pub fn document(url: &str, status: u16, body: Vec<u8>) -> Result<String, String> {
+    document_for(NEED_JWKS, url, status, body)
+}
+
+fn document_for(need: u32, url: &str, status: u16, body: Vec<u8>) -> Result<String, String> {
     if !(200..300).contains(&status) {
         return Err(refused_status(url, status));
     }
-    capped(url, body, MAX_JWKS_BYTES)
+    capped_for(need, url, body, MAX_JWKS_BYTES)
 }
 
 /// The text for a non-2xx `status` from `url`.
@@ -300,8 +306,20 @@ fn refused_status(url: &str, status: u16) -> String {
 }
 
 /// The text for a body past `cap` bytes.
-fn over_cap(url: &str, cap: usize) -> String {
-    format!("{} JWKS body exceeds the {cap}-byte cap", shown(url))
+fn over_cap(need: u32, url: &str, cap: usize) -> String {
+    format!(
+        "{} {} body exceeds the {cap}-byte cap",
+        shown(url),
+        body_name(need)
+    )
+}
+
+fn body_name(need: u32) -> &'static str {
+    match need {
+        NEED_DISCOVERY => "discovery",
+        NEED_TOKEN => "token response",
+        _ => "JWKS",
+    }
 }
 
 /// `body` as text, refusing anything over `cap` bytes or not UTF-8.
@@ -309,10 +327,26 @@ fn over_cap(url: &str, cap: usize) -> String {
 /// # Errors
 /// `"{url} JWKS body exceeds the {cap}-byte cap"`, `"{url} JWKS body is not UTF-8"`.
 pub fn capped(url: &str, body: Vec<u8>, cap: usize) -> Result<String, String> {
-    if body.len() > cap {
-        return Err(over_cap(url, cap));
+    capped_for(NEED_JWKS, url, body, cap)
+}
+
+fn capped_for(need: u32, url: &str, body: Vec<u8>, cap: usize) -> Result<String, String> {
+    // A token endpoint may have issued credentials even in a malformed response. Keep the
+    // incoming allocation wiped on both errors and success; only the accepted response escapes.
+    if need == NEED_TOKEN {
+        let body = zeroize::Zeroizing::new(body);
+        if body.len() > cap {
+            return Err(over_cap(need, url, cap));
+        }
+        return std::str::from_utf8(&body)
+            .map(str::to_string)
+            .map_err(|_| format!("{} {} body is not UTF-8", shown(url), body_name(need)));
     }
-    String::from_utf8(body).map_err(|_| format!("{} JWKS body is not UTF-8", shown(url)))
+    if body.len() > cap {
+        return Err(over_cap(need, url, cap));
+    }
+    String::from_utf8(body)
+        .map_err(|_| format!("{} {} body is not UTF-8", shown(url), body_name(need)))
 }
 
 /// The path and query a request to `url` names.
@@ -506,7 +540,7 @@ impl<'h> HostIo<'h> {
                                 .filter(|s| need != NEED_TOKEN && !(200..300).contains(s))
                             {
                                 Some(status) => refused_status(url, status),
-                                None => over_cap(url, reply_cap(need)),
+                                None => over_cap(need, url, reply_cap(need)),
                             }
                         }
                         e => failed(url, e),
@@ -541,7 +575,7 @@ impl Fetch for HostIo<'_> {
 
     fn get(&mut self, doc: Doc, url: &str) -> Poll<Result<String, String>> {
         self.run(doc.need(), url, |u| Exchange::request(get_request(u)))
-            .map(|r| r.and_then(|reply| document(url, reply.status, reply.body)))
+            .map(|r| r.and_then(|reply| document_for(doc.need(), url, reply.status, reply.body)))
     }
 
     fn post(&mut self, url: &str, form: &FormBody) -> Poll<Result<LoginHttpResponse, String>> {
@@ -550,7 +584,7 @@ impl Fetch for HostIo<'_> {
                 r.and_then(|reply| {
                     Ok(LoginHttpResponse {
                         status: reply.status,
-                        body: capped(url, reply.body, MAX_TOKEN_BYTES)?,
+                        body: capped_for(NEED_TOKEN, url, reply.body, MAX_TOKEN_BYTES)?,
                     })
                 })
             })

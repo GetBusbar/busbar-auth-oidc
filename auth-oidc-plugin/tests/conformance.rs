@@ -539,7 +539,8 @@ fn red_an_unreachable_issuer_and_a_ticketless_call_fail_verify_in_1_5_5_s_words(
     let token = key.sign(&claims(AUDIENCE));
     let lib = cdylib();
     let stated = row().statement;
-    let url = format!("https://idp.conformance.example{DISCOVERY_PATH}");
+    let url =
+        busbar_auth_oidc::fetch::shown(&format!("https://idp.conformance.example{DISCOVERY_PATH}"));
     let mut seen = Vec::new();
     for arm in [
         Arm::Linked,
@@ -567,7 +568,7 @@ fn red_an_unreachable_issuer_and_a_ticketless_call_fail_verify_in_1_5_5_s_words(
             refused,
             format!(
                 "Failed OIDC discovery fetch failed ({url}): {url} returned HTTP 503 Service \
-                 Unavailable; set jwks_url explicitly"
+                 Unavailable; configure the required endpoints explicitly"
             )
         );
         seen.push((ticketless, refused));
@@ -668,12 +669,13 @@ fn red_an_oversized_reply_is_cut_off_at_the_cap_not_buffered_whole() {
     open(&b.plugin, &config(AUDIENCE), None).expect("opens");
 
     let refused = b.verify(Some(&token), None);
-    let url = format!("https://idp.conformance.example{DISCOVERY_PATH}");
+    let url =
+        busbar_auth_oidc::fetch::shown(&format!("https://idp.conformance.example{DISCOVERY_PATH}"));
     assert_eq!(
         refused,
         format!(
             "Failed OIDC discovery fetch failed ({url}): {url} discovery body exceeds the 1048576-byte \
-             cap; set jwks_url explicitly"
+             cap; configure the required endpoints explicitly"
         )
     );
     assert!(
@@ -714,12 +716,13 @@ fn red_an_oversized_error_reply_names_its_status_and_is_cut_off_at_the_cap() {
     open(&b.plugin, &config(AUDIENCE), None).expect("opens");
 
     let refused = b.verify(Some(&token), None);
-    let url = format!("https://idp.conformance.example{DISCOVERY_PATH}");
+    let url =
+        busbar_auth_oidc::fetch::shown(&format!("https://idp.conformance.example{DISCOVERY_PATH}"));
     assert_eq!(
         refused,
         format!(
             "Failed OIDC discovery fetch failed ({url}): {url} returned HTTP 500 Internal Server \
-             Error; set jwks_url explicitly"
+             Error; configure the required endpoints explicitly"
         )
     );
     assert!(

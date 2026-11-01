@@ -24,8 +24,11 @@ use crate::{check_jwks_url, OidcConfig, OidcModule};
 /// `issuer` and `audience` must not be blank: an empty one would load and then match no token (or
 /// only a token claiming an empty one), so it is refused here, naming the key.
 ///
+/// Optional string settings must be omitted rather than blank. Configured endpoint schemes are
+/// checked here, before an instance can retain the settings or start an operation.
+///
 /// # Errors
-/// No settings, settings that are not this module's config, or a blank `issuer`/`audience`.
+/// Invalid settings, blank strings, a zero refetch interval, or a disallowed endpoint scheme.
 pub fn config(cfg: &str) -> Result<OidcConfig, String> {
     if cfg.trim().is_empty() {
         return Err(
@@ -41,7 +44,67 @@ pub fn config(cfg: &str) -> Result<OidcConfig, String> {
             ));
         }
     }
+    for (key, value) in [
+        ("jwks_url", cfg.jwks_url.as_deref()),
+        ("role_claim", Some(cfg.role_claim.as_str())),
+        ("ca_cert_pem", cfg.ca_cert_pem.as_deref()),
+        ("client_id", cfg.client_id.as_deref()),
+        (
+            "authorization_endpoint",
+            cfg.authorization_endpoint.as_deref(),
+        ),
+        ("token_endpoint", cfg.token_endpoint.as_deref()),
+    ] {
+        if value.is_some_and(|v| v.trim().is_empty()) {
+            return Err(format!(
+                "settings.{key}: is blank; omit it or provide a non-blank value"
+            ));
+        }
+    }
+    if cfg.jwks_min_refetch_secs == 0 {
+        return Err("settings.jwks_min_refetch_secs: must be greater than zero".to_string());
+    }
+    configured_url("issuer", &cfg.issuer, false)?;
+    if let Some(url) = &cfg.authorization_endpoint {
+        configured_url("authorization_endpoint", url, false)?;
+    }
+    if let Some(url) = &cfg.token_endpoint {
+        configured_url("token_endpoint", url, true)?;
+    }
     Ok(cfg)
+}
+
+/// Keep the existing plaintext exceptions: local issuer/browser URLs, and private or loopback
+/// token endpoints. Destination authorization remains the host's. Refusals never repeat input.
+fn configured_url(key: &str, value: &str, token: bool) -> Result<(), String> {
+    let parsed =
+        url::Url::parse(value).map_err(|_| format!("settings.{key}: must be a valid URL"))?;
+    if value.chars().any(char::is_control)
+        || (key == "issuer" && (parsed.query().is_some() || parsed.fragment().is_some()))
+        || (key == "authorization_endpoint" && parsed.fragment().is_some())
+    {
+        return Err(format!(
+            "settings.{key}: contains a forbidden control character, query or fragment"
+        ));
+    }
+    if parsed.scheme() == "https"
+        || (parsed.scheme() == "http"
+            && if token {
+                crate::fetch::plaintext_allowed(crate::fetch::NEED_TOKEN, value)
+            } else {
+                crate::is_loopback_host(&parsed)
+            })
+    {
+        return Ok(());
+    }
+    let exception = if token {
+        "private or loopback"
+    } else {
+        "loopback"
+    };
+    Err(format!(
+        "settings.{key}: must be an https URL (plain http only to a {exception} host)"
+    ))
 }
 
 /// The module `open` builds from the settings: parsed, its explicit `jwks_url` https, or plain

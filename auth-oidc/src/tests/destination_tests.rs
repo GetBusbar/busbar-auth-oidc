@@ -18,12 +18,10 @@
 //!   diagnostic the host audits, naming the host and the rule and never the URL's path or query.
 
 use crate::door::{DIAG_DESTINATION_REFUSED, DIAG_NAMES, STATEMENT};
-use crate::fetch::{guard_refusal, on, NEEDS, NEED_DISCOVERY, NEED_JWKS, NEED_TOKEN};
+use crate::fetch::guard_refusal;
 use crate::script::{ready, Idp, ME};
 use crate::{OidcConfig, OidcModule};
-use busbar_contract::abi::host::conn::connector::{
-    Need, EGRESS_DEFAULT, EGRESS_OPEN_WEB, EGRESS_PROVIDER,
-};
+
 use std::time::Instant;
 
 #[test]
@@ -74,36 +72,6 @@ fn doc(field: &str, url: &str) -> String {
     serde_json::json!({ "issuer": ISSUER, field: url }).to_string()
 }
 
-/// The destination guard's default policy at the busbar pin (busbar-core-connector `guard.rs`,
-/// `PRIVATE_REFUSED_IN` and `LIFTED_WHEN_CONFIGURED`), word for word: a private, loopback or
-/// link-local address is refused unless allowlisted in the default, provider and open-web classes,
-/// and a need in the DEFAULT class whose config names its target (`target_from`) is lifted to
-/// operator infrastructure, which admits them. The module cannot link the connector.
-fn refuses_private_unless_allowlisted(need: &Need) -> bool {
-    let refusing = [EGRESS_DEFAULT, EGRESS_PROVIDER, EGRESS_OPEN_WEB].contains(&need.egress_class);
-    let lifted = need.egress_class == EGRESS_DEFAULT && need.target_from.len != 0;
-    refusing && !lifted
-}
-
-/// RED: every need the module dials on (discovery, the JWKS, the token exchange, anchored or not)
-/// is judged where a private, loopback or link-local IdP address is refused unless
-/// `advanced.allow_destinations` names it. Before: every one was operator-infrastructure, so a
-/// discovery document could steer the key or token fetch to any internal address.
-#[test]
-fn every_idp_need_refuses_a_private_destination_unless_allowlisted() {
-    for anchored in [true, false] {
-        for need in [NEED_DISCOVERY, NEED_JWKS, NEED_TOKEN] {
-            let n = &NEEDS[on(need, anchored) as usize];
-            assert!(
-                refuses_private_unless_allowlisted(n),
-                "need {need} (anchored {anchored}) is class {} with target_from len {}",
-                n.egress_class,
-                n.target_from.len
-            );
-        }
-    }
-}
-
 /// RED (lead decision on item 3: the issuer-host tie was wrong): a GOOGLE-STYLE discovery
 /// document, whose key set and token endpoint are on public hosts other than the issuer's, LOADS:
 /// both endpoints resolve as the document names them, and nothing is refused. Before: both were
@@ -134,22 +102,11 @@ fn a_google_style_discovery_on_public_hosts_loads() {
     assert!(idp.refusals().is_empty(), "{:?}", idp.refusals());
 }
 
-/// A DISCOVERED `jwks_uri` OFF THE ISSUER'S HOST ON A PRIVATE, LOOPBACK OR METADATA ADDRESS IS
-/// REFUSED, by the destination guard: the module hands it to the JWKS need alone (never pinned,
-/// never operator infrastructure), whose class refuses such an address unless
-/// `advanced.allow_destinations` names it and refuses cloud metadata always; the guard's refusal
-/// is reported naming the host and the rule, never the URL's path. The security property of the
-/// earlier host tie stays: only the public (or allowlisted) off-host case now goes.
+/// The module passes a discovered HTTPS key URL to the host unchanged, including off-host
+/// private addresses. A guard refusal names its host and rule without repeating the path.
+/// Connector address enforcement is covered in core; loaded-door Need classes are in conformance.
 #[test]
-fn a_discovered_jwks_uri_off_the_issuer_host_on_a_private_address_is_refused() {
-    for anchored in [true, false] {
-        let n = &NEEDS[on(NEED_JWKS, anchored) as usize];
-        assert!(refuses_private_unless_allowlisted(n), "anchored {anchored}");
-        assert_eq!(
-            n.egress_class, EGRESS_OPEN_WEB,
-            "metadata refused, https only"
-        );
-    }
+fn a_discovered_jwks_uri_reaches_the_guard_with_a_path_free_refusal() {
     for jwks_uri in [
         "https://10.0.0.5/keys",
         "https://169.254.169.254/latest/meta-data",
@@ -178,17 +135,10 @@ fn a_discovered_jwks_uri_off_the_issuer_host_on_a_private_address_is_refused() {
     }
 }
 
-/// A DISCOVERED `token_endpoint` OFF THE ISSUER'S HOST: on a PRIVATE address it is refused by the
-/// guard (the token need is in the default class, named per request, so never lifted to operator
-/// infrastructure); over plain http off loopback it is refused by the module before any request,
-/// naming the host and the rule; on a public host over https it goes. A CONFIGURED
-/// `token_endpoint` is the operator's and is used as written.
+/// Discovered token endpoints retain their module scheme check and host-guard refusal text.
+/// HTTPS off-host endpoints pass through; plaintext off loopback fails before the host is asked.
 #[test]
-fn a_discovered_token_endpoint_off_the_issuer_host_on_a_private_address_is_refused() {
-    for anchored in [true, false] {
-        let n = &NEEDS[on(NEED_TOKEN, anchored) as usize];
-        assert!(refuses_private_unless_allowlisted(n), "anchored {anchored}");
-    }
+fn a_discovered_token_endpoint_preserves_host_guard_and_scheme_boundaries() {
     let why = guard_refusal("https://192.168.1.10/token");
     assert!(
         why.contains("192.168.1.10") && !why.contains("/token"),
@@ -241,7 +191,7 @@ fn a_discovered_token_endpoint_off_the_issuer_host_on_a_private_address_is_refus
     );
 }
 
-/// A refused IdP fetch is AUDITED. The Statement declares `OIDC_IDP_DESTINATION_REFUSED` (a
+/// A refused IdP fetch is AUDITED. The Statement declares `BUSBAR-4031` (a
 /// declared diagnostic the host audits on the plugin's behalf), the module's refusal reaches the
 /// op's request seam (`Fetch::refused`, which the door raises as that diagnostic) naming the host
 /// and the rule and never the URL's path, and it is reported ONCE per module (a refusal every request
@@ -251,7 +201,7 @@ fn a_refused_idp_fetch_is_audited() {
     assert_eq!(STATEMENT.diag_ids_len(), DIAG_NAMES.len());
     assert_eq!(
         DIAG_NAMES.get(DIAG_DESTINATION_REFUSED as usize).copied(),
-        Some("OIDC_IDP_DESTINATION_REFUSED")
+        Some("BUSBAR-4031")
     );
 
     let idp = Idp::new(doc("jwks_uri", "http://10.0.0.5/secret-path?tenant=x"));

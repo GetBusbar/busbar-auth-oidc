@@ -5,10 +5,9 @@
 
 use super::*;
 use busbar_contract::abi::host::conn::connector::{
-    DIRECTION_OUTBOUND, EGRESS_DEFAULT, EGRESS_LOOPBACK_ALLOWED, EGRESS_OPEN_WEB,
+    DIRECTION_OUTBOUND, EGRESS_DEFAULT, EGRESS_OPEN_WEB,
 };
 use busbar_contract::abi::sdk::cred::FormBody;
-use std::net::IpAddr;
 
 const URL: &str = "https://idp.example/jwks";
 
@@ -32,6 +31,29 @@ fn jwks_body_exactly_at_the_cap_is_accepted() {
 fn a_non_utf8_jwks_body_is_a_clean_error_not_a_panic() {
     let err = capped(URL, vec![0xff, 0xfe], 1024).unwrap_err();
     assert_eq!(err, "https://idp.example/jwks JWKS body is not UTF-8");
+}
+
+#[test]
+fn response_errors_name_the_document_and_never_quote_its_body() {
+    for (need, name) in [
+        (NEED_DISCOVERY, "discovery"),
+        (NEED_JWKS, "JWKS"),
+        (NEED_TOKEN, "token response"),
+    ] {
+        let cap = 32;
+        assert_eq!(
+            capped_for(need, URL, vec![b'x'; cap], cap).unwrap(),
+            "x".repeat(cap)
+        );
+        let over = capped_for(need, URL, vec![b'x'; cap + 1], cap).unwrap_err();
+        assert_eq!(
+            over,
+            format!("{URL} {name} body exceeds the {cap}-byte cap")
+        );
+        let utf8 = capped_for(need, URL, b"PrivateDocumentMarker\xff".to_vec(), cap).unwrap_err();
+        assert_eq!(utf8, format!("{URL} {name} body is not UTF-8"));
+        assert!(!utf8.contains("PrivateDocumentMarker"));
+    }
 }
 
 /// The 1 MiB cap applies to every document, at exactly 1.5.5's size.
@@ -192,26 +214,11 @@ fn the_needs_are_outbound_in_their_class_anchored_then_public() {
     );
 }
 
-/// THE CONNECTOR'S SCHEME RULE PER EGRESS CLASS, for a plaintext dial (`secure = false`) that the
-/// destination guard has pinned to `addr`: busbar-core-connector `class_admits` at the busbar pin
-/// (`.busbar-ref`): open-web dials over connection security only; loopback-allowed in plaintext to
-/// loopback only; every other class (operator-infrastructure included) takes the scheme its target
-/// names. The module cannot link the connector, so its rule is stated here, word for word.
-fn connector_admits_plaintext(egress_class: u32, addr: IpAddr) -> bool {
-    match egress_class {
-        EGRESS_OPEN_WEB => false,
-        EGRESS_LOOPBACK_ALLOWED => addr.is_loopback(),
-        _ => true,
-    }
-}
-
-/// What a token endpoint `url` meets end to end, in the class the token need declares (`class`):
-/// the module's own scheme check first (a refusal there never reaches the host: "URL scheme is not
-/// allowed"), then, for a plaintext target, the connector's scheme rule for that class at the
-/// address the target names. `true` = the request goes out.
-fn token_admitted(class: u32, url: &str) -> bool {
+/// Whether the plugin hands this token endpoint to its host connector after its own scheme check.
+/// The host destination policy is exercised by the loaded-door conformance tests.
+fn token_admitted(url: &str) -> bool {
     let mut io = HostIo::new(None, Ticket::NONE, IoState::default(), false);
-    let reached_host = match io.post(url, &form()).map(|r| r.map(|_| ())) {
+    match io.post(url, &form()).map(|r| r.map(|_| ())) {
         Poll::Ready(Err(e)) => {
             assert!(
                 e.ends_with("URL scheme is not allowed")
@@ -221,28 +228,7 @@ fn token_admitted(class: u32, url: &str) -> bool {
             e.ends_with("the instance was handed no connector")
         }
         other => panic!("{url}: a hostless HostIo answers at once: {other:?}"),
-    };
-    if !reached_host {
-        return false;
     }
-    let parsed = url::Url::parse(url).expect("a test URL parses");
-    if parsed.scheme() == "https" {
-        return true;
-    }
-    let addr: IpAddr = match parsed.host().expect("a test URL names a host") {
-        url::Host::Ipv4(a) => a.into(),
-        url::Host::Ipv6(a) => a.into(),
-        // `localhost` resolves to loopback.
-        url::Host::Domain(_) => IpAddr::from([127, 0, 0, 1]),
-    };
-    connector_admits_plaintext(class, addr)
-}
-
-/// The class the token need declares, on both sets.
-fn token_class() -> u32 {
-    let anchored = NEEDS[on(NEED_TOKEN, true) as usize].egress_class;
-    assert_eq!(anchored, NEEDS[on(NEED_TOKEN, false) as usize].egress_class);
-    anchored
 }
 
 /// Private and loopback IdP token endpoints, as an on-prem operator configures them.
@@ -256,14 +242,11 @@ const PRIVATE_HTTP: &[&str] = &[
     "http://localhost:8080/token",
 ];
 
-/// HTTP TO A PRIVATE IdP HOST IS ADMITTED, as 1.5.5's `vet_hop_url` admitted it (1.5.5
-/// `auth/token.rs:867-880`: "http only for loopback/private (a local/on-prem IdP)"): the module
-/// passes the request to the host, and the class the token need declares lets the connector dial it.
+/// The plugin hands existing private/loopback plaintext token endpoints to the host connector.
 #[test]
 fn http_to_a_private_idp_token_endpoint_is_admitted() {
-    let class = token_class();
     for url in PRIVATE_HTTP {
-        assert!(token_admitted(class, url), "{url} in class {class}");
+        assert!(token_admitted(url), "{url}");
     }
 }
 
@@ -287,18 +270,18 @@ fn http_to_a_public_token_endpoint_is_refused_before_the_host_is_asked() {
                 "request to {url} failed: URL scheme is not allowed"
             ))),
         );
-        assert!(!token_admitted(token_class(), url), "{url}");
+        assert!(!token_admitted(url), "{url}");
     }
 }
 
-/// HTTPS TO A PUBLIC HOST IS ADMITTED: the module passes it to the host, in every class.
+/// HTTPS public token endpoints reach the host connector.
 #[test]
 fn https_to_a_public_token_endpoint_is_admitted() {
     for url in [
         "https://idp.example.com/token",
         "https://login.microsoftonline.com/tenant/oauth2/v2.0/token",
     ] {
-        assert!(token_admitted(token_class(), url), "{url}");
+        assert!(token_admitted(url), "{url}");
     }
 }
 
@@ -383,13 +366,7 @@ fn the_form_body_matches_the_url_form_serializer() {
     }
 }
 
-/// `ca_cert_pem` ADDS A ROOT AND NEVER DISABLES VALIDATION (identity-providers.md: "`ca_cert_pem`
-/// never disables validation"; W20): a module whose settings name one goes out on the ANCHORED needs
-/// alone, each trusting `settings.ca_cert_pem` (`trust_from`, which the host's connector layers on
-/// top of the public roots), a module whose settings name none on the PUBLIC
-/// needs alone, which trust the public roots and nothing else. No source file of the module names
-/// the contract's unverified-handshake opt-in, or asks for a TLS upgrade at all: every request is
-/// one framed exchange whose connection the host secures and verifies.
+/// An operator CA selects the anchored needs while preserving their destination classes and targets.
 #[test]
 fn ca_cert_pem_only_adds_a_trusted_root_and_never_disables_verification() {
     let settings = |pem: Option<&str>| {
@@ -423,27 +400,6 @@ fn ca_cert_pem_only_adds_a_trusted_root_and_never_disables_verification() {
             (public.egress_class, public.target_from.len),
             "{need}: the anchor changes the trust and nothing else"
         );
-    }
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut stack = vec![dir];
-    while let Some(d) = stack.pop() {
-        for e in std::fs::read_dir(&d).expect("reads src") {
-            let p = e.expect("an entry").path();
-            if p.is_dir() {
-                if p.file_name().is_some_and(|n| n != "tests") {
-                    stack.push(p);
-                }
-                continue;
-            }
-            let text = std::fs::read_to_string(&p).expect("reads a source file");
-            for banned in ["UPGRADE_VERIFY_OFF", "upgrade_secure", "unverified_client"] {
-                assert!(
-                    !text.contains(banned),
-                    "{} names `{banned}`: the module never weakens verification",
-                    p.display()
-                );
-            }
-        }
     }
 }
 

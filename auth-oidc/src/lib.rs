@@ -458,6 +458,16 @@ fn as_numeric_date(v: Option<&Value>, round: impl Fn(f64) -> f64) -> Option<i64>
 /// Read a claim as a list of strings. Accepts a JSON array of strings OR a single string (one
 /// role, taken whole). Anything else yields an empty list.
 fn extract_string_list(v: Option<&Value>) -> Vec<String> {
+    if v.is_some_and(|value| match value {
+        Value::String(_) => false,
+        Value::Array(values) => values.iter().any(|value| !value.is_string()),
+        _ => true,
+    }) {
+        tracing::warn!(
+            module = "oidc",
+            "OIDC role claim contains unreadable values; only string roles are used"
+        );
+    }
     match v {
         Some(Value::Array(a)) => a
             .iter()
@@ -551,7 +561,15 @@ impl OidcModule {
     /// # Errors
     /// The JWKS url could not be discovered, or the fetch failed with no key set to keep.
     pub fn refresh_ahead(&self, now: Instant, io: &mut dyn Fetch) -> Step<Result<(), String>> {
-        let url = step_ok!(self.jwks_url(now, io));
+        let url = match self.jwks_url(now, io) {
+            Step::Ready(Err(error)) => {
+                tracing::warn!(module = "oidc", error = %error, "OIDC refresh cannot resolve its key endpoint");
+                return Step::Ready(Err(error));
+            }
+            Step::Ready(Ok(url)) => url,
+            Step::Pending => return Step::Pending,
+            Step::Wait => return Step::Wait,
+        };
         self.jwks.refresh_ahead(&url, self.tick_period(), now, io)
     }
 
@@ -608,8 +626,13 @@ impl OidcModule {
             return Step::Ready(Ok(Some(Cow::Borrowed(url))));
         }
         let doc = step_ok!(self.discovery.document(&self.cfg, now, io));
-        let Some(url) = doc.get(field).and_then(Value::as_str) else {
+        let Some(value) = doc.get(field) else {
             return Step::Ready(Ok(None));
+        };
+        let Some(url) = value.as_str() else {
+            return Step::Ready(Err(format!(
+                "OIDC discovery document's {field} must be a URL string"
+            )));
         };
         // A key set, a token exchange or an authorize URL the DOCUMENT names, on any host, is taken
         // over https only (plain http only to loopback); WHERE a fetched one goes is the
@@ -650,8 +673,8 @@ impl OidcModule {
     /// extracts the `id_token`, and REUSES the full verify path (JWKS signature +
     /// [`OidcVerifier::validate_claims`] for iss/aud/exp/nbf) to produce a [`Principal`]. The `aud`
     /// checked is the OAuth `client_id`, not the bearer `audience` (OIDC Core 1.0 §3.1.3.7 step 3).
-    /// A missing/malformed body, a missing `id_token`, or any signature/claim failure is a
-    /// fail-closed `Reject`. An `id_token` whose key set cannot be had — fetched, or its URL
+    /// A missing/malformed body or a missing `id_token` is an outage; a signature/claim failure
+    /// is a fail-closed `Reject`. An `id_token` whose key set cannot be had — fetched, or its URL
     /// discovered — is an OUTAGE (OWNER-SIGNED 2026-10-30: an IdP outage is never a 401): the
     /// error, which the door answers `LOGIN_OUTAGE`, with a warn naming why.
     ///
@@ -661,8 +684,8 @@ impl OidcModule {
     ///
     /// # Errors
     /// The identity provider could not answer: its token endpoint answered 5xx or 429, or the
-    /// id_token's key set cannot be had. That is an outage (the host answers 503, retryable), never
-    /// a declined login. Every other failure is a `Reject`.
+    /// id_token's key set cannot be had, or a successful response is malformed or lacks its
+    /// id_token. These are outages; invalid signatures and claims remain a `Reject`.
     pub fn identity_from_token_response(
         &self,
         resp: &LoginHttpResponse,
@@ -708,16 +731,18 @@ impl OidcModule {
         let body = match TokenResponse::parse(&resp.body) {
             Ok(b) => b,
             Err(e) => {
-                tracing::warn!(module = "oidc", error = %e, "OIDC token endpoint response is not JSON; login declined");
-                return Step::Ready(Ok(LoginOutcome::Reject));
+                tracing::warn!(module = "oidc", error = %e, "OIDC token endpoint response is not JSON; login unavailable");
+                return Step::Ready(Err(e));
             }
         };
         let Some(id_token) = body.id_token.as_deref().map(String::as_str) else {
             tracing::warn!(
                 module = "oidc",
-                "OIDC token endpoint response carries no id_token; login declined"
+                "OIDC token endpoint response carries no id_token; login unavailable"
             );
-            return Step::Ready(Ok(LoginOutcome::Reject));
+            return Step::Ready(Err(
+                "OIDC token endpoint response carries no id_token".to_string()
+            ));
         };
         // The key set cannot be had (fetched, or its URL discovered): an outage, logged by
         // `verify_with`, answered as the error.
@@ -926,7 +951,7 @@ impl OidcModule {
             ));
         };
         let Some(endpoint) = step_ok!(self.authorization_endpoint(now, io)) else {
-            tracing::info!(
+            tracing::warn!(
                 module = "oidc",
                 "no authorization_endpoint is configured and the discovery document names none; \
                  browser login refused"
@@ -949,10 +974,10 @@ impl OidcModule {
 
     /// The callback's token request: its `code`, `redirect_uri` and `code_verifier`, and the lent
     /// client `secret` (if any), as the form [`token_form`] builds. `None` (fail closed) for a
-    /// callback lacking any of the three, or with no `token_endpoint` configured or discovered.
+    /// callback lacking any of the three.
     ///
     /// # Errors
-    /// The endpoint had to be discovered, and discovery failed.
+    /// The endpoint could not be discovered or no token endpoint is configured or discovered.
     pub fn token_exchange(
         &self,
         code: Option<&str>,
@@ -978,8 +1003,10 @@ impl OidcModule {
             return Step::Ready(Ok(None));
         };
         let Some(url) = step_ok!(self.token_endpoint(now, io)) else {
-            tracing::warn!(module = "oidc", "no token_endpoint is configured and the discovery document names none; login declined");
-            return Step::Ready(Ok(None));
+            tracing::warn!(module = "oidc", "no token_endpoint is configured and the discovery document names none; login unavailable");
+            return Step::Ready(Err(
+                "no token_endpoint is configured and the discovery document names none".to_string(),
+            ));
         };
         let form = token_form(&self.cfg, &url, code, redirect_uri, code_verifier, secret);
         Step::Ready(Ok(Some(TokenRequest { url, form })))
@@ -1037,6 +1064,9 @@ fn wiped<'de, D: serde::Deserializer<'de>>(
 /// claim, compared in constant time. An `id_token` with no readable `nonce` claim does not bind.
 /// The signature, issuer and audience are checked afterwards, by the verifier.
 pub(crate) fn nonce_binds(body: &str, nonce: &str) -> bool {
+    if nonce.is_empty() {
+        return false;
+    }
     use base64::Engine as _;
     let Some(id_token) = TokenResponse::parse(body).ok().and_then(|r| r.id_token) else {
         return true;
@@ -1231,6 +1261,14 @@ pub fn discovered_secure(field: &str, setting: &str, url: &str) -> Result<(), St
             &format!("cannot be read: the discovery document's {field} is not a URL"),
         ));
     };
+    if url.chars().any(char::is_control)
+        || (field == "authorization_endpoint" && parsed.fragment().is_some())
+    {
+        return Err(fetch::refusal(
+            parsed.host_str().unwrap_or("?"),
+            &format!("names an invalid {field}: control characters and authorization fragments are not allowed"),
+        ));
+    }
     if parsed.scheme() == "https" || (parsed.scheme() == "http" && is_loopback_host(&parsed)) {
         return Ok(());
     }
@@ -1250,8 +1288,8 @@ pub fn discovered_secure(field: &str, setting: &str, url: &str) -> Result<(), St
 /// over TLS): to a LOOPBACK host ([`is_loopback_host`]: 127.0.0.0/8, `::1`, `localhost`,
 /// `*.localhost`), the local identity-provider rig, it OPENS with the warning this returns, which
 /// `open` logs (the key set is fetched only over https, [`fetch::plaintext_allowed`], so every
-/// token is rejected until the URL is https). To any other host it is REFUSED at `open` (so at
-/// `--validate` and boot), naming the field, the host and the rule: a key set over plain http could
+/// verification is unavailable until the URL is https). To any other host it is REFUSED at `open` (so at
+/// `--validate` and boot), naming the field and the rule: a key set over plain http could
 /// be substituted in transit. Any other scheme, or no URL at all, is refused at `open`, naming the
 /// field.
 ///
@@ -1269,20 +1307,17 @@ pub fn check_jwks_url(cfg: &OidcConfig) -> Result<Option<String>, String> {
         "https" => Ok(None),
         "http" if is_loopback_host(&parsed) => Ok(Some(
             "jwks_url is plain http to a loopback host; it loads, but the JWKS is only ever \
-             fetched over https, so every OIDC token will be rejected until jwks_url is an https \
+             fetched over https, so OIDC verification is unavailable until jwks_url is an https \
              URL"
             .to_string(),
         )),
-        "http" => Err(format!(
-            "settings.jwks_url: is plain http to the host '{}', which is not loopback: signing keys over \
+        "http" => Err(
+            "settings.jwks_url: is plain http to a host that is not loopback: signing keys over \
              plain http can be substituted in transit, so it is refused; use https (plain http \
-             only to a loopback host)",
-            parsed.host_str().unwrap_or("?").escape_debug()
-        )),
-        other => Err(format!(
-            "settings.jwks_url: must be an https URL (got scheme '{}'); {ONLY}",
-            other.escape_debug()
-        )),
+             only to a loopback host)"
+                .to_string(),
+        ),
+        _ => Err(format!("settings.jwks_url: must be an https URL; {ONLY}")),
     }
 }
 

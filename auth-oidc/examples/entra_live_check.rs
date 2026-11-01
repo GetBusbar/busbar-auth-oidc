@@ -6,8 +6,7 @@
 //! signature check, real claim validation. Also verifies a tampered copy of the same token is genuinely rejected, so this isn't
 //! a rubber stamp.
 //!
-//! Requires (all via env, all optional — this example exits early with a clear message if any are
-//! missing rather than failing loudly in an environment where the tenant isn't provisioned):
+//! Requires the following environment variables. Missing values skip a local run and fail CI:
 //!   ENTRA_TENANT_ID       Entra tenant GUID
 //!   ENTRA_CLIENT_ID       App registration (public client) allowed for the ROPC grant
 //!   ENTRA_TEST_USERNAME   A disposable test user in that tenant (never a real employee account)
@@ -20,6 +19,7 @@ use busbar_auth_oidc::{OidcConfig, OidcModule, Step};
 use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::sdk::cred::FormBody;
 use busbar_contract::auth::{AuthVerdict, LoginHttpResponse};
+use std::io::Read;
 use std::task::Poll;
 use std::time::Instant;
 
@@ -43,7 +43,10 @@ impl Fetch for Blocking {
                 .map_err(|e| failed(url, e))
                 .and_then(|r| {
                     let status = r.status().as_u16();
-                    let body = r.bytes().map_err(|e| failed(url, e))?.to_vec();
+                    let mut body = Vec::new();
+                    r.take(busbar_auth_oidc::fetch::MAX_JWKS_BYTES as u64 + 1)
+                        .read_to_end(&mut body)
+                        .map_err(|e| failed(url, e))?;
                     document(url, status, body)
                 }),
         )
@@ -124,7 +127,7 @@ fn main() {
         serde_json::from_str(&text).expect("Entra's token response is JSON");
     assert!(
         status.is_success(),
-        "Entra rejected the real password grant ({status}): {body}. If this is \
+        "Entra rejected the real password grant ({status}). If this is \
          AADSTS50055 (password expired), sign in interactively once as the test user to set a \
          permanent password, then re-provision the ENTRA_TEST_PASSWORD secret."
     );
@@ -141,10 +144,9 @@ fn main() {
 
     let module = OidcModule::new(&cfg);
     let outcome = verify(&module, &id_token);
-    println!("real Entra token outcome: {outcome:?}");
     assert!(
         matches!(outcome, AuthVerdict::Identify(_)),
-        "a real, freshly-issued Entra token must verify as Identify, got: {outcome:?}"
+        "a real, freshly-issued Entra token must verify as Identify"
     );
 
     // Tamper check: a corrupted signature over the SAME real Entra JWKS must be rejected, so this
@@ -167,10 +169,9 @@ fn main() {
     );
 
     let tampered_outcome = verify(&OidcModule::new(&cfg), &tampered);
-    println!("tampered token outcome: {tampered_outcome:?}");
     assert!(
         matches!(tampered_outcome, AuthVerdict::Reject),
-        "a tampered signature over a real Entra-issued token must be rejected, got: {tampered_outcome:?}"
+        "a tampered signature over a real Entra-issued token must be rejected"
     );
 
     println!("PASS: real Entra ID token verified end-to-end, tampered token correctly rejected.");

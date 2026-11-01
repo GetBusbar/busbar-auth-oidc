@@ -98,7 +98,7 @@ boot (the host's `ready`, after `open` and before any listener binds)
 via the issuer's OIDC discovery document, so boot fails
 loudly if discovery can't find it rather than deferring the failure to
 the first request. The document is asked for again a day later and on
-every `refresh`, the previous one serving meanwhile and if that fails.
+every `refresh`. The previous document serves during rediscovery and remains available if that fetch fails.
 
 ## Config
 
@@ -106,7 +106,7 @@ every `refresh`, the previous one serving meanwhile and if that fails.
 |---|---|---|---|
 | `issuer` | yes | — | The IdP's OIDC issuer URL, exact-matched against the JWT's `iss` claim: a token naming another issuer passes to the next auth in the chain, a token naming this one is verified in full. A blank value is refused at load. |
 | `audience` | yes | — | The audience a bearer's `aud` claim must contain (busbar's registered client/resource identifier at the IdP); other audiences beside it are allowed (RFC 9068). A blank value is refused at load. |
-| `jwks_url` | no | discovered from `issuer` | The IdP's JWKS endpoint. Must be an `https` URL. Plain `http` is accepted only for a loopback host (127.0.0.0/8, `::1`, `localhost`); it loads with a warning (also raised as the declared diagnostic `OIDC_JWKS_PLAIN_HTTP`, which the host audits), and since the key set is only ever fetched over https, every token is rejected until the URL is https. Anything else is refused at load. When omitted, resolved once at boot via OIDC discovery (`<issuer>/.well-known/openid-configuration`); a discovery failure refuses the boot. |
+| `jwks_url` | no | discovered from `issuer` | The IdP's JWKS endpoint. Must be an `https` URL. Plain `http` is accepted only for a loopback host (127.0.0.0/8, `::1`, `localhost`); it loads with a warning (also raised as the declared diagnostic `BUSBAR-4032`, which the host audits). Since the key set is only fetched over https, verification is unavailable until the URL is https; this is an IdP outage, not a bad credential. Anything else is refused at load. When omitted, resolved at boot via OIDC discovery (`<issuer>/.well-known/openid-configuration`); a discovery failure refuses the boot. |
 | `role_claim` | no | `groups` | The claim mapped onto the resulting `Principal`'s roles; set `roles` to use Entra app-roles instead. |
 | `jwks_min_refetch_secs` | no | `60` | JWKS refetch rate-limit (seconds) — the bound on how often a kid-rotation refetch can occur. |
 | `jwks_ttl_secs` | no | `3600` | JWKS cache TTL (seconds). |
@@ -120,13 +120,22 @@ every `refresh`, the previous one serving meanwhile and if that fails.
 A discovered `jwks_uri`, `token_endpoint` or `authorization_endpoint` that
 is not https (plain http only to loopback), or one the host's destination
 guard refuses, is refused naming its host and the rule, and raised once
-per instance as the declared diagnostic `OIDC_IDP_DESTINATION_REFUSED`,
+per instance as the declared diagnostic `BUSBAR-4031`,
 which the host audits.
 
 Unknown config fields are rejected (`deny_unknown_fields`) — a typo'd or
 stray key fails loudly at boot instead of being silently ignored.
 Every settings refusal is a `settings[.<key>]: <reason>` line (rendered by
 the host under the provider's name), and never quotes a settings value.
+
+Compared with 1.5.5, validation and open refuse optional string settings
+that are present but blank (omit them to select the default), and refuse
+`jwks_min_refetch_secs: 0`. They also check configured URL schemes:
+`issuer` and `authorization_endpoint` require HTTPS or HTTP to loopback;
+`token_endpoint` permits HTTPS or HTTP to a private or loopback host.
+The host still applies its destination guard, and discovery and JWKS
+fetches still require TLS. Response size and UTF-8 errors now identify
+the discovery document, JWKS, or token response whose body failed.
 
 ## Build
 

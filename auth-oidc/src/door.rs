@@ -21,7 +21,8 @@
 //! ANOTHER op's discovery or JWKS fetch (single-flight) answers PENDING and is woken when that fetch
 //! lands, a timer at the fetch's own bound (`wake_at` on the host's clock) its backstop.
 //!
-//! The lifecycle is the SDK's generic one over [`Oidc`], but for two slots: `tick` refreshes the
+//! The lifecycle is the SDK's generic one over [`Oidc`], with READY exposing its existing
+//! diagnostic envelope and two driver slots: `tick` refreshes the
 //! key set ahead of its TTL on the instance's driver ticket ([`Tick`]), and `drive` carries that
 //! fetch on when its wake comes ([`Drive`]). `refresh` drops the module's verdict cache and reports
 //! how many entries it held under [`METRIC_CACHE_FLUSHED`] (the admin cache flush's
@@ -45,12 +46,13 @@ use busbar_contract::abi::auth::{
     SPAN_ABSENT, STRIP_FIELD, VERDICT_IDENTITY, VERDICT_PASS, VERDICT_REJECT,
 };
 use busbar_contract::abi::mechanism::call::{
-    AbiStr, Blob, OutHead, Outcome, Span, BLOB_ABSENT, SEVERITY_ERROR, SEVERITY_WARN,
+    AbiStr, Blob, OutHead, Outcome, Span, BLOB_ABSENT, BLOB_OCTETS, SEVERITY_ERROR, SEVERITY_WARN,
 };
 use busbar_contract::abi::mechanism::door::{
     MarkWord, MetricFamily, Rewrite, Statement, FAMILY_COUNTER,
 };
-use busbar_contract::abi::mechanism::lifecycle::{DriveIn, TickIn, TickOut};
+use busbar_contract::abi::mechanism::extensions::{self, EXT_DECLARES};
+use busbar_contract::abi::mechanism::lifecycle::{DriveIn, ReadyIn, TickIn, TickOut};
 use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::sdk::auth_door::{carrier, verify_tail, with_tail};
 use busbar_contract::abi::sdk::auth_kit::login_identity;
@@ -104,7 +106,7 @@ pub const CACHE_FAMILY: u32 = 0;
 
 /// The diagnostics this plugin declares, in index order: the ids its envelopes report and the host
 /// audits on its behalf.
-pub const DIAG_NAMES: &[&str] = &["OIDC_IDP_DESTINATION_REFUSED", "OIDC_JWKS_PLAIN_HTTP"];
+pub const DIAG_NAMES: &[&str] = &["BUSBAR-4031", "BUSBAR-4032"];
 
 /// The declared diagnostic a refused IdP destination raises ([`raise_refusals`]): the module's own
 /// refusal (a discovered `jwks_uri` or `token_endpoint` over plain http, a scheme) or the
@@ -122,10 +124,20 @@ const DIAG_IDS: &[AbiStr] = &[
     abi_str(DIAG_NAMES[DIAG_JWKS_PLAIN_HTTP as usize]),
 ];
 
+const DECLARES: &[u8] = include_bytes!("../declares.json");
+const DECLARES_EXTENSION: [u8; extensions::entry_len(EXT_DECLARES, DECLARES)] =
+    extensions::entry(EXT_DECLARES, DECLARES);
+
 /// This plugin's Statement: its name and alias, its version, the most calls one instance holds in
 /// flight, its one secret reference, its six outbound needs, its one metric family and its auth
 /// tail.
 pub const STATEMENT: Statement = Statement {
+    extensions: Blob {
+        ptr: DECLARES_EXTENSION.as_ptr(),
+        len: DECLARES_EXTENSION.len(),
+        fmt: BLOB_OCTETS,
+        flags: 0,
+    },
     families: FAMILIES.as_ptr(),
     families_len: FAMILIES.len(),
     secret_refs: SECRET_REFS.as_ptr(),
@@ -163,8 +175,17 @@ const REACHED_MAX: usize = 1024;
 const REACHED_TTL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
 /// Drop every kept answer older than [`REACHED_TTL`] at `now`.
-fn expire(map: &mut HashMap<Ticket, Reached>, now: Instant) {
-    map.retain(|_, r| now.saturating_duration_since(r.at) <= REACHED_TTL);
+fn expire(map: &mut HashMap<Ticket, Reached>, now: u64) {
+    map.retain(|_, r| std::time::Duration::from_nanos(now.saturating_sub(r.at)) <= REACHED_TTL);
+}
+
+/// The short-answer cache uses the host's monotonic clock. An unreadable clock permits neither
+/// reuse nor retention of a cached identity; the login itself keeps its existing verdict rules.
+fn reached_now(host: Option<&Host>, ticket: Ticket) -> Option<u64> {
+    match host?.connector(ticket).clock_now() {
+        Poll::Ready(Ok(reading)) => Some(reading.mono_ns),
+        _ => None,
+    }
 }
 
 /// The BACKSTOP of an op waiting on another op's fetch, nanoseconds on the host's monotonic clock:
@@ -291,8 +312,8 @@ enum Login {
 /// An identity `complete_login` reached but could not fit into the host's buffer, kept for the
 /// host's one re-call on the same ticket (the code redeems once): served only to the same callback.
 struct Reached {
-    /// When it was kept: at the cap the oldest goes ([`keep`]).
-    at: Instant,
+    /// When it was kept on the host's monotonic clock: at the cap the oldest goes ([`keep`]).
+    at: u64,
     state: cred::Held<Vec<u8>>,
     code: cred::Held<Vec<u8>>,
     principal: Principal,
@@ -332,7 +353,15 @@ pub struct Oidc {
     /// The tick's key-set refresh in flight on the driver ticket: the module it refreshes and its
     /// requests' state, carried on by `drive` (a `drive` is a fresh op, so the SDK parks nothing
     /// across it).
-    driving: Mutex<Option<(Arc<Opened>, IoState)>>,
+    driving: Mutex<Driving>,
+}
+
+/// Driver work belongs to the refresh epoch in which it started. A successful refresh changes
+/// this identity even when it keeps the same module, so an executing tick cannot republish old IO.
+#[derive(Default)]
+struct Driving {
+    epoch: Arc<()>,
+    pending: Option<(Ticket, Arc<Opened>, IoState)>,
 }
 
 impl std::fmt::Debug for Oidc {
@@ -342,6 +371,39 @@ impl std::fmt::Debug for Oidc {
 }
 
 impl Oidc {
+    /// The existing ready flow, optionally reporting refusals through the READY envelope.
+    fn ready_with(
+        &self,
+        host: &Host,
+        ticket: Ticket,
+        out: Option<&mut Out<'_, OutHead>>,
+    ) -> Poll<Result<(), Refusal>> {
+        let opened = self.now();
+        let state = self
+            .readying
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&ticket)
+            .unwrap_or_default();
+        let mut io = HostIo::new(Some(host), ticket, state, opened.module.anchored());
+        let readied = opened.module.ready(Instant::now(), &mut io);
+        if let Some(out) = out {
+            raise_refusals(&opened.module, &mut io, out);
+        }
+        match readied {
+            // Keep the same ticket's exchange or wait on the other owner until it lands.
+            Step::Pending | Step::Wait => {
+                self.readying
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(ticket, io.into_state());
+                Poll::Pending
+            }
+            Step::Ready(Ok(())) => Poll::Ready(Ok(())),
+            Step::Ready(Err(e)) => Poll::Ready(Err(Refusal::failed(e))),
+        }
+    }
+
     fn now(&self) -> Arc<Opened> {
         self.now
             .read()
@@ -352,20 +414,38 @@ impl Oidc {
     /// The tick's refresh ahead of the TTL on `opened`, over `host`'s connector on the driver
     /// ticket `ticket`, from `state`: PENDING (parked for `drive`) while its fetch is in flight,
     /// READY when it is done or nothing is due.
-    fn refresh_ahead(
+    fn refresh_ahead<O: AbiOut>(
         &self,
         host: Option<&Host>,
         ticket: Ticket,
         opened: Arc<Opened>,
         state: IoState,
+        epoch: Arc<()>,
+        out: &mut Out<'_, O>,
     ) -> Outcome {
         let mut io = HostIo::new(host, ticket, state, opened.module.anchored());
-        match opened.module.refresh_ahead(Instant::now(), &mut io) {
+        let refreshed = opened.module.refresh_ahead(Instant::now(), &mut io);
+        raise_refusals(&opened.module, &mut io, out);
+        match refreshed {
             Step::Pending => {
-                let state = io.into_state();
-                *self.driving.lock().unwrap_or_else(PoisonError::into_inner) =
-                    Some((opened, state));
-                Outcome::Pending
+                let mut state = Some((ticket, opened, io.into_state()));
+                let previous = {
+                    let mut driver = self.driving.lock().unwrap_or_else(PoisonError::into_inner);
+                    if Arc::ptr_eq(&driver.epoch, &epoch) {
+                        std::mem::replace(&mut driver.pending, state.take())
+                    } else {
+                        None
+                    }
+                };
+                // A refresh may run while the connector is executing. Its old exchange, and
+                // any replaced one, must be destroyed outside the driver mutex.
+                drop(previous);
+                if state.is_none() {
+                    Outcome::Pending
+                } else {
+                    drop(state);
+                    Outcome::Ready
+                }
             }
             // Done; or nothing to do this tick (another call's discovery is in flight); or the
             // fetch failed with no key set to keep, as the request path's own refresh would have,
@@ -408,28 +488,7 @@ impl Life for Oidc {
     /// on `ticket`. PENDING while a request is in flight; its state is kept by ticket and the op
     /// resumes on the connector's wake.
     fn ready(&self, host: &Host, ticket: Ticket) -> Poll<Result<(), Refusal>> {
-        let opened = self.now();
-        let state = self
-            .readying
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(&ticket)
-            .unwrap_or_default();
-        let mut io = HostIo::new(Some(host), ticket, state, opened.module.anchored());
-        match opened.module.ready(Instant::now(), &mut io) {
-            // This call's own request in flight, or ANOTHER call's fetch of the same document or
-            // key set: either way `ready` is woken when it settles (the other call's fetch wakes
-            // its waiters) and judges its outcome then — never approving the boot unseen.
-            Step::Pending | Step::Wait => {
-                self.readying
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .insert(ticket, io.into_state());
-                Poll::Pending
-            }
-            Step::Ready(Ok(())) => Poll::Ready(Ok(())),
-            Step::Ready(Err(e)) => Poll::Ready(Err(Refusal::failed(e))),
-        }
+        self.ready_with(host, ticket, None)
     }
 
     /// The same settings and secret keep the opened module and its key cache (the admin cache
@@ -451,11 +510,19 @@ impl Life for Oidc {
             Some(Arc::new(Opened::new(settings, secrets)?))
         };
         let flushed = now.module.flush_verdicts();
-        match reopened {
-            Some(opened) => *self.now.write().unwrap_or_else(PoisonError::into_inner) = opened,
-            // The module kept: its discovery document is asked for again, as a re-opened one's is.
-            None => now.module.rediscover(),
-        }
+        let driving = {
+            let mut driver = self.driving.lock().unwrap_or_else(PoisonError::into_inner);
+            match reopened {
+                Some(opened) => *self.now.write().unwrap_or_else(PoisonError::into_inner) = opened,
+                // A kept module also re-discovers; its old driver IO must not reappear.
+                None => now.module.rediscover(),
+            }
+            driver.epoch = Arc::new(());
+            driver.pending.take()
+        };
+        let ready =
+            std::mem::take(&mut *self.readying.lock().unwrap_or_else(PoisonError::into_inner));
+        drop((ready, driving));
         Ok(Refreshed {
             counted: Some(Counted {
                 family: CACHE_FAMILY,
@@ -473,15 +540,44 @@ impl Life for Oidc {
             text,
         })
     }
+
+    fn cancel(&self, ticket: Ticket) -> u32 {
+        let ready = self
+            .readying
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&ticket);
+        let reached = self
+            .reached
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&ticket);
+        let driving = {
+            let mut driving = self.driving.lock().unwrap_or_else(PoisonError::into_inner);
+            if driving
+                .pending
+                .as_ref()
+                .is_some_and(|(owner, _, _)| *owner == ticket)
+            {
+                driving.pending.take()
+            } else {
+                None
+            }
+        };
+        // Exchange destruction calls the host; no instance map guard may be held here.
+        drop((ready, reached, driving));
+        CANCEL_ABANDONED
+    }
 }
 
-/// What an op parks on its ticket across PENDING: its requests' state and, for a login, the token
-/// endpoint's answer (the code redeems once). The answer carries the issued tokens, so its body is
-/// wiped when the parked op goes.
-#[derive(Default)]
+/// What an op parks on its ticket across PENDING: its requests' state, the exact module it began
+/// on, and, for a login, the token endpoint's answer (the code redeems once). A settings refresh
+/// affects fresh calls; it must not retarget a pending call's issuer, client or trust. The answer
+/// carries the issued tokens, so its body is wiped when the parked op goes.
 struct Parked {
     io: IoState,
     answer: Option<LoginHttpResponse>,
+    opened: Arc<Opened>,
 }
 
 impl Drop for Parked {
@@ -492,15 +588,20 @@ impl Drop for Parked {
     }
 }
 
-/// The op's requests on its ticket, resumed from what it parked, for the `opened` module.
+/// The op's requests and module, resumed from what it parked or captured for a fresh call.
 fn resume<'h>(
     instance: &Instance<'_, Held<Oidc>>,
     h: &'h Held<Oidc>,
-    opened: &Opened,
-) -> (HostIo<'h>, Parked) {
-    let mut parked = instance
-        .resume::<Parked>()
-        .map_or_else(Parked::default, |p| *p);
+) -> (Arc<Opened>, HostIo<'h>, Parked) {
+    let mut parked = instance.resume::<Parked>().map_or_else(
+        || Parked {
+            io: IoState::default(),
+            answer: None,
+            opened: h.life().now(),
+        },
+        |p| *p,
+    );
+    let opened = Arc::clone(&parked.opened);
     let anchored = opened.module.anchored();
     let io = HostIo::new(
         h.host(),
@@ -508,7 +609,7 @@ fn resume<'h>(
         std::mem::take(&mut parked.io),
         anchored,
     );
-    (io, parked)
+    (opened, io, parked)
 }
 
 /// Answer PENDING with `parked` (the requests' state from `io`) on the op's ticket: on its own
@@ -679,6 +780,11 @@ impl SafeSlot for Verify {
             // credential line is named for the transport to strip, whatever the verdict (THE DESIGN
             // §6, "Auth points and guest lists").
             Some(Err(_)) => {
+                tracing::debug!(
+                    module = "oidc",
+                    reason = "non-text-bearer",
+                    "credential is not a text JWT; passing to the next auth module"
+                );
                 return answer(
                     None,
                     None,
@@ -697,8 +803,7 @@ impl SafeSlot for Verify {
         let timestamp = input.field(|i| &i.request).timestamp;
         let request_now = crate::clock_or_fail_closed(i64::try_from(timestamp).unwrap_or(i64::MAX));
         let ticketless = instance.ticket().is_none();
-        let opened = h.life().now();
-        let (mut io, parked) = resume(&instance, h, &opened);
+        let (opened, mut io, parked) = resume(&instance, h);
         // A HIT is answered from the cached identity itself, with no copy of it, stating the TTL
         // it has left — unless the op re-enters with its own fetch in flight: that fetch is
         // landed (its flight settled, its waiters woken) by judging the token, never dropped.
@@ -790,8 +895,7 @@ impl SafeSlot for Begin {
             nonce: str_text(input.field(|i| &i.nonce)).map(str::to_string),
             scopes: Vec::new(),
         };
-        let opened = h.life().now();
-        let (mut io, parked) = resume(&instance, h, &opened);
+        let (opened, mut io, parked) = resume(&instance, h);
         let begun = opened.module.begin_login(&begin, Instant::now(), &mut io);
         raise_refusals(&opened.module, &mut io, &mut out);
         match begun {
@@ -827,25 +931,35 @@ impl SafeSlot for Complete {
             return Outcome::Fault;
         };
         let oidc = h.life();
+        let Some(nonce) = str_text(input.field(|i| &i.nonce)).filter(|n| !n.is_empty()) else {
+            tracing::warn!(
+                module = "oidc",
+                "complete_login carries no readable nonce; login refused"
+            );
+            out.set(|o| &o.verdict, LOGIN_SECURITY_CHECK_FAILED);
+            return Outcome::Ready;
+        };
         let state = input.field(|i| &i.state).bytes();
         let code = blob_text(input.field(|i| &i.code));
         let code_bytes = code.map_or(&[][..], str::as_bytes);
+        let now = reached_now(h.host(), instance.ticket());
         let mut reached = oidc.reached.lock().unwrap_or_else(PoisonError::into_inner);
-        expire(&mut reached, Instant::now());
+        if let Some(now) = now {
+            expire(&mut reached, now);
+        }
         let kept = reached
             .remove(&instance.ticket())
-            .filter(|r| r.serves(state, code_bytes));
+            .filter(|r| now.is_some() && r.serves(state, code_bytes));
         drop(reached);
         let principal = match kept {
             Some(r) => r.principal,
             None => {
-                let opened = oidc.now();
-                let (mut io, mut parked) = resume(&instance, h, &opened);
+                let (opened, mut io, mut parked) = resume(&instance, h);
                 let login = opened.login(
                     code,
                     str_text(input.field(|i| &i.redirect_uri)),
                     blob_text(input.field(|i| &i.code_verifier)),
-                    str_text(input.field(|i| &i.nonce)).unwrap_or(""),
+                    nonce,
                     &mut parked.answer,
                     &mut io,
                 );
@@ -872,13 +986,16 @@ impl SafeSlot for Complete {
         };
         let answered = login_identity(&principal, input.field(|i| &i.out_buf), &mut out);
         if answered == Outcome::Failed {
+            let Some(now) = reached_now(h.host(), instance.ticket()) else {
+                return answered;
+            };
             let mut reached = oidc.reached.lock().unwrap_or_else(PoisonError::into_inner);
             keep(
                 &mut reached,
                 REACHED_MAX,
                 instance.ticket(),
                 Reached {
-                    at: Instant::now(),
+                    at: now,
                     state: cred::Held::new(state.to_vec()),
                     code: cred::Held::new(code_bytes.to_vec()),
                     principal,
@@ -886,6 +1003,35 @@ impl SafeSlot for Complete {
             );
         }
         answered
+    }
+}
+
+/// `ready`: the normal lifecycle flow with its existing output envelope available for diagnostics.
+#[derive(Debug)]
+pub struct Ready;
+impl SafeSlot for Ready {
+    type In = ReadyIn;
+    type Out = OutHead;
+    type State = Held<Oidc>;
+    fn call(
+        instance: Instance<'_, Held<Oidc>>,
+        input: Lent<'_, ReadyIn>,
+        mut out: Out<'_, OutHead>,
+    ) -> Outcome {
+        let Some(h) = instance.get() else {
+            return Outcome::Fault;
+        };
+        let Some(host) = input.host().map(|tables| Host::of(&tables)) else {
+            return Outcome::Fault;
+        };
+        match h
+            .life()
+            .ready_with(&host, instance.ticket(), Some(&mut out))
+        {
+            Poll::Pending => Outcome::Pending,
+            Poll::Ready(Ok(())) => Outcome::Ready,
+            Poll::Ready(Err(refusal)) => out.fail(refusal),
+        }
     }
 }
 
@@ -920,14 +1066,22 @@ impl SafeSlot for Tick {
         // A refresh the last tick left in flight on this driver ticket is carried on, not
         // restarted: its flight is still this ticket's, and a fresh exchange would be a second
         // fetch of the same key set.
-        let parked = oidc
-            .driving
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take();
+        let (epoch, opened, parked) = {
+            let mut driver = oidc.driving.lock().unwrap_or_else(PoisonError::into_inner);
+            (driver.epoch.clone(), oidc.now(), driver.pending.take())
+        };
         match parked {
-            Some((parked, state)) => oidc.refresh_ahead(h.host(), ticket, parked, state),
-            None => oidc.refresh_ahead(h.host(), ticket, opened, IoState::default()),
+            Some((owner, parked, state)) => {
+                oidc.refresh_ahead(h.host(), owner, parked, state, epoch, &mut out)
+            }
+            None => oidc.refresh_ahead(
+                h.host(),
+                ticket,
+                opened,
+                IoState::default(),
+                epoch,
+                &mut out,
+            ),
         }
     }
 }
@@ -942,19 +1096,20 @@ impl SafeSlot for Drive {
     fn call(
         instance: Instance<'_, Held<Oidc>>,
         _: Lent<'_, DriveIn>,
-        _: Out<'_, OutHead>,
+        mut out: Out<'_, OutHead>,
     ) -> Outcome {
         let Some(h) = instance.get() else {
             return Outcome::Fault;
         };
         let oidc = h.life();
-        let parked = oidc
-            .driving
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take();
+        let (epoch, parked) = {
+            let mut driver = oidc.driving.lock().unwrap_or_else(PoisonError::into_inner);
+            (driver.epoch.clone(), driver.pending.take())
+        };
         match parked {
-            Some((opened, state)) => oidc.refresh_ahead(h.host(), instance.ticket(), opened, state),
+            Some((ticket, opened, state)) => {
+                oidc.refresh_ahead(h.host(), ticket, opened, state, epoch, &mut out)
+            }
             None => Outcome::Ready,
         }
     }
@@ -975,10 +1130,10 @@ impl<I: AbiIn, O: AbiOut> SafeSlot for NotServed<I, O> {
 mod table {
     use super::{
         Begin, Complete, Drive, FieldsIn, FieldsOut, NotServed, Oidc, OpenOutboundIn,
-        OpenOutboundOut, OutboundReadyIn, OutboundReadyOut, Safe, Tick, Verify,
+        OpenOutboundOut, OutboundReadyIn, OutboundReadyOut, Ready, Safe, Tick, Verify,
     };
     use busbar_contract::abi::sdk::life::{
-        Cancel, Close, Open, Ready, Refresh, Release, Retire, Validate,
+        Cancel, Close, Open, Refresh, Release, Retire, Validate,
     };
 
     busbar_contract::plugin_door! {
@@ -995,7 +1150,7 @@ mod table {
             release: Safe<Release<Oidc>>,
             close: Safe<Close<Oidc>>,
         },
-        ready: Safe<Ready<Oidc>>,
+        ready: Safe<Ready>,
         kind_ops: {
             verify: Safe<Verify>,
             begin_login: Safe<Begin>,

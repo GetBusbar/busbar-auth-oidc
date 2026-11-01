@@ -28,15 +28,44 @@ const DEFAULT_TTL_SECS: u64 = 300;
 const MAX_TTL_SECS: u64 = 3600;
 /// The most entries held.
 pub const MAX_ENTRIES: usize = 4096;
-/// The largest identity held, bytes of its id, name and roles: a bigger one is judged afresh
-/// each time, so the entry bound also bounds the memory held (4096 × 8 KiB).
+/// The largest serialized identity held. A bigger one is judged afresh. The 4096 × 8 KiB bound
+/// covers serialized content; Rust containers, cache entries and allocator overhead are additional.
 pub const MAX_PRINCIPAL_BYTES: usize = 8 * 1024;
 
-/// The bytes `p` holds: its id, name and roles.
+/// Count the serialized identity without allocating a second copy of its strings. Stop at the
+/// existing cache bound, including JSON punctuation and escaped characters rather than only text.
 fn size_of(p: &Principal) -> usize {
-    p.id.len()
-        + p.name.as_ref().map_or(0, String::len)
-        + p.roles.iter().map(String::len).sum::<usize>()
+    #[derive(serde::Serialize)]
+    struct View<'a> {
+        id: &'a str,
+        name: Option<&'a str>,
+        roles: &'a [String],
+        ttl_secs: Option<u64>,
+    }
+    struct Count(usize);
+    impl std::io::Write for Count {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 = self.0.saturating_add(bytes.len());
+            if self.0 > MAX_PRINCIPAL_BYTES {
+                return Err(std::io::Error::other("identity exceeds cache bound"));
+            }
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut count = Count(0);
+    let view = View {
+        id: &p.id,
+        name: p.name.as_deref(),
+        roles: &p.roles,
+        ttl_secs: p.ttl_secs,
+    };
+    match serde_json::to_writer(&mut count, &view) {
+        Ok(()) => count.0,
+        Err(_) => MAX_PRINCIPAL_BYTES + 1,
+    }
 }
 
 /// A cache hit: the identity held, and the TTL it has LEFT at the hit (`None` when its module

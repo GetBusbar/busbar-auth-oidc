@@ -46,7 +46,9 @@ pub fn check_document(
 ) -> Result<Value, String> {
     let url = &crate::fetch::shown(url);
     let body = fetched.map_err(|e| {
-        format!("OIDC discovery fetch failed ({url}): {e}; set jwks_url explicitly")
+        format!(
+            "OIDC discovery fetch failed ({url}): {e}; configure the required endpoints explicitly"
+        )
     })?;
     let doc: Value = serde_json::from_str(&body).map_err(
         busbar_contract::abi::sdk::auth_kit::json_error("OIDC discovery document is not JSON"),
@@ -75,10 +77,12 @@ enum State {
     Idle,
     /// A caller's fetch is in flight, and the document it re-discovers (served meanwhile), if any.
     Flight(Flight, Option<Arc<Value>>),
-    /// Fetched and valid; asked for again at `due` (`None`: at its next use, after a `refresh`).
+    /// Fetched and valid; asked for again after `due`'s elapsed duration (`None`: at its next use,
+    /// after a `refresh`). Keeping the start and duration avoids overflowing `Instant` for an
+    /// accepted retry interval as large as `u64::MAX` seconds.
     Done {
         doc: Arc<Value>,
-        due: Option<Instant>,
+        due: Option<(Instant, Duration)>,
     },
     /// The last fetch failed at `at`, with `error`, and there was no document to keep.
     Failed { error: String, at: Instant },
@@ -128,7 +132,9 @@ impl Discovery {
             let mut guard = self.lock();
             let (state, waiters) = &mut *guard;
             match &*state {
-                State::Done { doc, due } if due.is_some_and(|d| now < d) => {
+                State::Done { doc, due }
+                    if due.is_some_and(|(at, wait)| now.saturating_duration_since(at) < wait) =>
+                {
                     return Step::Ready(Ok(Arc::clone(doc)));
                 }
                 State::Flight(fl, _) if fl.mine(me) => {}
@@ -184,13 +190,15 @@ impl Discovery {
         let mut failed = None;
         let mut kept = None;
         let (answer, waiters) = match (checked, &*state) {
-            (Ok(_), State::Done { doc, due }) if due.is_some_and(|d| now < d) => {
+            (Ok(_), State::Done { doc, due })
+                if due.is_some_and(|(at, wait)| now.saturating_duration_since(at) < wait) =>
+            {
                 (Ok(Arc::clone(doc)), Vec::new())
             }
             (Ok(doc), _) => {
                 *state = State::Done {
                     doc: Arc::clone(&doc),
-                    due: Some(now + REDISCOVER),
+                    due: Some((now, REDISCOVER)),
                 };
                 (Ok(doc), std::mem::take(waiters))
             }
@@ -200,7 +208,7 @@ impl Discovery {
                         kept = Some(error.clone());
                         *state = State::Done {
                             doc: Arc::clone(&prev),
-                            due: Some(now + self.retry),
+                            due: Some((now, self.retry)),
                         };
                         Ok(prev)
                     }

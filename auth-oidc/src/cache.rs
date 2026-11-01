@@ -304,10 +304,16 @@ impl JwksCache {
         // log before any signature has been accepted, so it is escaped and capped
         // ([`crate::untrusted`]): a kid carrying a newline or a terminal escape must not forge or
         // colour log records. Short printable kids are byte-identical.
+        if kid.is_empty() {
+            return Err(KeyError::Mismatch(
+                "the token has no kid and the JWKS does not select exactly one usable signing key"
+                    .to_string(),
+            ));
+        }
         Err(KeyError::Mismatch(format!(
             "no JWKS key matches the token's kid '{}' (a rotation refetch is bounded by \
              jwks_min_refetch_secs, so the key set may not have been refetched for this token); the \
-             signing key is unknown to the configured jwks_url",
+             signing key is unknown to the provider's key set",
             crate::untrusted(kid)
         )))
     }
@@ -439,10 +445,12 @@ impl JwksCache {
     ) -> Result<Option<Arc<JwkSet>>, String> {
         let fetched = fetched.and_then(|body| JwkSet::parse(&body));
         let mut inner = self.lock();
-        if inner.flight.is_some_and(|(fl, _)| fl.mine(io.caller())) {
+        let waiters = if inner.flight.is_some_and(|(fl, _)| fl.mine(io.caller())) {
             inner.flight = None;
-        }
-        let waiters = std::mem::take(&mut inner.waiters);
+            std::mem::take(&mut inner.waiters)
+        } else {
+            Vec::new()
+        };
         let mut kept_through: Option<String> = None;
         let mut nothing_kept: Option<String> = None;
         let settled = match fetched {
