@@ -197,6 +197,7 @@ pub struct Idp {
     delay: Mutex<Duration>,
     /// A test-controlled reply path and its wakes, released by `ReadHold` outside this lock.
     read_hold: Mutex<Option<(String, Vec<(InstanceId, u64)>)>>,
+    read_pause: Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
     /// Every declared diagnostic the door's envelopes raised, as `name severity text`.
     diags: Mutex<Vec<String>>,
 }
@@ -237,6 +238,7 @@ impl Idp {
             served: AtomicU64::new(0),
             delay: Mutex::new(Duration::from_millis(5)),
             read_hold: Mutex::new(None),
+            read_pause: Mutex::new(None),
             diags: Mutex::new(Vec::new()),
         });
         let doc = serde_json::json!({
@@ -330,6 +332,14 @@ impl Idp {
     pub fn connection_is_open(&self, connection: u64) -> bool {
         self.reads.lock().unwrap().contains_key(&connection)
     }
+
+    /// Pause one executing connector read until released; no IdP lock is held while paused.
+    pub fn pause_next_read(&self) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        *self.read_pause.lock().unwrap() = Some((entered_tx, resume_rx));
+        (entered_rx, resume_tx)
+    }
 }
 
 /// Releases controlled replies before a scoped caller is joined, even if an assertion panics.
@@ -413,6 +423,16 @@ impl Conns for Idp {
         ticket: u64,
         buf: &mut [u8],
     ) -> Result<Piece, ConnError> {
+        let paused = self.read_pause.lock().unwrap().take();
+        if let Some((entered, resume)) = paused {
+            entered
+                .send(())
+                .expect("the test waits for the actual read");
+            resume
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the test releases the read");
+            return Err(ConnError::Pending);
+        }
         let mut reads = self.reads.lock().unwrap();
         let r = reads.get_mut(&conn.0).ok_or(ConnError::Closed)?;
         match r.step {

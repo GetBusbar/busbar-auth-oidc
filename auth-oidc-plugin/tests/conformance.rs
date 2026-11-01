@@ -1760,3 +1760,139 @@ fn ready_and_tick_release_held_connections_on_cancel_or_refresh() {
         }
     }
 }
+
+/// A refresh can finish while a driver is inside a host call. The old exchange must not be
+/// published after a successful refresh, including a refresh that keeps the same module.
+#[test]
+fn executing_driver_does_not_repark_an_exchange_after_successful_refresh() {
+    use busbar_contract::abi::mechanism::call::{Blob, BLOB_JSON};
+    use busbar_contract::abi::mechanism::lifecycle::{
+        slot as life, CancelIn, CancelOut, DriveIn, RefreshIn, TickIn, TickOut,
+    };
+    let _one = support::serial();
+    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let lib = cdylib();
+    let stated = row().statement;
+    for arm in [
+        Arm::Linked,
+        Arm::Dropped {
+            lib: &lib,
+            stated: &stated,
+        },
+    ] {
+        for drive in [false, true] {
+            for refresh_kind in ["same", "changed", "refused"] {
+                let idp = Idp::new(&key);
+                let b = bind(&arm, &idp);
+                let mut cfg: serde_json::Value = serde_json::from_str(&config(AUDIENCE)).unwrap();
+                cfg["jwks_url"] = serde_json::json!(support::JWKS_URL);
+                let settings = cfg.to_string();
+                open(&b.plugin, &settings, None).expect("opens");
+                let owner = b.dispatcher.inline_ticket().expect("driver ticket");
+                let ticket = owner.ticket();
+                let tick = || {
+                    let mut input: TickIn = z();
+                    input.head = busbar_plugin_loader::dispatch::in_head();
+                    input.now_ns = now_ns();
+                    let mut output: TickOut = z();
+                    output.head = out_head();
+                    b.plugin
+                        .call_inline(ticket, false, life::TICK, &mut Frame::new(input, output))
+                        .outcome
+                };
+                let hold = idp.hold_reads("/keys");
+                if drive {
+                    assert_eq!(tick(), Outcome::Pending);
+                    assert!(idp.read_is_held());
+                }
+                let (entered, resume) = idp.pause_next_read();
+                std::thread::scope(|scope| {
+                    let pending = scope.spawn(|| {
+                        if drive {
+                            let mut input: DriveIn = z();
+                            input.head = busbar_plugin_loader::dispatch::in_head();
+                            input.driver = ticket;
+                            b.plugin
+                                .call_inline(
+                                    ticket,
+                                    false,
+                                    life::DRIVE,
+                                    &mut Frame::new(input, out_head()),
+                                )
+                                .outcome
+                        } else {
+                            tick()
+                        }
+                    });
+                    entered
+                        .recv_timeout(Duration::from_secs(5))
+                        .expect("driver reached the connector");
+                    let sent = idp.sent_to("/keys");
+                    assert_eq!(sent.len(), 1);
+                    let connection = sent[0].conn;
+                    assert!(idp.connection_is_open(connection));
+                    let replacement = match refresh_kind {
+                        "same" => settings.clone(),
+                        "changed" => replacement_config(),
+                        "refused" => "{".to_string(),
+                        _ => unreachable!(),
+                    };
+                    let mut input: RefreshIn = z();
+                    input.head = busbar_plugin_loader::dispatch::in_head();
+                    input.generation = 2;
+                    input.settings = Blob {
+                        ptr: replacement.as_ptr(),
+                        len: replacement.len(),
+                        fmt: BLOB_JSON,
+                        flags: 0,
+                    };
+                    let refreshed = b
+                        .plugin
+                        .call(life::REFRESH, &mut Frame::new(input, out_head()))
+                        .outcome;
+                    assert_eq!(
+                        refreshed,
+                        if refresh_kind == "refused" {
+                            Outcome::Failed
+                        } else {
+                            Outcome::Ready
+                        }
+                    );
+                    resume.send(()).expect("release the executing read");
+                    let outcome = pending.join().unwrap();
+                    if refresh_kind == "refused" {
+                        assert_eq!(outcome, Outcome::Pending);
+                        assert!(
+                            idp.connection_is_open(connection),
+                            "refused refresh preserves the driver"
+                        );
+                    } else {
+                        assert_eq!(outcome, Outcome::Ready);
+                        assert!(
+                            !idp.connection_is_open(connection),
+                            "old exchange cannot be parked after refresh"
+                        );
+                    }
+                    assert_eq!(
+                        idp.sent_to("/keys").len(),
+                        1,
+                        "the transition starts no replacement exchange"
+                    );
+                    let mut input: CancelIn = z();
+                    input.head = busbar_plugin_loader::dispatch::in_head();
+                    input.ticket = ticket;
+                    let mut output: CancelOut = z();
+                    output.head = out_head();
+                    assert_eq!(
+                        b.plugin
+                            .call(life::CANCEL, &mut Frame::new(input, output))
+                            .outcome,
+                        Outcome::Ready
+                    );
+                    assert!(!idp.connection_is_open(connection));
+                });
+                drop(hold);
+            }
+        }
+    }
+}
