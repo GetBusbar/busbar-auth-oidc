@@ -469,3 +469,42 @@ fn an_error_naming_a_url_drops_its_userinfo() {
         assert!(said.contains("https://idp.example/jwks"), "{said}");
     }
 }
+
+#[test]
+fn displayed_urls_preserve_normal_text_and_scrub_before_escaping_controls() {
+    for url in [
+        "HTTPS://idp.example:443/a%2Fb?x=One%20Two#tail",
+        "https://idp.example/café?tenant=日本",
+    ] {
+        assert_eq!(shown(url), url);
+    }
+    assert_eq!(
+        shown("https://idp.example/keys\r\n\t\x1b\u{85}"),
+        r"https://idp.example/keys\r\n\t\u{1b}\u{85}"
+    );
+    // A malformed host exercises the existing fallback redaction, before display escaping.
+    assert_eq!(
+        shown("https://user:OidcFallbackPass@bad host/path\r\n\x1b"),
+        r"https://bad host/path\r\n\u{1b}"
+    );
+    assert_eq!(
+        shown("https://user:OidcPassCanary@idp.example/keys?set=1"),
+        "https://idp.example/keys?set=1"
+    );
+}
+
+#[test]
+fn far_end_url_and_host_displays_use_the_existing_untrusted_bound() {
+    let path = format!(
+        "https://user:SecretBeforeCap@idp.example/{}",
+        "x".repeat(4096)
+    );
+    let display = shown(&path);
+    assert!(!display.contains("SecretBeforeCap"));
+    assert!(display.ends_with('…'));
+    assert!(display.len() < 100);
+    let host = format!("{}\nHostCanary", "a".repeat(4096));
+    let refusal = refusal(&host, "is refused");
+    assert!(refusal.len() < 150);
+    assert!(!refusal.contains("HostCanary"));
+}

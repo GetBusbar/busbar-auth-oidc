@@ -1721,15 +1721,18 @@ fn identity_from_token_response_verifies_id_token() {
         "a bad-audience id_token must be rejected"
     );
 
-    // A response missing the id_token entirely ⇒ Reject.
+    // A successful endpoint response missing its id_token is unavailable.
     let no_id = LoginHttpResponse {
         status: 200,
         body: serde_json::json!({ "access_token": "opaque" }).to_string(),
     };
-    assert!(matches!(
-        m.identity_from_token_response(&no_id, now, Instant::now()),
-        LoginOutcome::Reject
-    ));
+    assert!(ready(m.m.identity_from_token_response(
+        &no_id,
+        now,
+        Instant::now(),
+        &mut m.idp.at_once(Some(ME)),
+    ))
+    .is_err());
 }
 
 /// O1 (OWNER-SIGNED 2026-10-30: an IdP outage is never a 401): A KEY SET THAT CANNOT BE HAD AT
@@ -2257,7 +2260,18 @@ fn login_fails_closed_without_endpoints() {
         code_verifier: Some("v".to_string()),
         ..Default::default()
     };
-    assert!(matches!(m.complete_login(&cl), LoginOutcome::Reject));
+    assert!(
+        ready(m.m.token_exchange(
+            cl.code.as_deref(),
+            cl.redirect_uri.as_deref(),
+            cl.code_verifier.as_deref(),
+            None,
+            Instant::now(),
+            &mut m.idp.at_once(Some(ME)),
+        ))
+        .is_err(),
+        "missing endpoint is unavailable, not a bad credential"
+    );
 
     // No code and no token_response is also a hard reject.
     assert!(matches!(
@@ -2615,7 +2629,8 @@ fn a_refused_token_response_is_logged_with_its_reason() {
                 &mut idp.at_once(Some(ME)),
             ))
         });
-        assert!(matches!(outcome, Ok(LoginOutcome::Reject)));
+        assert_eq!(matches!(outcome, Ok(LoginOutcome::Reject)), status == 400);
+        assert_eq!(outcome.is_err(), status == 200);
         let logged = cap.messages().join("\n");
         assert!(logged.contains(reason), "{reason}: not logged: {logged:?}");
         assert!(
@@ -2667,7 +2682,7 @@ fn a_refused_token_exchange_is_logged_with_its_reason() {
             &mut io,
         ))
     });
-    assert!(matches!(out, Ok(None)));
+    assert!(out.is_err());
     assert!(
         cap.contains("names none"),
         "no endpoint is explained: {:?}",
@@ -2914,7 +2929,7 @@ fn a_token_of_an_unknown_issuer_is_refused_at_the_chains_end() {
 }
 
 /// S5: a browser login this provider cannot begin (no `authorization_endpoint` configured or
-/// discovered) is refused with a line in the plugin's log naming why, at info.
+/// discovered) is refused with a line in the plugin's log naming the configuration problem at warn.
 #[test]
 fn a_begin_login_with_no_authorize_endpoint_is_logged() {
     let mut none = cfg("groups");
@@ -2927,7 +2942,7 @@ fn a_begin_login_with_no_authorize_endpoint_is_logged() {
         nonce: Some("nc".to_string()),
         scopes: Vec::new(),
     };
-    let cap = busbar_test_kit::warn_capture::WarnCapture::capturing_debug();
+    let cap = busbar_test_kit::warn_capture::WarnCapture::default();
     let out = tracing::subscriber::with_default(cap.clone(), || {
         ready(OidcModule::new(&none).begin_login(
             &begin,
@@ -2941,6 +2956,17 @@ fn a_begin_login_with_no_authorize_endpoint_is_logged() {
         logged.contains("authorization_endpoint") && logged.contains("module=oidc"),
         "the refusal is explained: {logged:?}"
     );
+}
+
+#[test]
+fn malformed_role_values_are_reported_without_changing_valid_roles_or_echoing_claims() {
+    let cap = busbar_test_kit::warn_capture::WarnCapture::default();
+    let value = serde_json::json!(["admin", {"SecretRoleClaim":true}, 7]);
+    let roles =
+        tracing::subscriber::with_default(cap.clone(), || extract_string_list(Some(&value)));
+    assert_eq!(roles, vec!["admin"]);
+    assert!(cap.contains("role claim"));
+    assert!(!cap.contains("SecretRoleClaim"));
 }
 
 /// S1: a far-end document the decoder cannot read is refused without the decoder's text, which

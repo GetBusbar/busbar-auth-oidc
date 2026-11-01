@@ -11,6 +11,33 @@ use crate::{OidcModule, Step};
 
 const ISSUER: &str = "https://idp.example/v2.0";
 
+#[test]
+fn present_but_nonstring_discovery_endpoints_are_errors() {
+    for field in ["jwks_uri", "authorization_endpoint", "token_endpoint"] {
+        for value in [
+            serde_json::json!(123),
+            serde_json::json!({"SecretEndpoint":true}),
+            serde_json::Value::Null,
+        ] {
+            let mut document = serde_json::json!({"issuer":ISSUER});
+            document[field] = value;
+            let idp = Idp::new(document.to_string());
+            let module = OidcModule::new(&cfg(None));
+            let mut io = idp.at_once(Some(ME));
+            let error = match field {
+                "jwks_uri" => ready(module.jwks_url(Instant::now(), &mut io)).map(|_| ()),
+                "authorization_endpoint" => {
+                    ready(module.authorization_endpoint(Instant::now(), &mut io)).map(|_| ())
+                }
+                _ => ready(module.token_endpoint(Instant::now(), &mut io)).map(|_| ()),
+            }
+            .expect_err("a malformed endpoint is not absent");
+            assert!(error.contains(field));
+            assert!(!error.contains("SecretEndpoint"));
+        }
+    }
+}
+
 fn cfg(jwks_url: Option<&str>) -> OidcConfig {
     serde_json::from_value(serde_json::json!({
         "issuer": ISSUER,
@@ -190,4 +217,134 @@ fn the_document_is_rediscovered_after_a_day_serving_the_previous_one_meanwhile()
     let retry = day + Duration::from_secs(60);
     let _ = ready(d.document(&c, retry, &mut idp.at_once(Some(ME))));
     assert_eq!(idp.calls(), 3, "asked again after the retry bound");
+}
+
+#[test]
+fn a_failed_rediscovery_keeps_the_previous_document_for_the_full_retry_interval() {
+    for seconds in [1, 60, u64::MAX] {
+        let settings = serde_json::json!({
+            "issuer": ISSUER,
+            "audience": "api://a",
+            "jwks_min_refetch_secs": seconds,
+        })
+        .to_string();
+        assert!(
+            <crate::door::Oidc as busbar_contract::abi::sdk::life::Life>::validate(
+                settings.as_bytes()
+            )
+            .is_ok()
+        );
+        let mut c = cfg(None);
+        c.jwks_min_refetch_secs = seconds;
+        let d = Discovery::new(Duration::from_secs(c.jwks_min_refetch_secs));
+        let idp = Idp::new(doc());
+        let t0 = Instant::now();
+        let previous = ready(d.document(&c, t0, &mut idp.at_once(Some(ME)))).unwrap();
+        let failed_at = t0 + REDISCOVER;
+        idp.set_answer(Err("rediscovery unavailable".into()));
+        let retained = ready(d.document(&c, failed_at, &mut idp.at_once(Some(ME)))).unwrap();
+        assert!(Arc::ptr_eq(&previous, &retained));
+        assert_eq!(idp.calls(), 2);
+        let before_retry = failed_at + Duration::from_millis(999);
+        let retained = ready(d.document(&c, before_retry, &mut idp.at_once(Some(ME)))).unwrap();
+        assert!(Arc::ptr_eq(&previous, &retained));
+        assert_eq!(
+            idp.calls(),
+            2,
+            "no immediate retry, including an overflowing interval"
+        );
+        if let Some(due) = failed_at.checked_add(Duration::from_secs(seconds)) {
+            let just_before = due.checked_sub(Duration::from_nanos(1)).unwrap();
+            let _ = ready(d.document(&c, just_before, &mut idp.at_once(Some(ME))));
+            assert_eq!(
+                idp.calls(),
+                2,
+                "still retained just before the retry boundary"
+            );
+            let _ = ready(d.document(&c, due, &mut idp.at_once(Some(ME))));
+            assert_eq!(idp.calls(), 3, "retry at the exact boundary");
+        } else {
+            let later = failed_at + REDISCOVER;
+            assert!(ready(d.document(&c, later, &mut idp.at_once(Some(ME)))).is_ok());
+            assert_eq!(idp.calls(), 2, "the large interval is not shortened");
+        }
+        let before_expire = idp.calls();
+        d.expire();
+        let _ = ready(d.document(&c, failed_at, &mut idp.at_once(Some(ME))));
+        assert_eq!(
+            idp.calls(),
+            before_expire + 1,
+            "explicit refresh still retries"
+        );
+    }
+}
+
+#[test]
+fn a_discovered_jwks_failure_logs_escaped_controls_without_changing_the_fetch_url() {
+    struct FailingKeys<'a> {
+        url: &'a str,
+        asked: Vec<(crate::fetch::Doc, String)>,
+    }
+    impl Fetch for FailingKeys<'_> {
+        fn caller(&self) -> Option<busbar_contract::abi::mechanism::ticket::Ticket> {
+            Some(ME)
+        }
+        fn get(&mut self, doc: crate::fetch::Doc, url: &str) -> Poll<Result<String, String>> {
+            self.asked.push((doc, url.to_string()));
+            Poll::Ready(match doc {
+                crate::fetch::Doc::Discovery => Ok(serde_json::json!({
+                    "issuer": ISSUER, "jwks_uri": self.url,
+                })
+                .to_string()),
+                crate::fetch::Doc::Jwks => Err("transport unavailable".to_string()),
+            })
+        }
+        fn post(
+            &mut self,
+            _: &str,
+            _: &busbar_contract::abi::sdk::cred::FormBody,
+        ) -> Poll<Result<busbar_contract::auth::LoginHttpResponse, String>> {
+            panic!("JWKS warm-up never posts credentials")
+        }
+    }
+
+    for url in [
+        "https://idp.example/keys\r\nLogCanary=\x1b[31m?set=1",
+        "https://user:OidcPassCanary@idp.example/keys\r\nLogCanary=\x1b[31m?set=1",
+    ] {
+        let module = OidcModule::new(&cfg(None));
+        let mut io = FailingKeys {
+            url,
+            asked: Vec::new(),
+        };
+        let capture = busbar_test_kit::warn_capture::WarnCapture::default();
+        tracing::subscriber::with_default(capture.clone(), || {
+            assert_eq!(ready(module.ready(Instant::now(), &mut io)), Ok(()));
+        });
+        assert_eq!(io.asked.len(), 2, "discovery then the discovered JWKS");
+        assert_eq!(
+            io.asked[1],
+            (crate::fetch::Doc::Jwks, url.to_string()),
+            "display escaping must not rewrite the destination handed to the fetcher"
+        );
+        let messages = capture.messages();
+        assert_eq!(messages.len(), 1, "{messages:?}");
+        let logged = &messages[0];
+        assert!(
+            logged.contains("JWKS fetch failed; no key set to serve"),
+            "{logged:?}"
+        );
+        assert!(logged.contains("transport unavailable"), "{logged:?}");
+        assert!(!logged.chars().any(char::is_control), "{logged:?}");
+        assert!(
+            !logged.contains("user:") && !logged.contains("OidcPassCanary"),
+            "{logged:?}"
+        );
+        if !url.contains('@') {
+            assert!(
+                logged.contains(r"keys\r\nLogCanary=\u{1b}[31m?set=1"),
+                "{logged:?}"
+            );
+        }
+    }
 }

@@ -111,3 +111,16 @@ fn an_identity_over_8_kib_is_not_cached() {
     c.put("cred-fits", &fits, t, c.generation());
     assert!(c.get("cred-fits", t + 1).is_some(), "under 8 KiB: held");
 }
+
+#[test]
+fn many_tiny_roles_count_their_serialized_overhead_toward_the_existing_bound() {
+    let c = VerdictCache::default();
+    let mut p = principal(Some(300));
+    p.roles = vec!["r".to_string(); 4096];
+    assert!(p.id.len() + p.roles.iter().map(String::len).sum::<usize>() < MAX_PRINCIPAL_BYTES);
+    c.put("tiny-role-token", &p, 1_700_000_000, c.generation());
+    assert!(c.get("tiny-role-token", 1_700_000_001).is_none());
+    p.roles.truncate(16);
+    c.put("small-token", &p, 1_700_000_000, c.generation());
+    assert!(c.get("small-token", 1_700_000_001).is_some());
+}

@@ -264,6 +264,100 @@ fn a_failing_provider_does_not_produce_a_fetch_storm() {
     assert_eq!(idp.calls(), 2, "one retry per interval");
 }
 
+#[test]
+fn stale_usable_keys_rate_limit_a_failing_provider() {
+    let c = JwksCache::new(Duration::from_secs(60), Duration::from_secs(1));
+    let idp = Idp::new(jwks("k1"));
+    let t0 = Instant::now();
+    serve(&c, &idp, t0).expect("prime");
+    idp.set_answer(Err("provider unavailable".to_string()));
+    let stale = t0 + Duration::from_secs(61);
+    for seconds in 0..60 {
+        serve(&c, &idp, stale + Duration::from_secs(seconds)).expect("usable previous keys");
+    }
+    assert_eq!(
+        idp.calls(),
+        2,
+        "one failed refresh during the retry interval"
+    );
+    serve(&c, &idp, stale + Duration::from_secs(60)).expect("previous keys");
+    assert_eq!(idp.calls(), 3, "a retry at the next interval");
+}
+
+#[test]
+fn late_success_and_failure_cannot_replace_a_newer_key_set() {
+    for late in [Ok(jwks("old")), Err("late failure".to_string())] {
+        let c = JwksCache::new(Duration::from_secs(60), Duration::from_secs(3600));
+        let t0 = Instant::now();
+        let idp = Idp::new(jwks("new"));
+        let old = idp.at_once(Some(ticket(1)));
+        let new = idp.at_once(Some(ticket(2)));
+        c.settle(&new, URL, t0 + Duration::from_secs(30), Ok(jwks("new")))
+            .expect("new answer");
+        let keys = c
+            .settle(&old, URL, t0, late)
+            .expect("newer keys survive")
+            .unwrap();
+        assert_eq!(keys.find_all("new").count(), 1);
+        assert_eq!(keys.find_all("old").count(), 0);
+        assert!(
+            !c.lock().failing,
+            "an old failure does not poison current keys"
+        );
+    }
+}
+
+#[test]
+fn a_keyless_token_explains_an_ambiguous_set_without_inventing_an_empty_kid() {
+    let c = JwksCache::new(Duration::from_secs(60), Duration::from_secs(3600));
+    let mut keys: serde_json::Value = serde_json::from_str(&jwks("one")).unwrap();
+    let other: serde_json::Value = serde_json::from_str(&jwks("two")).unwrap();
+    keys["keys"]
+        .as_array_mut()
+        .unwrap()
+        .push(other["keys"][0].clone());
+    let idp = Idp::new(keys.to_string());
+    let error = ready(
+        c.with_key(URL, "", Instant::now(), &mut idp.at_once(Some(ME)), |_| {
+            Ok(())
+        }),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("no kid"));
+    assert!(!error.to_string().contains("kid ''"));
+}
+
+#[test]
+fn an_abandoned_fetch_does_not_wake_the_new_owners_waiters() {
+    let c = JwksCache::new(Duration::from_secs(1), Duration::from_secs(3600));
+    let idp = Idp::new(jwks("k1"));
+    let t0 = Instant::now();
+    let mut old = idp.pending(ticket(1));
+    assert_eq!(
+        c.with_key(URL, "k1", t0, &mut old, |_| Ok(())),
+        Step::Pending
+    );
+    let takeover = t0 + crate::flight::FLIGHT_MAX + Duration::from_secs(1);
+    let mut new = idp.pending(ticket(2));
+    assert_eq!(
+        c.with_key(URL, "k1", takeover, &mut new, |_| Ok(())),
+        Step::Pending
+    );
+    let mut waiter = idp.pending(ticket(3));
+    assert_eq!(
+        c.with_key(URL, "k1", takeover, &mut waiter, |_| Ok(())),
+        Step::Wait
+    );
+    c.settle(&old, URL, t0, Err("abandoned failure".to_string()))
+        .expect_err("no keys yet");
+    assert!(idp.woken().is_empty(), "the new owner's waiters still wait");
+    assert_eq!(
+        c.with_key(URL, "k1", takeover, &mut new, |_| Ok(())),
+        Step::Ready(Ok(()))
+    );
+    assert_eq!(idp.woken(), vec![ticket(3)]);
+}
+
 /// A transient provider failure must not blow away a working key set.
 #[test]
 fn a_fetch_failure_keeps_serving_the_previously_fetched_keys() {

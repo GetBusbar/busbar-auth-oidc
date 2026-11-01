@@ -54,7 +54,7 @@ use std::time::Duration;
 
 use busbar_contract::abi::auth::{
     slot, IdentifyOut, IDENTITY_BUF_BYTES, IDENTITY_GROUPS, LOGIN_BAD_CREDENTIAL, LOGIN_OUTAGE,
-    METRIC_CACHE_FLUSHED,
+    LOGIN_SECURITY_CHECK_FAILED, METRIC_CACHE_FLUSHED,
 };
 use busbar_contract::abi::host::conn::connector::{
     DIRECTION_OUTBOUND, EGRESS_DEFAULT, EGRESS_OPEN_WEB,
@@ -1124,6 +1124,194 @@ fn until_pended(idp: &Idp, n: u32) {
     }
 }
 
+/// Replace the settings and secret through the existing lifecycle Door while another op is
+/// PENDING. Its parked exchange must keep the module that owns that exchange.
+fn refresh_pending(b: &Bound, settings: &str) {
+    use busbar_contract::abi::mechanism::call::{Blob, BLOB_JSON, BLOB_OCTETS};
+    use busbar_contract::abi::mechanism::lifecycle::{slot as life, RefreshIn};
+    let secret = b"replacement-client-secret";
+    let secrets = [Blob {
+        ptr: secret.as_ptr(),
+        len: secret.len(),
+        fmt: BLOB_OCTETS,
+        flags: 0,
+    }];
+    let mut input: RefreshIn = z();
+    input.head = busbar_plugin_loader::dispatch::in_head();
+    input.generation = 2;
+    input.settings = Blob {
+        ptr: settings.as_ptr(),
+        len: settings.len(),
+        fmt: BLOB_JSON,
+        flags: 0,
+    };
+    input.secrets = secrets.as_ptr();
+    input.secrets_len = secrets.len();
+    let done = b
+        .plugin
+        .call(life::REFRESH, &mut Frame::new(input, out_head()));
+    assert_eq!(done.outcome, Outcome::Ready, "refresh: {:?}", done.error);
+}
+
+fn until_read_held(idp: &Idp) {
+    let until = std::time::Instant::now() + Duration::from_secs(10);
+    while !idp.read_is_held() {
+        assert!(
+            std::time::Instant::now() < until,
+            "reply never held: {:?}",
+            idp.sent()
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+/// Change issuer, audience, client, endpoints, secret and CA selection together. Old operations
+/// retain the original configuration; a fresh operation must visibly use this replacement.
+fn replacement_config() -> String {
+    serde_json::json!({
+        "issuer": "https://replacement.conformance.example",
+        "audience": "api://replacement",
+        "client_id": "replacement-client",
+        "ca_cert_pem": "-----BEGIN CERTIFICATE-----\nreplacement\n-----END CERTIFICATE-----\n",
+        "jwks_url": "https://replacement.conformance.example/new-keys",
+        "authorization_endpoint": "https://replacement.conformance.example/authorize",
+        "token_endpoint": "https://replacement.conformance.example/new-token",
+        "role_claim": "roles",
+    })
+    .to_string()
+}
+
+#[test]
+fn pending_verify_and_begin_keep_their_opened_configuration_across_refresh() {
+    let _one = support::serial();
+    let key = Issuer::start(UNUSED_ISSUER, KID);
+    for begin in [false, true] {
+        let idp = Idp::new(&key);
+        let b = bind(&Arm::Linked, &idp);
+        let mut cfg: serde_json::Value = serde_json::from_str(&config_public(AUDIENCE)).unwrap();
+        cfg["client_id"] = serde_json::json!("original-client");
+        open(&b.plugin, &cfg.to_string(), Some(CLIENT_SECRET)).expect("opens");
+        let token = key.sign(&claims(AUDIENCE));
+        let answer = std::thread::scope(|scope| {
+            let held = idp.hold_reads(DISCOVERY_PATH);
+            let call = scope.spawn(|| {
+                if begin {
+                    b.begin(REDIRECT, "state", "challenge", NONCE)
+                } else {
+                    b.verify(Some(&token), None)
+                }
+            });
+            until_read_held(&idp);
+            refresh_pending(&b, &replacement_config());
+            drop(held);
+            call.join().expect("pending operation completes")
+        });
+        if begin {
+            assert!(
+                answer.contains("idp.conformance.example/authorize"),
+                "{answer}"
+            );
+            assert!(answer.contains("client_id=original-client"), "{answer}");
+        } else {
+            assert!(answer.starts_with("verdict 1 "), "{answer}");
+            assert_eq!(
+                idp.sent_to("/keys")[0].need,
+                4,
+                "original public-roots JWKS need"
+            );
+        }
+        assert_eq!(
+            idp.sent_to(DISCOVERY_PATH).len(),
+            1,
+            "no replacement discovery"
+        );
+        assert!(
+            b.verify(Some(&token), None).starts_with("verdict 3 "),
+            "fresh verify uses new issuer"
+        );
+        let fresh = b.begin(REDIRECT, "fresh", "challenge", NONCE);
+        assert!(
+            fresh.contains("replacement.conformance.example/authorize"),
+            "{fresh}"
+        );
+        assert!(fresh.contains("client_id=replacement-client"), "{fresh}");
+        idp.answer("/new-keys", 200, key.jwks());
+        let mut new_claims = claims("api://replacement");
+        new_claims["iss"] = serde_json::json!("https://replacement.conformance.example");
+        assert!(b
+            .verify(Some(&key.sign(&new_claims)), None)
+            .starts_with("verdict 1 "));
+        assert_eq!(
+            idp.sent_to("/new-keys")[0].need,
+            1,
+            "fresh verify uses its CA"
+        );
+    }
+}
+
+#[test]
+fn pending_complete_keeps_its_client_and_token_answer_across_refresh() {
+    let _one = support::serial();
+    let key = Issuer::start(UNUSED_ISSUER, KID);
+    // The token response is still in flight in the first case; in the second it has been
+    // consumed once and parked while signature verification waits on the JWKS.
+    for path in ["/token", "/keys"] {
+        let idp = Idp::new(&key);
+        let b = bind(&Arm::Linked, &idp);
+        let mut cfg: serde_json::Value = serde_json::from_str(&config_public(AUDIENCE)).unwrap();
+        cfg["client_id"] = serde_json::json!("original-client");
+        open(&b.plugin, &cfg.to_string(), Some(CLIENT_SECRET)).expect("opens");
+        idp.answer(
+            "/token",
+            200,
+            &serde_json::json!({"id_token": key.sign(&claims("original-client"))}).to_string(),
+        );
+        let answer = std::thread::scope(|scope| {
+            let held = idp.hold_reads(path);
+            let call =
+                scope.spawn(|| b.complete("code", ("state", NONCE), REDIRECT, "verifier", None));
+            until_read_held(&idp);
+            refresh_pending(&b, &replacement_config());
+            drop(held);
+            call.join().expect("pending login completes")
+        });
+        assert!(answer.starts_with("verdict 1 "), "held {path}: {answer}");
+        let posts = idp.sent_to("/token");
+        assert_eq!(posts.len(), 1, "the code is exchanged once");
+        assert!(posts[0].body.contains("client_id=original-client"));
+        assert!(posts[0]
+            .body
+            .contains("client_secret=conformance-client-secret"));
+        assert_eq!(posts[0].need, 5, "original public-roots token need");
+        assert_eq!(
+            idp.sent_to("/keys")[0].need,
+            4,
+            "original public-roots JWKS need"
+        );
+        assert!(idp.sent_to("/new-token").is_empty());
+        assert!(idp.sent_to("/new-keys").is_empty());
+        let fresh = b.begin(REDIRECT, "fresh", "challenge", NONCE);
+        assert!(fresh.contains("client_id=replacement-client"), "{fresh}");
+        let mut new_claims = claims("replacement-client");
+        new_claims["iss"] = serde_json::json!("https://replacement.conformance.example");
+        idp.answer("/new-keys", 200, key.jwks());
+        idp.answer(
+            "/new-token",
+            200,
+            &serde_json::json!({"id_token": key.sign(&new_claims)}).to_string(),
+        );
+        let fresh = b.complete("new-code", ("fresh", NONCE), REDIRECT, "verifier", None);
+        assert!(fresh.starts_with("verdict 1 "), "{fresh}");
+        let fresh_posts = idp.sent_to("/new-token");
+        assert_eq!(fresh_posts.len(), 1);
+        assert!(fresh_posts[0].body.contains("client_id=replacement-client"));
+        assert!(fresh_posts[0]
+            .body
+            .contains("client_secret=replacement-client-secret"));
+        assert_eq!(fresh_posts[0].need, 2, "fresh login uses its CA");
+    }
+}
+
 /// L1: a verify that claimed the key set's refresh and pended on it, re-entered after ANOTHER
 /// verify cached the same token's identity meanwhile, still LANDS its own fetch: the rotated key
 /// the IdP answered is installed, so a token signed by it verifies at once. (Before, the re-entry
@@ -1237,6 +1425,43 @@ fn ready_waits_on_another_op_s_discovery_and_a_failure_refuses_the_boot() {
     );
 }
 
+#[test]
+fn ready_audits_refused_warmup_destinations_without_changing_best_effort_boot() {
+    let _one = support::serial();
+    let key = Issuer::start(UNUSED_ISSUER, KID);
+    for guard_refused in [false, true] {
+        let idp = Idp::new(&key);
+        let b = bind(&Arm::Linked, &idp);
+        let mut cfg: serde_json::Value = serde_json::from_str(&config(AUDIENCE)).unwrap();
+        cfg["jwks_url"] = serde_json::json!(if guard_refused {
+            support::JWKS_URL
+        } else {
+            "http://127.0.0.1/keys"
+        });
+        open(&b.plugin, &cfg.to_string(), None).expect("opens");
+        if guard_refused {
+            idp.refuse(1);
+        }
+        for _ in 0..2 {
+            b.plugin
+                .ready(&b.dispatcher, Duration::from_secs(10))
+                .expect("JWKS warmup remains best effort");
+        }
+        assert_eq!(
+            idp.diags()
+                .iter()
+                .filter(|line| line.starts_with("BUSBAR-4031 2 "))
+                .count(),
+            1,
+            "the existing READY envelope audits the destination once"
+        );
+        assert!(
+            idp.sent_to("/keys").is_empty(),
+            "refused before sending a request"
+        );
+    }
+}
+
 /// T2: a login's id_token is judged for expiry at the HOST's wall clock (`clock.now`), through the
 /// real door: one that expired, or is not yet valid, is a declined login; a fresh one identifies.
 #[test]
@@ -1274,6 +1499,138 @@ fn a_login_id_token_s_expiry_is_judged_at_the_host_clock() {
     }
 }
 
+/// OIO1: a short login answer expires on the host's monotonic clock, with the existing inclusive
+/// ten-minute boundary. The IdP refuses a second redemption, so serving the saved identity and
+/// re-entering the exchange are distinguishable through the real loaded door.
+#[test]
+fn a_short_login_answer_uses_the_host_monotonic_expiry_boundary() {
+    let _one = support::serial();
+    let key = Issuer::start(UNUSED_ISSUER, KID);
+    const TTL_NS: u64 = 600_000_000_000;
+    for (elapsed, retained) in [
+        (0, true),
+        (TTL_NS - 1, true),
+        (TTL_NS, true),
+        (TTL_NS + 1, false),
+    ] {
+        let at = busbar_plugin_loader::dispatch::now_ns();
+        let _clock = support::HeldClock::at(at);
+        let idp = Idp::new(&key);
+        let body = serde_json::json!({ "id_token": key.sign(&claims(AUDIENCE)) }).to_string();
+        idp.answer("/token", 200, &body);
+        let b = bind(&Arm::Linked, &idp);
+        open(&b.plugin, &config(AUDIENCE), Some(CLIENT_SECRET)).expect("opens");
+        let answer = b.complete_after_short(
+            "one-use-code",
+            ("state", NONCE),
+            REDIRECT,
+            "verifier",
+            Some((8, 0)),
+            || {
+                support::HeldClock::set(at + elapsed);
+                idp.answer("/token", 400, r#"{"error":"invalid_grant"}"#);
+            },
+        );
+        assert!(
+            answer.starts_with("short(needed "),
+            "the actual short path: {answer}"
+        );
+        if retained {
+            assert!(
+                answer.contains("verdict 1 subject="),
+                "age {elapsed}: {answer}"
+            );
+            assert_eq!(
+                idp.sent_to("/token").len(),
+                1,
+                "the cached identity is reused"
+            );
+        } else {
+            assert!(
+                answer
+                    .trim_end()
+                    .ends_with(&format!("verdict {LOGIN_BAD_CREDENTIAL}")),
+                "age {elapsed}: {answer}"
+            );
+            assert_eq!(
+                idp.sent_to("/token").len(),
+                2,
+                "the expired identity is not reused"
+            );
+        }
+    }
+}
+
+/// A callback without the nonce that bound its browser session is refused before redeeming code.
+#[test]
+fn an_empty_callback_nonce_cannot_accept_an_empty_id_token_nonce() {
+    let _one = support::serial();
+    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let idp = Idp::new(&key);
+    let mut c = claims(AUDIENCE);
+    c["nonce"] = serde_json::json!("");
+    idp.answer(
+        "/token",
+        200,
+        &serde_json::json!({"id_token": key.sign(&c)}).to_string(),
+    );
+    let b = bind(&Arm::Linked, &idp);
+    open(&b.plugin, &config(AUDIENCE), Some(CLIENT_SECRET)).expect("opens");
+    let answer = b.complete("code", ("state", ""), REDIRECT, "verifier", None);
+    assert_eq!(
+        answer.trim_end(),
+        format!("verdict {LOGIN_SECURITY_CHECK_FAILED}")
+    );
+    assert!(
+        idp.sent_to("/token").is_empty(),
+        "an unbound callback redeems nothing"
+    );
+}
+
+#[test]
+fn a_tick_reports_a_refused_key_endpoint_through_its_envelope() {
+    let _one = support::serial();
+    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let idp = Idp::new(&key);
+    let b = bind(&Arm::Linked, &idp);
+    let mut cfg: serde_json::Value = serde_json::from_str(&config(AUDIENCE)).unwrap();
+    cfg["jwks_url"] = serde_json::json!("http://127.0.0.1/keys");
+    open(&b.plugin, &cfg.to_string(), None).expect("legacy loopback config opens");
+    let driver = b.dispatcher.driver(&b.plugin, 0).expect("driver");
+    for _ in 0..2 {
+        b.dispatcher
+            .tick(&b.plugin, driver, now_ns())
+            .wait(Duration::from_secs(10))
+            .expect("tick answers");
+    }
+    assert_eq!(
+        idp.diags()
+            .iter()
+            .filter(|s| s.starts_with("BUSBAR-4031 2 "))
+            .count(),
+        1
+    );
+    assert!(idp.sent_to("/keys").is_empty());
+}
+
+#[test]
+fn a_broken_successful_token_response_is_a_login_outage() {
+    let _one = support::serial();
+    let key = Issuer::start(UNUSED_ISSUER, KID);
+    for body in [
+        "<html>maintenance</html>",
+        r#"{"access_token":"TokenCanary"}"#,
+    ] {
+        let idp = Idp::new(&key);
+        idp.answer("/token", 200, body);
+        let b = bind(&Arm::Linked, &idp);
+        open(&b.plugin, &config(AUDIENCE), Some(CLIENT_SECRET)).expect("opens");
+        let answer = b.complete("code", ("state", NONCE), REDIRECT, "verifier", None);
+        assert_eq!(answer.trim_end(), format!("verdict {LOGIN_OUTAGE}"));
+        assert_eq!(idp.sent_to("/token").len(), 1);
+    }
+}
+
 /// T3: an IdP destination the host's guard REFUSES is audited through the door: the verify fails,
 /// and the door raises its declared `OIDC_IDP_DESTINATION_REFUSED` at error naming the host and
 /// the rule (never the URL's path) — once per module, not once per request.
@@ -1293,7 +1650,7 @@ fn a_refused_idp_destination_raises_its_declared_diagnostic_once() {
     let raised = idp.diags();
     assert_eq!(raised.len(), 1, "{raised:?}");
     assert!(
-        raised[0].starts_with("OIDC_IDP_DESTINATION_REFUSED 2 ")
+        raised[0].starts_with("BUSBAR-4031 2 ")
             && raised[0].contains("idp.conformance.example")
             && !raised[0].contains("/keys"),
         "{raised:?}"

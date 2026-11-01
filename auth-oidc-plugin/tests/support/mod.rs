@@ -85,6 +85,28 @@ pub struct Clock;
 /// fetch (it arms its backstop timer by it).
 static CLOCK_READS: AtomicU32 = AtomicU32::new(0);
 
+static CLOCK_MONO: Mutex<Option<u64>> = Mutex::new(None);
+
+/// A fixed host monotonic reading for a test holding [`serial`]; restored even on panic.
+pub struct HeldClock;
+
+impl HeldClock {
+    pub fn at(mono_ns: u64) -> Self {
+        Self::set(mono_ns);
+        Self
+    }
+
+    pub fn set(mono_ns: u64) {
+        *CLOCK_MONO.lock().unwrap() = Some(mono_ns);
+    }
+}
+
+impl Drop for HeldClock {
+    fn drop(&mut self) {
+        *CLOCK_MONO.lock().unwrap() = None;
+    }
+}
+
 /// The host clock reads so far (every test that binds holds [`serial`], so they are its own).
 pub fn clock_reads() -> u32 {
     CLOCK_READS.load(Ordering::SeqCst)
@@ -97,7 +119,7 @@ impl busbar_contract::services::double::ServicesDouble for Clock {
             wall_ns: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_nanos() as u64),
-            mono_ns: now_ns(),
+            mono_ns: CLOCK_MONO.lock().unwrap().unwrap_or_else(now_ns),
         }
     }
 }
@@ -173,6 +195,8 @@ pub struct Idp {
     /// Reply body bytes handed to the plugin so far, over every request.
     served: AtomicU64,
     delay: Mutex<Duration>,
+    /// A test-controlled reply path and its wakes, released by `ReadHold` outside this lock.
+    read_hold: Mutex<Option<(String, Vec<(InstanceId, u64)>)>>,
     /// Every declared diagnostic the door's envelopes raised, as `name severity text`.
     diags: Mutex<Vec<String>>,
 }
@@ -212,6 +236,7 @@ impl Idp {
             pended: AtomicU32::new(0),
             served: AtomicU64::new(0),
             delay: Mutex::new(Duration::from_millis(5)),
+            read_hold: Mutex::new(None),
             diags: Mutex::new(Vec::new()),
         });
         let doc = serde_json::json!({
@@ -242,6 +267,22 @@ impl Idp {
     /// How long a reply's first read pends before the op's ticket is woken.
     pub fn pend_for(&self, delay: Duration) {
         *self.delay.lock().unwrap() = delay;
+    }
+
+    /// Hold this path's first reply read until the returned guard is dropped, including unwind.
+    pub fn hold_reads(&self, path: &str) -> ReadHold<'_> {
+        let mut held = self.read_hold.lock().unwrap();
+        assert!(held.is_none(), "only one controlled reply path at a time");
+        *held = Some((path.to_owned(), Vec::new()));
+        ReadHold(self)
+    }
+
+    pub fn read_is_held(&self) -> bool {
+        self.read_hold
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|(_, wakes)| !wakes.is_empty())
     }
 
     /// Every request, in order.
@@ -284,6 +325,21 @@ impl Idp {
         let mut d = self.declared.lock().unwrap().clone();
         d.sort();
         d
+    }
+}
+
+/// Releases controlled replies before a scoped caller is joined, even if an assertion panics.
+pub struct ReadHold<'a>(&'a Idp);
+
+impl Drop for ReadHold<'_> {
+    fn drop(&mut self) {
+        let held = self.0.read_hold.lock().unwrap().take();
+        if let Some((_, wakes)) = held {
+            let wake = self.0.wake.lock().unwrap().clone().expect("bound IdP");
+            for (caller, ticket) in wakes {
+                wake(caller, ticket);
+            }
+        }
     }
 }
 
@@ -361,6 +417,21 @@ impl Conns for Idp {
                 r.step = 1;
                 self.pended.fetch_add(1, Ordering::SeqCst);
                 self.woken.lock().unwrap().push((conn.0, ticket));
+                {
+                    let mut held = self.read_hold.lock().unwrap();
+                    if let Some((path, wakes)) = held.as_mut() {
+                        if self
+                            .sent
+                            .lock()
+                            .unwrap()
+                            .iter()
+                            .any(|s| s.conn == conn.0 && s.path == *path)
+                        {
+                            wakes.push((caller, ticket));
+                            return Err(ConnError::Pending);
+                        }
+                    }
+                }
                 let wake = self
                     .wake
                     .lock()
@@ -652,6 +723,16 @@ impl Bound {
         input: impl Fn(IdentityBuf) -> I,
         cap: (usize, u32),
     ) -> String {
+        self.identify_after_short(op, input, cap, || {})
+    }
+
+    fn identify_after_short<I: InFrame>(
+        &self,
+        op: u32,
+        input: impl Fn(IdentityBuf) -> I,
+        cap: (usize, u32),
+        after_short: impl FnOnce(),
+    ) -> String {
         let ticket = self.dispatcher.mint(0).expect("a ticket");
         let (mut bytes, mut groups) = (vec![0_u8; cap.0], vec![z::<Span>(); cap.1 as usize]);
         let buf = |bytes: &mut Vec<u8>, groups: &mut Vec<Span>| IdentityBuf {
@@ -673,6 +754,7 @@ impl Bound {
             short = format!("short(needed {}/{}) ", o.needed_bytes, o.needed_groups);
             bytes = vec![0_u8; o.needed_bytes as usize];
             groups = vec![z::<Span>(); o.needed_groups as usize];
+            after_short();
             done = self.submit(ticket, op, input(buf(&mut bytes, &mut groups)), fresh());
         }
         self.dispatcher.recycle(ticket);
@@ -744,7 +826,20 @@ impl Bound {
         verifier: &str,
         cap: Option<(usize, u32)>,
     ) -> String {
-        self.identify(
+        self.complete_after_short(code, (state, nonce), redirect, verifier, cap, || {})
+    }
+
+    /// Complete a login, changing host state only after the first actual short-buffer answer.
+    pub fn complete_after_short(
+        &self,
+        code: &str,
+        (state, nonce): (&str, &str),
+        redirect: &str,
+        verifier: &str,
+        cap: Option<(usize, u32)>,
+        after_short: impl FnOnce(),
+    ) -> String {
+        self.identify_after_short(
             slot::COMPLETE_LOGIN,
             |out_buf| {
                 let mut i: CompleteLoginIn = z();
@@ -758,6 +853,7 @@ impl Bound {
                 i
             },
             cap.unwrap_or((IDENTITY_BUF_BYTES, IDENTITY_GROUPS)),
+            after_short,
         )
     }
 }

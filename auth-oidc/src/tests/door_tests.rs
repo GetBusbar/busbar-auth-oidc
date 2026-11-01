@@ -104,6 +104,35 @@ fn refresh_drops_the_verdict_cache_and_reports_its_count() {
     assert_eq!(refreshed.counted, flushed(1.0));
 }
 
+#[test]
+fn a_refused_refresh_keeps_the_module_and_cached_verdict() {
+    let key = TestKey::generate("k1");
+    let idp = Idp::new(key.jwks());
+    let current = settings();
+    for (next, secret) in [
+        (b"{}".as_slice(), b"".as_slice()),
+        (current.as_slice(), b"\xff".as_slice()),
+    ] {
+        let oidc = Oidc::open(&settings(), &lent(b""), 1).expect("opens");
+        let before = oidc.now();
+        let token = key.mint(&base_claims(crate::now_unix()));
+        assert!(matches!(
+            verify(&oidc, &idp, &token),
+            AuthVerdict::Identify(_)
+        ));
+        assert!(oidc.refresh(next, &lent(secret), 2).is_err());
+        assert!(Arc::ptr_eq(&before, &oidc.now()));
+        assert_eq!(
+            oidc.refresh(&settings(), &lent(b""), 3).unwrap().counted,
+            Some(Counted {
+                family: CACHE_FAMILY,
+                value: 1.0
+            }),
+            "the refused refresh did not flush"
+        );
+    }
+}
+
 /// `validate` ANSWERS AS `open` DOES (Q128 auth-oidc LOW, reader r82 on 59293c0): a plain http
 /// `jwks_url` on a remote host is refused by both (plain http only for loopback, security item 3),
 /// and so is one that is not a URL at all.

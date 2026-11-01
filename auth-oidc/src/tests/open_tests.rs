@@ -6,6 +6,31 @@ use crate::OidcModule;
 use busbar_contract::auth::{BeginLogin, LoginOutcome};
 use std::time::{Duration, Instant};
 
+#[test]
+fn malformed_endpoint_settings_are_refused_without_echoing_values() {
+    for (field, value) in [
+        ("issuer", "https://idp.example/SecretIssuer?query=yes"),
+        ("issuer", "https://idp.example/SecretIssuer#fragment"),
+        (
+            "authorization_endpoint",
+            "https://idp.example/SecretAuthorize#fragment",
+        ),
+        (
+            "authorization_endpoint",
+            "https://idp.example/SecretAuthorize\r\nInjected: yes",
+        ),
+    ] {
+        let mut config = serde_json::json!({"issuer":"https://idp.example", "audience":"aud"});
+        config[field] = serde_json::json!(value);
+        let error = match crate::open::config(&config.to_string()) {
+            Err(error) => error,
+            Ok(_) => panic!("invalid endpoint accepted"),
+        };
+        assert!(error.contains(field));
+        assert!(!error.contains("Secret"));
+    }
+}
+
 /// The module `open` builds, its warning (checked by `door_tests`) set aside.
 fn module(cfg: &str) -> Result<OidcModule, String> {
     super::module(cfg).map(|(m, _)| m)
@@ -170,7 +195,10 @@ fn a_non_loopback_http_jwks_url_is_refused() {
         .to_string();
         let err = expect_err(module(&settings));
         assert!(err.contains("jwks_url"), "{url}: {err}");
-        assert!(err.contains(host), "{url}: names the host: {err}");
+        assert!(
+            !err.contains(host),
+            "{url}: a settings value is not echoed: {err}"
+        );
         assert!(err.contains("loopback"), "{url}: names the rule: {err}");
         assert!(
             !err.contains("/keys"),
@@ -192,11 +220,8 @@ fn discovery_runs_on_the_first_op_and_its_failure_fails_that_op() {
     let err = ready(m.jwks_url(now, &mut idp.at_once(Some(ME))))
         .expect_err("an unreachable issuer fails the op");
     assert!(
-        err.starts_with(
-            "OIDC discovery fetch failed (https://issuer.invalid.example/.well-known/openid-configuration): \
-             connection refused"
-        ) && err.ends_with("; set jwks_url explicitly"),
-        "1.5.5's discovery text: {err}"
+        err.contains("discovery fetch failed") && err.contains("connection refused"),
+        "{err}"
     );
     assert_eq!(idp.calls(), 1);
 

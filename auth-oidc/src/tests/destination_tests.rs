@@ -26,6 +26,40 @@ use busbar_contract::abi::host::conn::connector::{
 };
 use std::time::Instant;
 
+#[test]
+fn discovered_endpoints_refuse_controls_fragments_and_loopback_lookalikes() {
+    for field in ["jwks_uri", "token_endpoint", "authorization_endpoint"] {
+        for url in [
+            "http://127.0.0.1.evil.example/x",
+            "http://localhost.evil.example/x",
+            "http://127.0.0.1@evil.example/x",
+            "https://idp.example/x\r\nInjected: yes",
+        ] {
+            assert!(
+                crate::discovered_secure(field, field, url).is_err(),
+                "{field}: {url:?}"
+            );
+        }
+        for url in [
+            "http://localhost/x",
+            "http://[::1]/x",
+            "http://local.localhost/x",
+            "https://idp.example/x",
+        ] {
+            assert!(
+                crate::discovered_secure(field, field, url).is_ok(),
+                "{field}: {url}"
+            );
+        }
+    }
+    assert!(crate::discovered_secure(
+        "authorization_endpoint",
+        "authorization_endpoint",
+        "https://idp.example/authorize#fragment"
+    )
+    .is_err());
+}
+
 const ISSUER: &str = "https://login.example.com/tenant/v2.0";
 
 fn cfg() -> OidcConfig {
