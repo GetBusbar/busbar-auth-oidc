@@ -326,6 +326,10 @@ impl Idp {
         d.sort();
         d
     }
+
+    pub fn connection_is_open(&self, connection: u64) -> bool {
+        self.reads.lock().unwrap().contains_key(&connection)
+    }
 }
 
 /// Releases controlled replies before a scoped caller is joined, even if an assertion panics.

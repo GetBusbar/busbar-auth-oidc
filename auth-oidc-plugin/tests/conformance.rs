@@ -1660,3 +1660,103 @@ fn a_refused_idp_destination_raises_its_declared_diagnostic_once() {
     assert!(b.verify(Some(&token), None).starts_with("Failed"));
     assert_eq!(idp.diags().len(), 1, "raised once: {:?}", idp.diags());
 }
+
+/// L17: READY and tick keep connector state outside the generic parked operation. Cancelling
+/// one ticket or refreshing the instance must release its actual host connection immediately.
+#[test]
+fn ready_and_tick_release_held_connections_on_cancel_or_refresh() {
+    use busbar_contract::abi::mechanism::lifecycle::{
+        slot as life, CancelIn, CancelOut, ReadyIn, TickIn, TickOut,
+    };
+    let _one = support::serial();
+    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let lib = cdylib();
+    let stated = row().statement;
+    for arm in [
+        Arm::Linked,
+        Arm::Dropped {
+            lib: &lib,
+            stated: &stated,
+        },
+    ] {
+        for ready_slot in [true, false] {
+            for cancel in [true, false] {
+                let idp = Idp::new(&key);
+                let b = bind(&arm, &idp);
+                let mut cfg: serde_json::Value = serde_json::from_str(&config(AUDIENCE)).unwrap();
+                cfg["jwks_url"] = serde_json::json!(support::JWKS_URL);
+                open(&b.plugin, &cfg.to_string(), None).expect("opens");
+                let owner = b.dispatcher.inline_ticket().expect("owner ticket");
+                let unrelated = b.dispatcher.inline_ticket().expect("unrelated ticket");
+                let hold = idp.hold_reads("/keys");
+                let pending = if ready_slot {
+                    let mut input: ReadyIn = z();
+                    input.head = busbar_plugin_loader::dispatch::in_head();
+                    b.plugin
+                        .call_inline(
+                            owner.ticket(),
+                            false,
+                            life::READY,
+                            &mut Frame::new(input, out_head()),
+                        )
+                        .outcome
+                } else {
+                    let mut input: TickIn = z();
+                    input.head = busbar_plugin_loader::dispatch::in_head();
+                    input.now_ns = now_ns();
+                    let mut output: TickOut = z();
+                    output.head = out_head();
+                    b.plugin
+                        .call_inline(
+                            owner.ticket(),
+                            false,
+                            life::TICK,
+                            &mut Frame::new(input, output),
+                        )
+                        .outcome
+                };
+                assert_eq!(pending, Outcome::Pending);
+                assert!(idp.read_is_held());
+                let sent = idp.sent_to("/keys");
+                assert_eq!(sent.len(), 1);
+                let connection = sent[0].conn;
+                assert!(idp.connection_is_open(connection));
+                let cancel_ticket = |ticket| {
+                    let mut input: CancelIn = z();
+                    input.head = busbar_plugin_loader::dispatch::in_head();
+                    input.ticket = ticket;
+                    let mut output: CancelOut = z();
+                    output.head = out_head();
+                    let mut frame = Frame::new(input, output);
+                    let done = b.plugin.call(life::CANCEL, &mut frame);
+                    assert_eq!(done.outcome, Outcome::Ready);
+                    assert_eq!(
+                        frame.out.disposition,
+                        busbar_contract::abi::auth::CANCEL_ABANDONED
+                    );
+                };
+                cancel_ticket(unrelated.ticket());
+                assert!(
+                    idp.connection_is_open(connection),
+                    "another ticket cannot cancel this exchange"
+                );
+                if cancel {
+                    cancel_ticket(owner.ticket());
+                    cancel_ticket(owner.ticket());
+                } else {
+                    refresh_pending(&b, &replacement_config());
+                }
+                assert!(
+                    !idp.connection_is_open(connection),
+                    "the lifecycle transition closes the pending exchange"
+                );
+                assert_eq!(
+                    idp.sent_to("/keys").len(),
+                    1,
+                    "cleanup starts no new request"
+                );
+                drop(hold);
+            }
+        }
+    }
+}
