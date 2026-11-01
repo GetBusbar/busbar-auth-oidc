@@ -403,6 +403,8 @@ pub fn post_exchange(url: &url::Url, form: &FormBody) -> Result<Exchange, ConnFa
 pub struct IoState {
     issued: u32,
     current: Option<(String, Exchange)>,
+    /// The last response's provider retry hint, retained with the op across PENDING.
+    retry_after_secs: Option<u64>,
 }
 
 impl std::fmt::Debug for IoState {
@@ -476,6 +478,12 @@ impl<'h> HostIo<'h> {
         self.state.current.is_some()
     }
 
+    /// The provider's last retry hint. A new request clears it, so one endpoint's hint cannot
+    /// become the hint for a later endpoint that did not answer.
+    pub(crate) fn retry_after_secs(&self) -> Option<u64> {
+        self.state.retry_after_secs
+    }
+
     /// What to park across PENDING.
     pub fn into_state(self) -> IoState {
         self.state
@@ -489,6 +497,9 @@ impl<'h> HostIo<'h> {
         url: &str,
         request: impl FnOnce(&url::Url) -> Result<Exchange, ConnFailure>,
     ) -> Poll<Result<ExchangeResponse, String>> {
+        if self.state.current.is_none() {
+            self.state.retry_after_secs = None;
+        }
         let parsed = match url::Url::parse(url) {
             Ok(u) => u,
             Err(e) => return Poll::Ready(Err(failed(url, e))),
@@ -527,6 +538,19 @@ impl<'h> HostIo<'h> {
             }
             Poll::Ready(r) => {
                 self.state.issued = c.issued();
+                let fields = match &r {
+                    Ok(reply) => Some(reply.fields.as_slice()),
+                    Err(_) => ex.reply_fields(),
+                };
+                self.state.retry_after_secs = fields.and_then(|fields| {
+                    fields
+                        .iter()
+                        .filter(|(name, _)| name.eq_ignore_ascii_case(b"retry-after"))
+                        .find_map(|(_, value)| {
+                            let now = u64::try_from(self.wall_now()).unwrap_or(u64::MAX);
+                            busbar_contract::abi::auth::retry_after_secs(value, now)
+                        })
+                });
                 if let Err(ConnFailure::Refused(_)) = &r {
                     self.refusals.push(guard_refusal(url));
                 }

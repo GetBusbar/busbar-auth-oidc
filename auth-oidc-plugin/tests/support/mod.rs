@@ -173,7 +173,18 @@ struct Reply {
     step: u8,
     at: usize,
     status: u32,
+    fields: Vec<u8>,
     body: Vec<u8>,
+    timeout_body: bool,
+}
+
+/// A configured provider response, including the actual field block read through the connector.
+#[derive(Clone)]
+struct Response {
+    status: u32,
+    fields: Vec<u8>,
+    body: Vec<u8>,
+    timeout_body: bool,
 }
 
 /// THE IdP: every need framed; an open is the whole request (kept in `sent`), answered by its path
@@ -183,7 +194,7 @@ pub struct Idp {
     wake: Mutex<Option<Wake>>,
     /// `(connection, the waking ticket)` of every first read: which op made each request.
     woken: Mutex<Vec<(u64, u64)>>,
-    answers: Mutex<HashMap<String, (u32, Vec<u8>)>>,
+    answers: Mutex<HashMap<String, Response>>,
     sent: Mutex<Vec<Sent>>,
     declared: Mutex<Vec<String>>,
     /// The needs whose declaration the table refused, as the host's connector refuses them (a
@@ -260,10 +271,38 @@ impl Idp {
 
     /// A response whose bytes need not be UTF-8.
     pub fn answer_bytes(&self, path: &str, status: u32, body: &[u8]) {
+        self.answer_fields(path, status, body, &[]);
+    }
+
+    /// A provider reply with field lines, encoded with the framed transport's own field grammar.
+    pub fn answer_fields(&self, path: &str, status: u32, body: &[u8], fields: &[(&[u8], &[u8])]) {
+        use busbar_contract::abi::transport::fields::{LINE_END, SEPARATOR};
+        let mut encoded = Vec::new();
+        for (name, value) in fields {
+            encoded.extend_from_slice(name);
+            encoded.extend_from_slice(SEPARATOR);
+            encoded.extend_from_slice(value);
+            encoded.extend_from_slice(LINE_END);
+        }
+        self.answers.lock().unwrap().insert(
+            path.to_string(),
+            Response {
+                status,
+                fields: encoded,
+                body: body.to_vec(),
+                timeout_body: false,
+            },
+        );
+    }
+
+    /// Fail the next body read with the connector's timeout, after delivering the response head.
+    pub fn timeout_body(&self, path: &str) {
         self.answers
             .lock()
             .unwrap()
-            .insert(path.to_string(), (status, body.to_vec()));
+            .get_mut(path)
+            .expect("configured provider response")
+            .timeout_body = true;
     }
 
     /// How long a reply's first read pends before the op's ticket is woken.
@@ -388,20 +427,27 @@ impl Conns for Idp {
             path: path.clone(),
             body: String::from_utf8_lossy(&desc.body).into_owned(),
         });
-        let (status, body) = self
+        let response = self
             .answers
             .lock()
             .unwrap()
             .get(&path)
             .cloned()
-            .unwrap_or((404, b"{}".to_vec()));
+            .unwrap_or(Response {
+                status: 404,
+                fields: Vec::new(),
+                body: b"{}".to_vec(),
+                timeout_body: false,
+            });
         self.reads.lock().unwrap().insert(
             id,
             Reply {
                 step: 0,
                 at: 0,
-                status,
-                body,
+                status: response.status,
+                fields: response.fields,
+                body: response.body,
+                timeout_body: response.timeout_body,
             },
         );
         Ok(ConnId(id))
@@ -472,13 +518,16 @@ impl Conns for Idp {
             1 => {
                 r.step = 2;
                 let reason = b"X";
-                buf[..reason.len()].copy_from_slice(reason);
+                let fields_len = r.fields.len();
+                buf[..fields_len].copy_from_slice(&r.fields);
+                buf[fields_len..fields_len + reason.len()].copy_from_slice(reason);
                 Ok(Piece {
                     status_code: Some(r.status),
-                    reason: Some(0..reason.len()),
-                    ..piece(PieceKind::Fields, 0)
+                    reason: Some(fields_len..fields_len + reason.len()),
+                    ..piece(PieceKind::Fields, fields_len)
                 })
             }
+            _ if r.timeout_body => Err(ConnError::Timeout),
             _ if r.at < r.body.len() => {
                 let n = (r.body.len() - r.at).min(buf.len());
                 buf[..n].copy_from_slice(&r.body[r.at..r.at + n]);

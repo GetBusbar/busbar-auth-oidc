@@ -42,8 +42,8 @@ use busbar_contract::abi::auth::{
     IdentifyOut, IdentityBuf, OpenOutboundIn, OpenOutboundOut, OutboundReadyIn, OutboundReadyOut,
     StripName, VerifyIn, BEGIN_AUTHORIZE, CANCEL_ABANDONED, CAP_INBOUND, CAP_LOGIN,
     DECISION_CONTINUE, DECISION_STOP, FACT_CACHEABLE, IDENTITY_HAS_TTL, LOGIN_BAD_CREDENTIAL,
-    LOGIN_KIND_REDIRECT, LOGIN_OUTAGE, LOGIN_SECURITY_CHECK_FAILED, METRIC_CACHE_FLUSHED,
-    SPAN_ABSENT, STRIP_FIELD, VERDICT_IDENTITY, VERDICT_PASS, VERDICT_REJECT,
+    LOGIN_KIND_REDIRECT, LOGIN_SECURITY_CHECK_FAILED, METRIC_CACHE_FLUSHED, SPAN_ABSENT,
+    STRIP_FIELD, VERDICT_IDENTITY, VERDICT_PASS, VERDICT_REJECT,
 };
 use busbar_contract::abi::mechanism::call::{
     AbiStr, Blob, OutHead, Outcome, Span, BLOB_ABSENT, BLOB_OCTETS, SEVERITY_ERROR, SEVERITY_WARN,
@@ -55,7 +55,7 @@ use busbar_contract::abi::mechanism::extensions::{self, EXT_DECLARES};
 use busbar_contract::abi::mechanism::lifecycle::{DriveIn, ReadyIn, TickIn, TickOut};
 use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::sdk::auth_door::{carrier, verify_tail, with_tail};
-use busbar_contract::abi::sdk::auth_kit::login_identity;
+use busbar_contract::abi::sdk::auth_kit::{login_identity, login_outage};
 use busbar_contract::abi::sdk::conn::{ConnFailure, Host};
 use busbar_contract::abi::sdk::cred::{self, Cred};
 use busbar_contract::abi::sdk::door::{abi_str, alias, statement, AbiIn, AbiOut};
@@ -261,12 +261,12 @@ impl Opened {
             )) {
                 Ok(Some(request)) => request,
                 Ok(None) => return Step::Ready(Login::Bad),
-                Err(e) => return Step::Ready(Login::Outage(e)),
+                Err(e) => return Step::Ready(Login::Outage(e, io.retry_after_secs())),
             };
             match io.post(&request.url, &request.form) {
                 Poll::Pending => return Step::Pending,
                 Poll::Ready(Ok(r)) => *answer = Some(r),
-                Poll::Ready(Err(e)) => return Step::Ready(Login::Outage(e)),
+                Poll::Ready(Err(e)) => return Step::Ready(Login::Outage(e, io.retry_after_secs())),
             }
         }
         let Some(response) = answer.as_ref() else {
@@ -291,10 +291,10 @@ impl Opened {
                     LoginOutcome::Authorize(_)
                     | LoginOutcome::Prompt(_)
                     | LoginOutcome::Exchange(_)
-                    | LoginOutcome::Outage
+                    | LoginOutcome::Outage { .. }
                     | LoginOutcome::SecurityCheckFailed,
                 ) => Login::Bad,
-                Err(e) => Login::Outage(e),
+                Err(e) => Login::Outage(e, io.retry_after_secs()),
             },
         )
     }
@@ -304,7 +304,7 @@ impl Opened {
 enum Login {
     Identity(Principal),
     Bad,
-    Outage(String),
+    Outage(String, Option<u64>),
     /// The IdP's identity token does not carry the login's nonce.
     SecurityCheck,
 }
@@ -970,10 +970,13 @@ impl SafeSlot for Complete {
                         out.set(|o| &o.verdict, LOGIN_BAD_CREDENTIAL);
                         return Outcome::Ready;
                     }
-                    Step::Ready(Login::Outage(e)) => {
+                    Step::Ready(Login::Outage(e, retry_after_secs)) => {
                         tracing::warn!(module = "oidc", error = %e, "OIDC token exchange failed");
-                        out.set(|o| &o.verdict, LOGIN_OUTAGE);
-                        return Outcome::Ready;
+                        return login_outage(
+                            retry_after_secs,
+                            input.field(|i| &i.out_buf),
+                            &mut out,
+                        );
                     }
                     Step::Ready(Login::SecurityCheck) => {
                         out.set(|o| &o.verdict, LOGIN_SECURITY_CHECK_FAILED);

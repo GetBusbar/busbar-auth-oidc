@@ -64,7 +64,11 @@ spawned as a separate process. A build can also link the same door in.
   failure, or the host clock is unreadable) a bearer verify FAILS with the
   reason and a browser login answers the outage; at the token endpoint only
   an RFC 6749 §5.2 credential error (a 400/401 carrying `error`) declines a
-  login, any other non-2xx is an outage.
+  login, any other non-2xx is an outage. A readable provider `Retry-After`
+  accompanies a login outage through the host's identity buffer. The host
+  applies its existing delay bounds; a missing or invalid hint, or a buffer
+  too small for its metadata, keeps the host's default delay without
+  retrying the token exchange.
 
 ### Versioning
 

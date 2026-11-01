@@ -34,6 +34,9 @@
 
 mod support;
 
+#[path = "support/retry_after.rs"]
+mod retry_after;
+
 // BUSBAR'S PUBLISHED CONFORMANCE SUITE (plugin-ci's conformance step): the linked door and this
 // crate's cdylib through the one loader, driven by the auth kind's script (verify, the login
 // family, the far ends the module's needs reach: `conformance.json`), exact crossings, both folds
