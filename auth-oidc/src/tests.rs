@@ -2710,4 +2710,4 @@ fn an_unreadable_idp_document_is_refused_without_echoing_it() {
 }
 
 #[path = "tests/diagnostics.rs"]
-mod diagnostics;
+pub(crate) mod diagnostics;
