@@ -18,6 +18,9 @@ const CALLBACK_STATE: &str = "retry-metadata-state";
 const PKCE_VERIFIER: &[u8] = b"retry-metadata-verifier";
 const EMPTY_RESPONSE: &[u8] = b"{}";
 
+type RetryHint = Option<&'static [u8]>;
+type RetryHintCase = (RetryHint, RetryHint);
+
 fn octets(bytes: &[u8]) -> Blob {
     Blob {
         ptr: bytes.as_ptr(),
@@ -85,7 +88,7 @@ fn provider_retry_headers_reach_outages_through_both_doors_after_pending() {
             stated: &stated,
         },
     ] {
-        let hints: &[(Option<&[u8]>, Option<&[u8]>)] = &[
+        let hints: &[RetryHintCase] = &[
             (None, None),
             (Some(RETRY_DELAY), Some(RETRY_DELAY)),
             (Some(b" 120\t"), Some(RETRY_DELAY)),
