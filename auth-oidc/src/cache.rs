@@ -24,7 +24,7 @@ enum Point {
 /// IdP outage: a fetch that failed, the rate limit holding off the retry after one, a set past its
 /// staleness ceiling, a rotation refetch that failed), or it was had and no key in it verifies the
 /// token (a bad signature, an alg/key mismatch, a kid absent from the set the IdP last answered).
-/// OWNER-SIGNED 2026-10-30: an IdP outage is never a 401, so the two are answered apart.
+/// An IdP outage is never a 401, so the two are answered apart.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeyError {
     /// The key set cannot be had: an outage, never the token's fault.

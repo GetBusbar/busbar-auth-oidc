@@ -1080,7 +1080,7 @@ impl SafeSlot for Ready {
     }
 }
 
-/// `tick` (THE DESIGN, auth: "`tick` refreshes ahead of the TTL, with 1.5.5's timings"): on the
+/// `tick` refreshes ahead of the TTL with 1.5.5's timings: on the
 /// instance's driver ticket, the key set fetched again once it is within one tick period of its
 /// TTL ([`OidcModule::refresh_ahead`]); PENDING while that fetch is in flight, carried on by
 /// [`Drive`]. Asks for the next tick one period on (`jwks_min_refetch_secs`, 1.5.5's 60 s). A tick
