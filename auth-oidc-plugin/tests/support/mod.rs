@@ -112,7 +112,7 @@ pub fn clock_reads() -> u32 {
     CLOCK_READS.load(Ordering::SeqCst)
 }
 
-impl busbar_contract::services::double::ServicesDouble for Clock {
+impl busbar_test_kit::services_double::ServicesDouble for Clock {
     fn now(&self) -> Reading {
         CLOCK_READS.fetch_add(1, Ordering::SeqCst);
         Reading {
@@ -646,7 +646,7 @@ pub fn bind_as<K: busbar_plugin_loader::dispatch::Kind>(
             workers: 2,
             ..Default::default()
         },
-        Arc::new(Clock),
+        Arc::new(busbar_test_kit::services_double::Double(Clock)),
     ));
     *idp.wake.lock().unwrap() = Some(dispatcher.conn_waker());
     let conns: Arc<dyn DeclaredConns> = idp.clone();
