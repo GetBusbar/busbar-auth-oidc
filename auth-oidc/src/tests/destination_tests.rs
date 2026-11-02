@@ -58,8 +58,6 @@ fn doc(field: &str, url: &str) -> String {
     serde_json::json!({ "issuer": ISSUER, field: url }).to_string()
 }
 
-/// RED (lead decision on item 3: the issuer-host tie was wrong): a GOOGLE-STYLE discovery
-
 #[test]
 fn a_google_style_discovery_on_public_hosts_loads() {
     let issuer = "https://accounts.google.com";

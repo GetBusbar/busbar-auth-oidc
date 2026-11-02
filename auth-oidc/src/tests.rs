@@ -1602,8 +1602,6 @@ fn identity_from_token_response_verifies_id_token() {
     .is_err());
 }
 
-/// O1 (OWNER-SIGNED 2026-10-30: an IdP outage is never a 401): A KEY SET THAT CANNOT BE HAD AT
-
 #[test]
 fn a_key_set_that_cannot_be_had_at_login_is_an_outage_not_a_decline() {
     let key = TestKey::generate(KID);
@@ -1640,8 +1638,6 @@ fn a_key_set_that_cannot_be_had_at_login_is_an_outage_not_a_decline() {
         );
     }
 }
-
-/// O1 (OWNER-SIGNED 2026-10-30): on the BEARER path a key set that cannot be had is an outage —
 
 #[test]
 fn a_key_set_that_cannot_be_had_fails_a_bearer_verify_and_a_mismatch_rejects_it() {
@@ -1960,8 +1956,6 @@ fn an_idp_5xx_or_429_at_the_token_endpoint_is_an_outage_not_a_decline() {
     }
     assert!(matches!(answered(400), Ok(LoginOutcome::Reject)));
 }
-
-/// O4 (OWNER-SIGNED 2026-10-30: only RFC 6749 §5.2 credential errors answer 401): a 400 or 401
 
 #[test]
 fn only_an_rfc_6749_credential_error_at_the_token_endpoint_is_a_decline() {
