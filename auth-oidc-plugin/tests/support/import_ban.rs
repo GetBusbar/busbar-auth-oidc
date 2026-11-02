@@ -2,13 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! THE IMPORT BAN, held by the built image itself (THE DESIGN 5, Connections: "No plugin opens a
-//! socket, dials, binds or does TLS"; the fleet policy's `[net-ban].imports` in GetBusbar/busbar
-//! `.github/fleet/deps.toml`). The dependency ban (`net_ban.rs`) reads the closure; this reads what
-//! the linker kept: the cdylib's UNDEFINED symbols, as `nm` lists them, must name no socket, resolver
-//! or TLS entry point. Every connection goes through the host's connector, over the declared needs.
-//!
-//! The image is the one this test target was built against (the cdylib beside the test binary).
-//! Without `nm` on the PATH the scan cannot run: it says so on stderr, loudly, and passes only then.
 
 use std::process::Command;
 
@@ -34,7 +27,7 @@ const BANNED_IMPORTS: &[&str] = &[
 ];
 
 /// Every banned import in `listing`, `nm`'s undefined-symbol output: one symbol per line, its last
-/// word the name, a leading `_` (Mach-O) and a trailing `@VERSION` (ELF) dropped.
+
 fn banned_imports(listing: &str) -> Vec<String> {
     let mut found: Vec<String> = listing
         .lines()
@@ -81,7 +74,6 @@ fn the_built_image_imports_no_socket_resolver_or_tls_entry_point() {
     let lib = crate::support::cdylib_path().expect("the busbar-auth-oidc-plugin cdylib is built");
     let Some(listing) = undefined_symbols(&lib) else {
         if std::env::var_os("CI").is_some() {
-            // Same rule as `plugin_path`: under CI the import ban must never silently go unchecked.
             panic!(
                 "`nm` is not on the PATH under CI, so the import ban was NOT checked on {}: install \
                  binutils/Xcode tools so this coverage never silently vanishes",
@@ -108,7 +100,7 @@ fn the_built_image_imports_no_socket_resolver_or_tls_entry_point() {
 }
 
 /// RED: a listing that imports socket, resolver and TLS entry points (ELF and Mach-O spellings) is
-/// named symbol by symbol; an allowed listing is not.
+
 #[test]
 fn red_the_import_ban_names_a_socket_resolver_or_tls_import() {
     let prefix = if cfg!(target_os = "macos") { "_" } else { "" };

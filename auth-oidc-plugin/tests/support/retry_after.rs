@@ -221,8 +221,7 @@ fn retry_metadata_follows_the_outage_class_and_the_endpoint_that_failed() {
             );
             assert_eq!(idp.sent_to(TOKEN_PATH).len(), 1);
         }
-        // The successful token response's hint must survive no later failure. The JWKS
-        // response contributes its own hint, or none, across its own PENDING/resume.
+
         const KEYS_RETRY_DELAY: &[u8] = b"240";
         for keys_hint in [None, Some(KEYS_RETRY_DELAY)] {
             let idp = Idp::new(&key);

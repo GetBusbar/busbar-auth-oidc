@@ -69,7 +69,7 @@ fn a_document_over_one_mebibyte_is_refused() {
 }
 
 /// A non-2xx answer names its status as 1.5.5's client printed it: the code and its canonical
-/// reason; an unknown code is named as reqwest named one.
+
 #[test]
 fn a_non_2xx_answer_names_its_status_as_1_5_5_did() {
     assert_eq!(
@@ -119,7 +119,7 @@ fn the_token_exchange_is_a_url_encoded_form_post_to_the_endpoint_path() {
     let ex = post_exchange(&url, &form()).expect("frames");
     let head = busbar_contract::abi::sdk::test_support::chip::framed_head(&ex);
     assert!(head.starts_with(b"POST/token?p=b2c"), "{head:?}");
-    // 1.5.5's wire order: the form's content-type, then the client's accept.
+
     assert_eq!(
         ex.framed_fields(),
         vec![
@@ -148,7 +148,7 @@ fn a_document_get_names_the_path_and_query() {
 }
 
 /// HTTPS-ONLY, as 1.5.5's client was: a plaintext URL is refused before anything is asked of the
-/// host; an https one with no connector says so after 1.5.5's prefix.
+
 #[test]
 fn every_request_is_https_only_and_needs_the_host_connector() {
     let mut io = HostIo::new(None, Ticket::NONE, IoState::default(), false);
@@ -173,13 +173,7 @@ fn every_request_is_https_only_and_needs_the_host_connector() {
 }
 
 /// THE NEEDS: three outbound needs — discovery and the JWKS in the `open-web` class (https only, a
-/// private address refused unless allowlisted, the issuer pin kept), the token exchange in the
-/// connector's default class named per request (a private address refused unless allowlisted,
-/// never lifted to operator infrastructure: security item 3) — stated twice: the ANCHORED set trusting an extra root on top of the public
-/// ones, the PUBLIC set the public roots only (`ca_cert_pem` is optional, and the host refuses a
-/// need whose `trust_from` names nothing); discovery pinned to a setting, the JWKS and the token
-/// endpoint named per request. (Their words are read back from the door's rendered Statement in
-/// the plugin crate's conformance test.)
+
 #[test]
 fn the_needs_are_outbound_in_their_class_anchored_then_public() {
     assert_eq!(NEEDS.len(), 2 * PUBLIC as usize);
@@ -215,7 +209,7 @@ fn the_needs_are_outbound_in_their_class_anchored_then_public() {
 }
 
 /// Whether the plugin hands this token endpoint to its host connector after its own scheme check.
-/// The host destination policy is exercised by the loaded-door conformance tests.
+
 fn token_admitted(url: &str) -> bool {
     let mut io = HostIo::new(None, Ticket::NONE, IoState::default(), false);
     match io.post(url, &form()).map(|r| r.map(|_| ())) {
@@ -251,8 +245,7 @@ fn http_to_a_private_idp_token_endpoint_is_admitted() {
 }
 
 /// HTTP TO A PUBLIC HOST IS REFUSED (1.5.5 `vet_hop_url`: "public host must be https"), by the
-/// module itself, before the host is asked: the operator-infrastructure class would dial it, so the
-/// module is what holds it.
+
 #[test]
 fn http_to_a_public_token_endpoint_is_refused_before_the_host_is_asked() {
     let mut io = HostIo::new(None, Ticket::NONE, IoState::default(), false);
@@ -261,7 +254,6 @@ fn http_to_a_public_token_endpoint_is_refused_before_the_host_is_asked() {
         "http://login.microsoftonline.com/tenant/oauth2/v2.0/token",
         "http://93.184.216.34/token",
         "http://[2001:db8::1]/token",
-        // A private-looking NAME is no private host: 1.5.5 judged the URL's host as written.
         "http://idp.corp.internal/token",
     ] {
         assert_eq!(
@@ -286,7 +278,7 @@ fn https_to_a_public_token_endpoint_is_admitted() {
 }
 
 /// DISCOVERY AND THE JWKS STAY HTTPS ONLY, to a private host as to a public one (1.5.5's fetcher
-/// was `https_only`): the class allows plaintext, the module does not ask for it.
+
 #[test]
 fn documents_stay_https_only_whatever_the_host() {
     let mut io = HostIo::new(None, Ticket::NONE, IoState::default(), false);
@@ -314,8 +306,7 @@ fn documents_stay_https_only_whatever_the_host() {
 fn wipes<T: zeroize::ZeroizeOnDrop>(_: &T) {}
 
 /// THE TOKEN REQUEST'S CREDENTIAL COPIES ARE WIPED (bank grade): the form the token exchange
-/// builds (the code, the code_verifier, the sealed client secret) wipes itself on drop. A
-/// type-level check.
+
 #[test]
 fn the_token_request_copies_wipe_on_drop() {
     let cfg: crate::OidcConfig = serde_json::from_str(
@@ -338,7 +329,7 @@ fn the_token_request_copies_wipe_on_drop() {
 }
 
 /// The SDK's form encoder writes byte for byte what the `url` crate's form serializer (the
-/// encoder 1.5.5 used) wrote, so the wire does not change.
+
 #[test]
 fn the_form_body_matches_the_url_form_serializer() {
     let cases: Vec<Vec<(&str, &str)>> = vec![
@@ -438,7 +429,7 @@ fn displayed_urls_preserve_normal_text_and_scrub_before_escaping_controls() {
         shown("https://idp.example/keys\r\n\t\x1b\u{85}"),
         r"https://idp.example/keys\r\n\t\u{1b}\u{85}"
     );
-    // A malformed host exercises the existing fallback redaction, before display escaping.
+
     assert_eq!(
         shown("https://user:OidcFallbackPass@bad host/path\r\n\x1b"),
         r"https://bad host/path\r\n\u{1b}"

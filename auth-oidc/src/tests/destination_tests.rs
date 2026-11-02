@@ -2,20 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! WHERE THE MODULE MAY GO (security.md "The destination guard": "a provider upstream or identity
-//! provider ... is refused when it is, or resolves to, a private ... address, unless
-//! `allow_destinations` names it"; OIDC Discovery 1.0 §3/§4.3; RFC 9700 §4).
-//!
-//! * A DISCOVERED `jwks_uri` or `token_endpoint` may be on ANY host (OIDC Discovery ties the
-//!   document's `issuer`, not its endpoints: Google serves its keys from `www.googleapis.com` and
-//!   its token endpoint from `oauth2.googleapis.com`). It must be https (plain http only to a
-//!   loopback host), else it is refused before a request is made, naming its host and the rule.
-//! * WHERE it may go is the destination guard's: every need the module dials on is judged in a
-//!   class the guard refuses a private, loopback or link-local address in unless
-//!   `advanced.allow_destinations` names it, and never in the operator-infrastructure class (which
-//!   admits them with no entry). Cloud metadata is refused in every such class. So a discovered
-//!   endpoint off the issuer's host on a private address is refused, by the guard.
-//! * Every refusal (the module's own, and the guard's) is reported once, as the declared
-//!   diagnostic the host audits, naming the host and the rule and never the URL's path or query.
 
 use crate::door::{DIAG_DESTINATION_REFUSED, DIAG_NAMES, STATEMENT};
 use crate::fetch::guard_refusal;
@@ -73,9 +59,7 @@ fn doc(field: &str, url: &str) -> String {
 }
 
 /// RED (lead decision on item 3: the issuer-host tie was wrong): a GOOGLE-STYLE discovery
-/// document, whose key set and token endpoint are on public hosts other than the issuer's, LOADS:
-/// both endpoints resolve as the document names them, and nothing is refused. Before: both were
-/// refused as off the issuer's host.
+
 #[test]
 fn a_google_style_discovery_on_public_hosts_loads() {
     let issuer = "https://accounts.google.com";
@@ -103,8 +87,7 @@ fn a_google_style_discovery_on_public_hosts_loads() {
 }
 
 /// The module passes a discovered HTTPS key URL to the host unchanged, including off-host
-/// private addresses. A guard refusal names its host and rule without repeating the path.
-/// Connector address enforcement is covered in core; loaded-door Need classes are in conformance.
+
 #[test]
 fn a_discovered_jwks_uri_reaches_the_guard_with_a_path_free_refusal() {
     for jwks_uri in [
@@ -115,7 +98,7 @@ fn a_discovered_jwks_uri_reaches_the_guard_with_a_path_free_refusal() {
     ] {
         let idp = Idp::new(doc("jwks_uri", jwks_uri));
         let m = OidcModule::new(&cfg());
-        // Handed to the JWKS need as written: the guard, not the module, judges the address.
+
         assert_eq!(
             ready(m.jwks_url(Instant::now(), &mut idp.at_once(Some(ME)))).as_deref(),
             Ok(jwks_uri)
@@ -136,7 +119,7 @@ fn a_discovered_jwks_uri_reaches_the_guard_with_a_path_free_refusal() {
 }
 
 /// Discovered token endpoints retain their module scheme check and host-guard refusal text.
-/// HTTPS off-host endpoints pass through; plaintext off loopback fails before the host is asked.
+
 #[test]
 fn a_discovered_token_endpoint_preserves_host_guard_and_scheme_boundaries() {
     let why = guard_refusal("https://192.168.1.10/token");
@@ -192,10 +175,7 @@ fn a_discovered_token_endpoint_preserves_host_guard_and_scheme_boundaries() {
 }
 
 /// A refused IdP fetch is AUDITED. The Statement declares `BUSBAR-4031` (a
-/// declared diagnostic the host audits on the plugin's behalf), the module's refusal reaches the
-/// op's request seam (`Fetch::refused`, which the door raises as that diagnostic) naming the host
-/// and the rule and never the URL's path, and it is reported ONCE per module (a refusal every request
-/// meets is not a flood). The guard's refusal is worded the same way ([`guard_refusal`]).
+
 #[test]
 fn a_refused_idp_fetch_is_audited() {
     assert_eq!(STATEMENT.diag_ids_len(), DIAG_NAMES.len());
@@ -231,10 +211,7 @@ fn a_refused_idp_fetch_is_audited() {
 }
 
 /// L7: a DISCOVERED `authorization_endpoint` is held to the same scheme rule as a discovered
-/// `jwks_uri` or `token_endpoint` (https, plain http only to a loopback host): the browser is never
-/// sent to a plaintext authorize URL a discovery document names on a public host. It is refused,
-/// naming its host and the rule, and the refusal is reported for the door to audit; https and
-/// loopback http are taken.
+
 #[test]
 fn a_discovered_plain_http_authorization_endpoint_is_refused() {
     let idp = Idp::new(doc(

@@ -2,25 +2,11 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! End-to-end coverage of the `busbar-auth-oidc-plugin` cdylib DROPPED IN through the real loader's
-//! door validation and dispatcher (`load_dropped`), the auth kind's memory ABI: a real ES256-signed
-//! JWT verified across the door against the JWKS the plugin fetched through the host's connection
-//! table (`support::Idp`, the IdP as the host's connector hands it the request), a genuine
-//! signature verification and claim-to-identity mapping.
-//!
-//! The admin-API install test drives a real `busbar` binary built from `BUSBAR_CHECKOUT`, whose
-//! connector dials the tests' local issuer (`support/issuer.rs`) (a real self-signed cert, a real `rustls`
-//! listener — a test server, never the plugin's).
 
 use busbar_plugin_loader::plugin_library_filename;
 
 /// Locate the built `busbar_auth_oidc_plugin` cdylib in the target dir (mirrors the loader's own
-/// `auth_oidc_plugin_path` test helper). Under CI, a missing cdylib is a hard failure — this is the
-/// only over-the-ABI coverage of the `kind: auth` dlopen seam and must never silently skip there.
-/// Checks BOTH the "uplifted" `<profile_dir>/<name>` copy (only refreshed when `[lib]` is a ROOT
-/// build target, e.g. `cargo build --all-targets`) and the raw `<profile_dir>/deps/<name>` compiler
-/// output (refreshed on every build that recompiles the lib). A bare `cargo test --release` does
-/// NOT uplift the cdylib to the top-level profile dir, only to `target/deps`, so checking only
-/// `profile_dir` silently finds nothing even though the cdylib really was built.
+
 fn plugin_path() -> Option<std::path::PathBuf> {
     let candidate = (|| {
         let exe = std::env::current_exe().ok()?;
@@ -53,9 +39,7 @@ mod support;
 use support::{Arm, Idp, Issuer, UNUSED_ISSUER};
 
 /// End-to-end SUCCESS: dlopen the real auth-oidc-plugin cdylib, `open` it against a config naming
-/// the IdP's JWKS explicitly (so no discovery), then `verify` a real ES256-signed JWT across the
-/// door: the JWKS is fetched through the host's connection table on the JWKS need, and the identity
-/// + mapped groups come back.
+
 #[test]
 fn load_and_exercise_auth_oidc_plugin_success() {
     let _one = support::serial();
@@ -94,8 +78,6 @@ fn load_and_exercise_auth_oidc_plugin_success() {
     });
     let token = key.sign(&claims);
 
-    // No `oid` claim in this fixture, so the IMMUTABLE `sub` is the identity of record —
-    // `preferred_username` is display-only, never identity.
     let identified = module.verify(Some(&token), None);
     assert!(
         identified.starts_with(
@@ -115,7 +97,7 @@ fn load_and_exercise_auth_oidc_plugin_success() {
         ),
         Vec::<String>::new()
     );
-    // No `ca_cert_pem` in this config: the JWKS rides the public-roots JWKS need.
+
     assert_eq!(
         (sent[0].need, sent[0].target.as_str(), sent[0].path.as_str()),
         (
@@ -125,7 +107,6 @@ fn load_and_exercise_auth_oidc_plugin_success() {
         )
     );
 
-    // A token signed by a DIFFERENT key (same kid) must fail closed across the door too.
     let forged_token = Issuer::start(UNUSED_ISSUER, "test-kid-1").sign(&claims);
     assert_eq!(
         module.verify(Some(&forged_token), None),
@@ -135,9 +116,7 @@ fn load_and_exercise_auth_oidc_plugin_success() {
 }
 
 /// The busbar checkout the live e2e builds the REAL `busbar` and `busbar-plugin-pack` binaries from:
-/// `BUSBAR_CHECKOUT`, a checkout of GetBusbar/busbar at `.busbar-ref` field 1 (this repo's CI `e2e` job
-/// checks it out and sets the variable). This repo builds against busbar by git rev, not a sibling
-/// path, so the binaries' source is named explicitly. Unset ⇒ the live leg cannot run, and says so.
+
 fn busbar_root() -> std::path::PathBuf {
     let dir = std::env::var_os("BUSBAR_CHECKOUT").expect(
         "BUSBAR_CHECKOUT is unset: the live e2e builds the real busbar binaries from a checkout of \
@@ -149,16 +128,11 @@ fn busbar_root() -> std::path::PathBuf {
 }
 
 /// Build (once, cached by cargo) and return the real `busbar` and `busbar-plugin-pack` binaries from
-/// the sibling busbar checkout — never a fixture, the exact binaries a real release ships.
+
 fn build_real_binaries() -> (std::path::PathBuf, std::path::PathBuf) {
     let root = busbar_root();
-    // Two invocations: in busbar 1.6.0 `busbar-plugin-pack` is a feature-gated bin of the
-    // `busbar-plugin-loader` package (`--features pack`), not a package of its own, and building it
-    // separately keeps the `pack` feature out of the `busbar` build.
+
     for args in [
-        // `test-harness`: the child takes its first-party key from the harness seam
-        // (BUSBAR_TEST_HARNESS_FIRST_PARTY_KEY), so it admits the first-party-signed plugin below:
-        // the OIDC module's needs are in an egress class the host grants a first-party plugin only.
         &[
             "build",
             "--release",
@@ -185,9 +159,6 @@ fn build_real_binaries() -> (std::path::PathBuf, std::path::PathBuf) {
         let status = std::process::Command::new("cargo")
             .args(args)
             .current_dir(&root)
-            // The binaries are read back from `<sibling>/target/release` below, so the build must
-            // land there: an inherited CARGO_TARGET_DIR (set for the outer `cargo test`) would
-            // redirect it into the plugin's own target dir.
             .env_remove("CARGO_TARGET_DIR")
             .status()
             .expect("run cargo build for busbar / busbar-plugin-pack");
@@ -203,8 +174,7 @@ fn build_real_binaries() -> (std::path::PathBuf, std::path::PathBuf) {
 }
 
 /// A fresh first-party test keypair from the real `busbar-plugin-pack keygen`: (private seed hex,
-/// public key hex). The private half signs the tarball, the public half is what the child busbar
-/// is told is the first-party key.
+
 fn first_party_keypair(pack_bin: &std::path::Path) -> (String, String) {
     let out = std::process::Command::new(pack_bin)
         .arg("keygen")
@@ -223,7 +193,7 @@ fn first_party_keypair(pack_bin: &std::path::Path) -> (String, String) {
 }
 
 /// Pack the built auth-oidc-plugin cdylib into a real tarball via the real `busbar-plugin-pack`
-/// tool, SIGNED first-party (publisher `busbar`) with `sign_key`.
+
 fn pack_oidc_tarball(
     pack_bin: &std::path::Path,
     sign_key: &str,
@@ -242,8 +212,6 @@ fn pack_oidc_tarball(
             "--kind",
             "auth",
             "--version",
-            // The release version is the plugin's own, the one its Statement states (the pack tool
-            // refuses any other).
             env!("CARGO_PKG_VERSION"),
             "--publisher",
             "busbar",
@@ -262,7 +230,7 @@ fn pack_oidc_tarball(
 }
 
 /// An ephemeral local TCP port (bind :0, read back the OS-assigned port, drop the listener before the
-/// real caller binds it — same tiny TOCTOU store-sqlite's own e2e test accepts, fine for a test).
+
 fn free_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0")
         .unwrap()
@@ -272,7 +240,7 @@ fn free_port() -> u16 {
 }
 
 /// A spawned busbar, killed and reaped when it drops: a failing assertion between its spawn and
-/// its planned stop never leaves it holding its ports.
+
 struct KillOnDrop(std::process::Child);
 
 impl Drop for KillOnDrop {
@@ -318,18 +286,7 @@ fn wait_for_admin_ready(
 }
 
 /// The full install-path proof: not a direct ABI `load_auth_from_bytes` call (the tests above
-/// already cover that seam) and not a
-/// file-drop — an operator installing a NEW auth plugin onto a LIVE gateway does it over the real
-/// Admin API (`POST /api/v1/admin/plugins`), then the auth chain picks it up on the next boot (auth
-/// modules are, like store, restart-to-apply — a fresh process is the real mechanism, not an invented
-/// shortcut). This test: boots a real busbar with the admin listener up, installs the built
-/// auth-oidc-plugin cdylib over that live HTTP API, restarts onto `auth.chain: [oidc]` pointing at a
-/// REAL local HTTPS JWKS fixture (the same `support::Issuer` the direct-ABI test
-/// above uses — a real self-signed TLS cert, a real ES256 keypair), then drives a REAL data-plane
-/// HTTP request carrying a REAL signed bearer JWT through the live process and confirms it is
-/// authenticated (not 401) — and that a token from the WRONG key is rejected (401), proving the full
-/// real-world path: real admin API install -> real boot pickup -> real JWKS fetch -> real signature
-/// verification -> a real request actually let through.
+
 #[test]
 fn install_oidc_plugin_via_admin_api_and_authenticate() {
     let Some(so_path) = plugin_path() else {
@@ -338,15 +295,13 @@ fn install_oidc_plugin_via_admin_api_and_authenticate() {
     };
     if std::env::var_os("BUSBAR_CHECKOUT").is_none() {
         if std::env::var_os("CI").is_some() {
-            // Same rule as `plugin_path`: under CI this coverage must never silently vanish.
             panic!(
                 "BUSBAR_CHECKOUT is unset under CI: plugin-ci's busbar_checkout must provide a \
                  busbar checkout at .busbar-ref so the admin-API install e2e runs instead of passing \
                  while checking nothing."
             );
         }
-        // The live install leg boots the REAL busbar binary, built from a busbar checkout at
-        // `.busbar-ref`; ci.yml's `e2e` job provides one and sets BUSBAR_CHECKOUT. Loud, never silent.
+
         eprintln!(
             "skip: BUSBAR_CHECKOUT unset — the admin-API install e2e needs a busbar checkout at \
              .busbar-ref to build the real busbar binary (ci.yml `e2e` runs it)"
@@ -386,7 +341,6 @@ fn install_oidc_plugin_via_admin_api_and_authenticate() {
         .build()
         .unwrap();
 
-    // ── BOOT 1: auth.chain: [], just to reach a live admin listener to install against. ──
     let data_port1 = free_port();
     let admin_port1 = free_port();
     let config1 = work.join("config1.yaml");
@@ -425,7 +379,6 @@ fn install_oidc_plugin_via_admin_api_and_authenticate() {
         "boot 1's admin API must become ready within 15s"
     );
 
-    // ── REAL ADMIN-API INSTALL: POST the packed auth-oidc plugin tarball to /api/v1/admin/plugins. ──
     let tarball_path = work.join("auth-oidc-admin.tar.gz");
     let tarball = pack_oidc_tarball(&pack_bin, &sign_key, &so_path, &tarball_path);
     let file = "auth-oidc-admin.tar.gz";
@@ -472,8 +425,6 @@ fn install_oidc_plugin_via_admin_api_and_authenticate() {
 
     drop(child1);
 
-    // ── BOOT 2: auth.chain: [oidc], over the SAME plugins dir the admin API wrote into above.
-    // Restart-to-apply, mirroring store's own documented mechanism. ──
     let data_port2 = free_port();
     let admin_port2 = free_port();
     let config2 = work.join("config2.yaml");
@@ -527,7 +478,6 @@ fn install_oidc_plugin_via_admin_api_and_authenticate() {
          that the process is alive, since a load failure is a boot-time die())"
     );
 
-    // ── THE REAL CALL: a genuine signed bearer JWT through the live data plane. ──
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -551,12 +501,7 @@ fn install_oidc_plugin_via_admin_api_and_authenticate() {
         }))
         .send()
         .expect("POST to the real data plane with a real OIDC bearer token");
-    // NOT `assert_ne!(status, 401)`. That form passes on 400, 404, 500 and every other failure, so
-    // it cannot distinguish "the plugin authenticated this token" from "the request died for an
-    // unrelated reason before auth mattered". The chain is `[oidc]` and the upstream is a mock, so
-    // a genuinely authenticated request reaches the proxy and comes back either as a success or as
-    // an upstream-shaped failure. Both of those are downstream of authentication; a 401 or a 403 is
-    // not. Assert that positively.
+
     let status = resp.status().as_u16();
     let body = resp.text().unwrap_or_default();
     assert!(
@@ -571,7 +516,6 @@ fn install_oidc_plugin_via_admin_api_and_authenticate() {
          handling, so this assertion would not have noticed an auth regression: body {body}"
     );
 
-    // A token from the WRONG key (same iss/aud/kid) must be rejected by the live installed plugin.
     let forged_key = Issuer::start(UNUSED_ISSUER, "admin-e2e-kid");
     let forged_token = forged_key.sign(&claims);
     let forged_resp = client
@@ -593,7 +537,7 @@ fn install_oidc_plugin_via_admin_api_and_authenticate() {
 }
 
 /// End-to-end FAILURE: a plugin `open` refusal (malformed config) must surface back across the door
-/// as the operator's text, not a panic or a silently-succeeded open.
+
 #[test]
 fn load_and_exercise_auth_oidc_plugin_bad_config_fails_over_abi() {
     let _one = support::serial();
@@ -613,7 +557,7 @@ fn load_and_exercise_auth_oidc_plugin_bad_config_fails_over_abi() {
 
     let err = support::open(
         &dropped().plugin,
-        r#"{"issuer": "https://idp.example/v2.0"}"#, // missing required `audience`
+        r#"{"issuer": "https://idp.example/v2.0"}"#,
         None,
     )
     .expect_err("config missing a required field must fail to open");

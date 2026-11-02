@@ -2,15 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! THE SOCKET/TLS BAN, held by this plugin's own tests (BUSBAR-1.6.0.md THE DESIGN §5, Connections:
-//! "No plugin opens a socket, dials, binds or does TLS"; the OWNER LAW of 2026-09-27, "every plugin
-//! that needs an external connection asks the kernel to instantiate a transport"; Part 2 #40(a); the
-//! fleet policy's `[net-ban]` in GetBusbar/busbar `.github/fleet/deps.toml`). A connection is a
-//! declared need, and TLS lives only in the host's connector.
-//!
-//! [`findings`] reads `cargo tree` over the plugin crate's NORMAL + BUILD closure (dev-dependencies
-//! are tests, never the shipped image, and with them left out cargo resolves features as the shipped
-//! build does) and names every banned crate and every banned feature it finds. The RED arm feeds it a
-//! closure that carries a plugin-side TLS stack and a socket crate, and proves it says so.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -31,7 +22,7 @@ const BANNED_CRATES: &[&str] = &[
 const BANNED_FEATURES: &[(&str, &str)] = &[("tokio", "net"), ("mio", "net")];
 
 /// Every banned crate and banned feature in `tree`, `cargo tree --format "{p}|{f}" --prefix none`
-/// output: one `name vX.Y.Z [(source)] [(*)]|feature,feature` line per crate.
+
 fn findings(tree: &str) -> Vec<String> {
     let mut found = Vec::new();
     for line in tree.lines() {
@@ -54,8 +45,7 @@ fn findings(tree: &str) -> Vec<String> {
 }
 
 /// `package`'s shipped closure under `dir`, as `cargo tree` resolves it: normal and build edges (no
-/// dev-dependencies, so features resolve as the shipped build does), every target platform. `extra`
-/// is `--locked` for the real crate and `--offline` for a fixture.
+
 fn tree_of(dir: &Path, package: &str, extra: &str) -> String {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let out = Command::new(cargo)
@@ -105,7 +95,7 @@ fn the_shipped_closure_holds_no_socket_or_tls_stack() {
 }
 
 /// RED: a closure that carries a plugin-side TLS stack, a socket crate and tokio's `net` feature is
-/// named, crate by crate and feature by feature; an allowed closure is not.
+
 #[test]
 fn red_the_net_ban_names_a_plugin_side_tls_or_socket_stack() {
     let banned = "\
@@ -135,7 +125,7 @@ tokio v1.41.0|default,rt,time
 }
 
 /// A fixture: path crates named like the banned ones (no registry needed), and two one-member
-/// workspaces under a temp dir.
+
 struct Fixture(PathBuf);
 
 impl Fixture {
@@ -150,14 +140,14 @@ impl Fixture {
             "1.41.0",
             "[features]\nnet = []\nrt = []\ndefault = [\"rt\"]\n",
         );
-        // shipped with `socket2` as a dev-dependency only
+
         fx.member(
             "dev",
             "[dependencies]\ntokio = { path = \"../../libs/tokio\" }\n\
              [dev-dependencies]\nsocket2 = { path = \"../../libs/socket2\" }\n\
              tokio = { path = \"../../libs/tokio\", features = [\"net\"] }\n",
         );
-        // shipped with `socket2` as a normal dependency
+
         fx.member(
             "normal",
             "[dependencies]\nsocket2 = { path = \"../../libs/socket2\" }\n",
@@ -203,8 +193,7 @@ impl Drop for Fixture {
 }
 
 /// RED/GREEN over the real `cargo tree` invocation: `socket2` as a dev-dependency only is not
-/// reported (nor is a `tokio/net` that only a dev-dependency turns on); the same `socket2` as a
-/// normal dependency is.
+
 #[test]
 fn a_dev_dependency_is_not_the_shipped_closure_and_a_normal_one_is() {
     let fx = Fixture::new();

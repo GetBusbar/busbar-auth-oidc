@@ -2,18 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! THE ISSUER'S DISCOVERY DOCUMENT (`<issuer>/.well-known/openid-configuration`), fetched on the
-//! first op that needs it and again a day later ([`REDISCOVER`]) or after a `refresh`, sans-IO
-//! single-flight like the JWKS ([`crate::cache`]): the claimer's op pends on its exchange, a caller
-//! arriving meanwhile waits (or, during a re-discovery, is served the previous document) and is
-//! woken when the document is resolved ([`Fetch::wake`]), and every later op reads the resolved
-//! document. It names the JWKS url when `jwks_url` is not configured, and whichever login
-//! endpoint is not. A failed fetch is remembered with its error for `jwks_min_refetch_secs`, so an
-//! unreachable issuer is asked again at the JWKS cache's own retry bound, never per request.
-//!
-//! RFC 8414 §3.3 / OIDC Discovery 1.0 §4.3: the document's own `issuer` MUST equal the issuer it
-//! was requested from. Without this check, one poisoned discovery response repoints `jwks_uri` (and
-//! the login endpoints) — and therefore every future signature verification — at an
-//! attacker-controlled key set. Callers whose URLs are configured explicitly never fetch it.
 
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
@@ -35,10 +23,7 @@ pub fn discovery_url(cfg: &OidcConfig) -> String {
 }
 
 /// The discovery document `fetched` from `url`, validated against `cfg`'s issuer.
-///
-/// # Errors
-/// The fetch failed, the body is not JSON, the document names another issuer (the
-/// remote value escaped: it is untrusted input an operator reads) or none.
+
 pub fn check_document(
     cfg: &OidcConfig,
     url: &str,
@@ -68,7 +53,7 @@ pub fn check_document(
 }
 
 /// How long a fetched document is held before the issuer is asked again: an IdP that moves its
-/// keys or endpoints is followed within a day.
+
 pub const REDISCOVER: Duration = Duration::from_secs(24 * 3600);
 
 /// Where the document stands.
@@ -78,8 +63,6 @@ enum State {
     /// A caller's fetch is in flight, and the document it re-discovers (served meanwhile), if any.
     Flight(Flight, Option<Arc<Value>>),
     /// Fetched and valid; asked for again after `due`'s elapsed duration (`None`: at its next use,
-    /// after a `refresh`). Keeping the start and duration avoids overflowing `Instant` for an
-    /// accepted retry interval as large as `u64::MAX` seconds.
     Done {
         doc: Arc<Value>,
         due: Option<(Instant, Duration)>,
@@ -110,7 +93,7 @@ impl Discovery {
     }
 
     /// Have the document asked for again at its next use (a `refresh`), the one held serving
-    /// until then and meanwhile.
+
     pub fn expire(&self) {
         if let State::Done { due, .. } = &mut self.lock().0 {
             *due = None;
@@ -118,8 +101,7 @@ impl Discovery {
     }
 
     /// The validated document of `cfg`'s issuer, fetched through `io` when nobody has yet, or
-    /// again once it is due ([`REDISCOVER`], [`Self::expire`]): PENDING while this caller's fetch
-    /// is in flight, WAIT while another's is and there is no document to serve meanwhile.
+
     pub fn document(
         &self,
         cfg: &OidcConfig,
@@ -163,7 +145,6 @@ impl Discovery {
                         _ => None,
                     };
                     let Some(owner) = me else {
-                        // A call on no ticket may not fetch; a document held is still served.
                         if let Some(prev) = prev {
                             return Step::Ready(Ok(prev));
                         }
@@ -182,11 +163,7 @@ impl Discovery {
         let checked = check_document(cfg, &url, fetched).map(Arc::new);
         let mut guard = self.lock();
         let (state, waiters) = &mut *guard;
-        // A document resolves whenever another caller's has not already (any valid
-        // issuer-matched one is good). A failure ends only this caller's own flight: a late error
-        // from an abandoned flight must not overwrite the one another caller has since taken
-        // over. A failed RE-discovery keeps the document it would have replaced, and asks again
-        // after the retry bound.
+
         let mut failed = None;
         let mut kept = None;
         let (answer, waiters) = match (checked, &*state) {
@@ -227,13 +204,12 @@ impl Discovery {
         };
         drop(guard);
         if let Some(e) = failed {
-            // The tick discards a discovery failure, so say it here, once per attempt.
             tracing::warn!(module = "oidc", url = %crate::fetch::shown(&url), error = %e, "OIDC discovery failed");
         }
         if let Some(e) = kept {
             tracing::warn!(module = "oidc", url = %crate::fetch::shown(&url), error = %e, "OIDC re-discovery failed; serving the previous document");
         }
-        // The waiters re-enter on this wake and read the document (or its failure).
+
         if !waiters.is_empty() {
             io.wake(&waiters);
         }

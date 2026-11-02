@@ -2,8 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! JWKS (JSON Web Key Set) model + verifying-key extraction. Pure data + `ring` key material; no I/O
-//! (the fetch/cache lives in [`crate::cache`]). A JWKS is the provider's set of PUBLIC signing keys,
-//! each tagged by `kid`; a JWT's header `kid` selects which one verified it.
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde::Deserialize;
@@ -35,7 +33,7 @@ pub enum KeyMaterial {
 
 impl KeyMaterial {
     /// Decode a key's material from its base64url fields, selected by `kty`. Never fails — a decode
-    /// problem becomes [`KeyMaterial::Unusable`] so it surfaces at verify time with an exact message.
+
     fn from_jwk(jwk: &Jwk) -> Self {
         match jwk.kty.as_str() {
             "RSA" => {
@@ -58,7 +56,7 @@ impl KeyMaterial {
                     Ok(v) => v,
                     Err(e) => return Self::Unusable(e),
                 };
-                // ring wants the uncompressed SEC1 point: 0x04 || X || Y.
+
                 let mut point = Vec::with_capacity(1 + x.len() + y.len());
                 point.push(0x04);
                 point.extend_from_slice(&x);
@@ -128,8 +126,7 @@ pub struct Jwk {
 
 impl Jwk {
     /// Whether this key may verify a token signed with `alg`: the key type `alg` needs (`RS256`:
-    /// RSA, `ES256`: EC), an `alg` absent or equal to it, not encryption-only, and `key_ops` absent
-    /// or naming `verify`.
+
     pub fn signs(&self, alg: &str) -> bool {
         let kty = match alg {
             "RS256" => "RSA",
@@ -146,7 +143,7 @@ impl Jwk {
     }
 
     /// The decoded, verify-ready key material for this key — decoded once, then memoised, so the hot
-    /// per-request verify path never re-decodes the base64url fields.
+
     pub fn material(&self) -> &KeyMaterial {
         self.decoded.get_or_init(|| KeyMaterial::from_jwk(self))
     }
@@ -172,16 +169,7 @@ struct RawSet {
 
 impl JwkSet {
     /// Parse a JWKS document (the body of a `jwks_uri` GET). Entries that are not usable JWKs are
-    /// skipped (see [`JwkSet::keys`]), one warn naming how many.
-    ///
-    /// A document that parses but carries ZERO usable keys is an ERROR, not an empty success. An
-    /// identity provider that can sign tokens always publishes at least one key, so `{"keys":[]}` is a
-    /// provider blip, a maintenance proxy, or a blackholing load balancer answering 200 with a
-    /// well-formed nothing. Returning it as `Ok` would let the caller install it over a working key
-    /// set and reset the freshness clocks, which converts a transient upstream hiccup into a total
-    /// auth outage that lasts at least a full refetch interval and persists for as long as the
-    /// empty body does. The caller's error path already preserves the previous keys; this makes the
-    /// degenerate document take that path instead of the success path.
+
     pub fn parse(body: &str) -> Result<Self, String> {
         let raw: RawSet = serde_json::from_str(body).map_err(
             busbar_contract::abi::sdk::auth_kit::json_error("invalid JWKS document"),
@@ -196,7 +184,6 @@ impl JwkSet {
         };
         let skipped = entries - set.keys.len();
         if skipped > 0 {
-            // Once per fetched document, the count only: an entry's content is far-end input.
             tracing::warn!(
                 module = "oidc",
                 skipped,
@@ -214,9 +201,7 @@ impl JwkSet {
     }
 
     /// The keys a token naming `kid`, signed with `alg`, is tried against: every key whose `kid`
-    /// matches ([`Self::find_all`]); for a token naming NO kid (`kid` empty) with its `alg` known,
-    /// the set's single usable signing key for that alg ([`Jwk::signs`]) if there is exactly one,
-    /// else none (ambiguous). `alg` `None` selects by `kid` alone.
+
     pub fn select<'a>(&'a self, kid: &'a str, alg: Option<&str>) -> Vec<&'a Jwk> {
         match alg {
             Some(alg) if kid.is_empty() => {
@@ -232,13 +217,7 @@ impl JwkSet {
     }
 
     /// Find ALL keys whose `kid` matches `kid`. A JWT header names the `kid` that signed it; selecting
-    /// by `kid` (not "try every key in the set") is what makes a KEY-ROTATION refetch meaningful — a
-    /// token signed by a freshly-rotated key misses here, triggering a bounded refetch upstream.
-    ///
-    /// More than one key can share a `kid`: RFC 7517 §4.5 permits distinct keys with the same `kid`
-    /// when `kty` differs (e.g. an RSA key and an EC key coexisting under one `kid` during an
-    /// algorithm migration, or briefly during rotation by provider convention). The caller must try
-    /// every match, not just the first.
+
     pub fn find_all<'a>(&'a self, kid: &'a str) -> impl Iterator<Item = &'a Jwk> {
         self.keys
             .iter()
@@ -255,10 +234,7 @@ mod tests {
     }
 
     /// A well-formed JWKS carrying zero keys must be an ERROR. It parses cleanly, so without this
-    /// it reaches the cache's success arm and REPLACES a working key set, resetting the freshness
-    /// anchors with it. Every subsequent verification then misses, and the rate limiter holds the
-    /// next refetch off, so one 200-with-an-empty-body from a provider or a proxy in front of it
-    /// takes the whole deployment's authentication down until the body stops being empty.
+
     #[test]
     fn an_empty_key_set_is_an_error_not_an_empty_success() {
         let err = JwkSet::parse(r#"{"keys":[]}"#)
@@ -267,9 +243,9 @@ mod tests {
             err.contains("no keys"),
             "the error should say the document carried no keys: {err}"
         );
-        // A document that is merely missing the member is the same case.
+
         assert!(JwkSet::parse(r#"{}"#).is_err());
-        // And a real one-key document still parses.
+
         assert!(JwkSet::parse(
             r#"{"keys":[{"kty":"EC","kid":"a","crv":"P-256","x":"AAAA","y":"BBBB"}]}"#
         )
@@ -288,10 +264,7 @@ mod tests {
     }
 
     /// A non-empty queried `kid` that matches NO key must never fall through to a keyless
-    /// (`kid: None`) key in the set — that is only a valid match when the QUERIED kid is itself
-    /// empty. Directly exercises the `kid.is_empty() && k.kid.is_none()` fallback clause: an
-    /// `&&`→`||` mutation there would wrongly match the keyless key here even though the queried kid
-    /// is non-empty and absent from the set.
+
     #[test]
     fn find_all_does_not_fall_back_to_a_keyless_key_for_a_nonempty_unmatched_kid() {
         let s = set(r#"{"keys":[

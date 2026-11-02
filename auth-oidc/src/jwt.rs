@@ -2,12 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! JWT parsing + **signature verification** over `ring` (the workspace's single, already-vendored
-//! crypto backend — no `jsonwebtoken`/`rsa`, so no new crypto dependency and no RUSTSEC-2023-0071
-//! surface). Supports the two algorithms OIDC identity providers actually sign ID/access tokens with:
-//! `RS256` (RSA-PKCS1-SHA256 — Entra, Google, Okta default) and `ES256` (ECDSA-P256-SHA256).
-//!
-//! This module is PURE: it verifies a token against an already-fetched key and returns the decoded
-//! claims, or a precise error. iss/aud/exp/nbf policy and JWKS fetching live in [`crate`].
 
 use crate::jwks::{Jwk, KeyMaterial};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
@@ -15,7 +9,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 /// The two JWS algorithms this verifier accepts — the ones OIDC IdPs actually sign ID/access tokens
-/// with. Named once here so the match arms and the error text can't drift apart.
+
 const ALG_RS256: &str = "RS256";
 const ALG_ES256: &str = "ES256";
 
@@ -38,7 +32,7 @@ pub struct Header {
 }
 
 /// The three base64url segments of a compact JWS, plus the signing input (`header.payload`) the
-/// signature covers. Produced by [`split`], consumed by [`verify_signature`].
+
 pub struct Parts<'a> {
     /// The decoded JOSE header.
     pub header: Header,
@@ -47,14 +41,11 @@ pub struct Parts<'a> {
     /// The decoded signature bytes.
     pub signature: Vec<u8>,
     /// `header_b64 + "." + payload_b64` — exactly the bytes the signature is computed over. Borrowed
-    /// from the original token string.
     pub signing_input: &'a str,
 }
 
 /// The decoded PAYLOAD of what reads as a compact JWS (exactly three dot-separated segments, the
-/// second base64url), the header left undecoded: what issuer routing reads before anything else,
-/// so a token naming this provider's issuer is judged by it even when its header is malformed.
-/// `None` for anything else (not this module's credential shape).
+
 pub fn payload(token: &str) -> Option<Vec<u8>> {
     let mut it = token.split('.');
     match (it.next(), it.next(), it.next(), it.next()) {
@@ -64,8 +55,7 @@ pub fn payload(token: &str) -> Option<Vec<u8>> {
 }
 
 /// Split and base64url-decode a compact JWT (`header.payload.signature`), decoding the header enough
-/// to select verification. Does NOT verify — that is [`verify_signature`]. Rejects a token that isn't
-/// exactly three segments (a classic malformed-input guard).
+
 pub fn split(token: &str) -> Result<Parts<'_>, String> {
     let mut it = token.split('.');
     let (h, p, s) = match (it.next(), it.next(), it.next(), it.next()) {
@@ -84,8 +74,7 @@ pub fn split(token: &str) -> Result<Parts<'_>, String> {
     let signature = URL_SAFE_NO_PAD
         .decode(s)
         .map_err(|_| "malformed JWT: signature is not base64url".to_string())?;
-    // The signing input is the original header + "." + payload substring (pre-decode bytes), i.e. the
-    // token up to the last '.'. Slice it from the source so we sign the EXACT transmitted bytes.
+
     let last_dot = token.rfind('.').expect("token has at least two dots here");
     let signing_input = &token[..last_dot];
     Ok(Parts {
@@ -97,14 +86,8 @@ pub fn split(token: &str) -> Result<Parts<'_>, String> {
 }
 
 /// Verify the JWS signature of `parts` against the JWKS key `key`, enforcing that the token's `alg`
-/// matches the key type (RS256↔RSA, ES256↔EC) — the alg-confusion guard. Returns `Ok(())` on a valid
-/// signature, a precise `Err` otherwise. Uses `ring`'s constant-time verifiers.
+
 pub fn verify_signature(parts: &Parts, key: &Jwk) -> Result<(), String> {
-    // RFC 7515 §4.1.11 `crit`: a producer can mark header parameters as critical, and a verifier that
-    // does not implement EVERY named extension MUST reject the token rather than silently ignore it.
-    // This verifier implements no critical extensions, so any non-empty `crit` is a rejection —
-    // checked before signature math, since an unimplemented critical param changes how the token must
-    // be processed.
     if let Some(crit) = &parts.header.crit {
         if !crit.is_empty() {
             let named: Vec<String> = crit.iter().map(|c| crate::untrusted(c)).collect();
@@ -115,7 +98,7 @@ pub fn verify_signature(parts: &Parts, key: &Jwk) -> Result<(), String> {
             ));
         }
     }
-    // RFC 7517 §4.2 `use`: a key explicitly marked encryption-only must not verify signatures.
+
     if key.key_use.as_deref() == Some("enc") {
         return Err(
             "JWKS key has \"use\": \"enc\" (encryption-only) and must not verify signatures"
@@ -123,8 +106,7 @@ pub fn verify_signature(parts: &Parts, key: &Jwk) -> Result<(), String> {
         );
     }
     let alg = parts.header.alg.as_str();
-    // RFC 7517 §4.4 `alg`: a key published for one algorithm never verifies a token signed with
-    // another. (An alg this verifier does not accept at all is refused as such, below.)
+
     let accepted = alg == ALG_RS256 || alg == ALG_ES256;
     if let Some(key_alg) = key.alg.as_deref().filter(|_| accepted) {
         if key_alg != alg {
@@ -136,8 +118,7 @@ pub fn verify_signature(parts: &Parts, key: &Jwk) -> Result<(), String> {
             ));
         }
     }
-    // RFC 7517 §4.3 `key_ops`: a key whose permitted operations do not include `verify` never
-    // verifies a signature.
+
     if accepted
         && key
             .key_ops
@@ -157,13 +138,11 @@ pub fn verify_signature(parts: &Parts, key: &Jwk) -> Result<(), String> {
                 crate::untrusted(&key.kty)
             ));
         }
-        // Key material is base64url-decoded ONCE and memoised on the key (see `Jwk::material`), so
-        // this hot path never re-decodes `n`/`e` per request.
+
         let (n, e) = match key.material() {
             KeyMaterial::Rsa { n, e } => (n, e),
             KeyMaterial::Unusable(msg) => return Err(msg.clone()),
             KeyMaterial::Ec { .. } => {
-                // Unreachable: kty == "RSA" is checked above, so the memoised material is Rsa/Unusable.
                 return Err("JWKS key material does not match its kty".to_string());
             }
         };
@@ -190,7 +169,7 @@ pub fn verify_signature(parts: &Parts, key: &Jwk) -> Result<(), String> {
                     .map_or("(none)".to_string(), crate::untrusted)
             ));
         }
-        // Point decoded ONCE and memoised (see `Jwk::material`) — no per-request re-decode/alloc.
+
         let point = match key.material() {
             KeyMaterial::Ec { point } => point,
             KeyMaterial::Unusable(msg) => return Err(msg.clone()),
@@ -206,9 +185,6 @@ pub fn verify_signature(parts: &Parts, key: &Jwk) -> Result<(), String> {
             .verify(parts.signing_input.as_bytes(), &parts.signature)
             .map_err(|_| "JWT signature verification failed".to_string())
     } else {
-        // `none` (unsigned), `HS*` (HMAC — accepting a symmetric alg against an asymmetric JWKS key is
-        // the RS256→HS256 key-confusion attack), and any other alg are REFUSED. `alg` is from the
-        // unsigned header of an untrusted bearer and this error is logged, so it is escaped.
         Err(format!(
             "unsupported/forbidden JWT alg '{}': only {ALG_RS256} and {ALG_ES256} are accepted",
             crate::untrusted(alg)
@@ -228,7 +204,7 @@ mod tests {
     use super::*;
 
     /// A JWT header field of the wrong type is refused WITHOUT echoing its value: the header comes
-    /// from an untrusted bearer and this error is logged, and serde's own text quotes the value.
+
     #[test]
     fn a_mistyped_header_field_is_refused_without_echoing_it() {
         let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"ES256","kid":12345678}"#);
@@ -241,18 +217,7 @@ mod tests {
     }
 
     /// RFC 7517 §4.2: a JWK explicitly marked `"use": "enc"` (encryption-only — e.g. published
-    /// alongside a signing key on the same JWKS endpoint for key-agreement) must never verify a
-    /// signature, no matter how otherwise-valid its key material is.
-    ///
-    /// The key material here (`x`/`y`: `None`) is deliberately incomplete — proving the `use` check
-    /// runs BEFORE any key-material parsing, not as a side effect of the material being unusable. If
-    /// the rejection came from missing coordinates instead, this would pass for the wrong reason; the
-    /// assertion on the error text guards against that.
-    ///
-    /// Without a `use` check this falls through to "JWKS key missing EC coordinate x" — a
-    /// key-material error, not a use-policy rejection — or, with valid material, verifies the
-    /// signature outright. As implemented it is rejected specifically for `use: enc`, before key
-    /// material is ever inspected.
+
     #[test]
     fn verify_signature_rejects_an_encryption_only_key() {
         let key = Jwk {
@@ -291,11 +256,7 @@ mod tests {
     }
 
     /// The RS256/RSA-kty guard, mirroring `verify_signature_permits_a_signing_key_to_reach_key_material_checks`
-    /// below for the RSA branch: a token whose `alg` is `RS256` against a JWKS key whose `kty` really
-    /// is `"RSA"` must PASS the kty check and reach key-material parsing (and fail there, on missing
-    /// `n`/`e`) — proving the guard is `key.kty != "RSA"`, not its inverse. A `!=`→`==` mutation would
-    /// instead reject every genuinely-matching RS256/RSA pair with the kty-mismatch error, which this
-    /// test's error-text assertion distinguishes from the key-material error.
+
     #[test]
     fn verify_signature_permits_a_matching_rsa_key_to_reach_key_material_checks() {
         let key = Jwk {
@@ -335,7 +296,7 @@ mod tests {
     }
 
     /// A `"use": "sig"` key (the ordinary case) passes the use-policy check — it reaches (and fails
-    /// at) key-material parsing, not the use-policy rejection.
+
     #[test]
     fn verify_signature_permits_a_signing_key_to_reach_key_material_checks() {
         let key = Jwk {

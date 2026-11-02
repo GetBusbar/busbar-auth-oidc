@@ -1,18 +1,4 @@
 //! Real-world proof against an actual Entra ID (Azure AD) tenant — not a fixture, not a mock. Reads
-//! a live tenant/client id + a disposable test user's credentials from env, performs a genuine
-//! password-grant token request against Entra's real token endpoint, then drives that real
-//! Entra-issued token through this crate's own sans-IO `OidcModule`, its requests made by a blocking
-//! HTTPS client standing in for the host's connector: real discovery, real JWKS fetch, real RS256
-//! signature check, real claim validation. Also verifies a tampered copy of the same token is genuinely rejected, so this isn't
-//! a rubber stamp.
-//!
-//! Requires the following environment variables. Missing values skip a local run and fail CI:
-//!   ENTRA_TENANT_ID       Entra tenant GUID
-//!   ENTRA_CLIENT_ID       App registration (public client) allowed for the ROPC grant
-//!   ENTRA_TEST_USERNAME   A disposable test user in that tenant (never a real employee account)
-//!   ENTRA_TEST_PASSWORD   That user's current (non-expired) password
-//!
-//! Run: `cargo run -p busbar-auth-oidc --example entra_live_check`
 
 use busbar_auth_oidc::fetch::{document, failed, Doc, Fetch};
 use busbar_auth_oidc::{OidcConfig, OidcModule, Step};
@@ -24,7 +10,7 @@ use std::task::Poll;
 use std::time::Instant;
 
 /// The module's requests, made at once by a blocking client (the plugin's host makes them through
-/// its connector; this example has none).
+
 struct Blocking(reqwest::blocking::Client);
 
 impl Fetch for Blocking {
@@ -70,8 +56,7 @@ fn verify(module: &OidcModule, token: &str) -> AuthVerdict {
         .as_secs() as i64;
     match module.verify(Some(token), now, Instant::now(), &mut Blocking(client)) {
         Step::Ready(Ok(v)) => v,
-        // The key set (or its discovery) could not be had: an outage, never a verdict, so a
-        // network blip can never pass for a rejected signature below.
+
         Step::Ready(Err(e)) => panic!("real Entra discovery or JWKS fetch failed: {e}"),
         Step::Pending | Step::Wait => unreachable!("a blocking fetch answers at once"),
     }
@@ -88,11 +73,6 @@ fn main() {
         env_or_skip("ENTRA_TEST_USERNAME"),
         env_or_skip("ENTRA_TEST_PASSWORD"),
     ) else {
-        // Locally, an absent tenant is a skip. In CI it is a FAILURE, because a workflow named
-        // "entra-live-check" reporting green having verified nothing is worse than no workflow at
-        // all: it is a badge asserting a live Entra token was validated when none was fetched. The
-        // secrets are the only thing arming this check, so an unset or empty one is the exact
-        // condition that must be loud.
         let msg = "ENTRA_TENANT_ID / ENTRA_CLIENT_ID / ENTRA_TEST_USERNAME / ENTRA_TEST_PASSWORD \
                    are not all set and non-empty";
         if std::env::var_os("CI").is_some() {
@@ -149,10 +129,6 @@ fn main() {
         "a real, freshly-issued Entra token must verify as Identify"
     );
 
-    // Tamper check: a corrupted signature over the SAME real Entra JWKS must be rejected, so this
-    // isn't a rubber stamp that accepts anything shaped like a JWT. Only the signature can reject
-    // it: its claims are the real token's, and a key set that cannot be had panics in `verify`
-    // (an outage is not a `Reject`), so a JWKS fetch failure cannot pass this check.
     let (header, payload, sig) = {
         let mut parts = id_token.split('.');
         (

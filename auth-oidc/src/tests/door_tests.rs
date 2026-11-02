@@ -2,8 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The instance's `refresh`, as the host calls it: the admin cache flush (unchanged settings) drops
-//! the verdict cache and reports how many entries it held, and keeps the module and its key set —
-//! for a verify-only instance too, whose secret the host lends as one EMPTY entry.
 
 use super::*;
 use crate::script::{ready, Idp, ME};
@@ -36,8 +34,7 @@ fn verify(oidc: &Oidc, idp: &Idp, token: &str) -> AuthVerdict {
 }
 
 /// The host lends one entry per secret reference, a missing one as EMPTY bytes (plugin-loader
-/// `auth_door.rs`). A refresh with the same settings and that same empty entry keeps the opened
-/// module and its key set, as the door's contract says, rather than re-opening it cold.
+
 #[test]
 fn an_empty_lent_secret_refresh_keeps_the_module_and_its_key_set() {
     let key = TestKey::generate("k1");
@@ -65,15 +62,13 @@ fn an_empty_lent_secret_refresh_keeps_the_module_and_its_key_set() {
     ));
     assert_eq!(idp.calls(), 1, "its key set survives: no refetch");
 
-    // A secret that changes re-opens it.
     oidc.refresh(&settings(), &lent(b"a-client-secret"), 3)
         .expect("refreshes");
     assert!(!Arc::ptr_eq(&before, &oidc.now()), "a new secret re-opens");
 }
 
 /// `abi::auth`: "an auth plugin DROPS its inbound cache on every `refresh`" and reports how many
-/// entries under the `busbar_auth_cache_flushed_total` family, which the host sums into the admin
-/// flush's `{"flushed": N}` (1.5.5's count).
+
 #[test]
 fn refresh_drops_the_verdict_cache_and_reports_its_count() {
     let key = TestKey::generate("k1");
@@ -91,7 +86,6 @@ fn refresh_drops_the_verdict_cache_and_reports_its_count() {
     let refreshed = oidc.refresh(&settings(), &lent(b""), 3).expect("refreshes");
     assert_eq!(refreshed.counted, flushed(0.0), "nothing left to drop");
 
-    // Settings that change drop the running module's cache too.
     assert!(matches!(
         verify(&oidc, &idp, &token),
         AuthVerdict::Identify(_)
@@ -134,8 +128,7 @@ fn a_refused_refresh_keeps_the_module_and_cached_verdict() {
 }
 
 /// `validate` ANSWERS AS `open` DOES (Q128 auth-oidc LOW, reader r82 on 59293c0): a plain http
-/// `jwks_url` on a remote host is refused by both (plain http only for loopback, security item 3),
-/// and so is one that is not a URL at all.
+
 #[test]
 fn validate_answers_a_jwks_url_as_open_does() {
     let plaintext = serde_json::json!({
@@ -158,7 +151,7 @@ fn validate_answers_a_jwks_url_as_open_does() {
 }
 
 /// `validate` accepts a loopback http `jwks_url` as `open` does: a config `--validate` passes is
-/// one boot opens, and a loopback key set over http (1.5.5 booted it) opens with a warning.
+
 #[test]
 fn validate_accepts_a_loopback_http_jwks_url_as_open_does() {
     let loopback = serde_json::json!({
@@ -172,7 +165,7 @@ fn validate_accepts_a_loopback_http_jwks_url_as_open_does() {
 }
 
 /// A nonce mismatch answers the security-check verdict AND says so in the plugin's log, with no
-/// nonce value in it.
+
 #[test]
 fn a_nonce_mismatch_is_logged() {
     use base64::Engine as _;
@@ -217,8 +210,7 @@ fn kept_for(n: u32, at: u64) -> Reached {
 }
 
 /// T1: an identity kept for a short buffer's re-call is served ONLY to the same callback: a
-/// re-call on the ticket naming another state, another code, or both, is not served it (a recycled
-/// ticket must never hand one user's identity to another callback).
+
 #[test]
 fn a_kept_identity_serves_only_its_own_state_and_code() {
     let kept = kept_for(1, 0);
@@ -241,7 +233,7 @@ fn a_kept_identity_serves_only_its_own_state_and_code() {
 }
 
 /// A full short-answer map makes room by dropping its OLDEST entry only: every other identity a
-/// short buffer reached still waits for its re-call (clearing the map would refuse them all).
+
 #[test]
 fn a_full_reached_map_evicts_only_the_oldest() {
     let at = |n: u32| u64::from(n) * 1_000_000;
@@ -278,8 +270,7 @@ fn a_ticket_kept_again_does_not_evict() {
 }
 
 /// L16: an identity kept for a short-buffer re-call (it carries the callback's state and code)
-/// is not held forever: an entry older than 10 minutes goes on the next access of the map, a
-/// newer one stays.
+
 #[test]
 fn a_kept_identity_older_than_ten_minutes_goes() {
     let t0 = 0;
@@ -302,8 +293,7 @@ fn a_kept_identity_older_than_ten_minutes_goes() {
 }
 
 /// A blank `issuer` or `audience` is REFUSED at `validate` and at `open`, FAILED and naming the
-/// key: an empty issuer/audience would load and then match no token (or a token claiming an empty
-/// one), so it is refused rather than opened.
+
 #[test]
 fn a_blank_issuer_or_audience_is_refused_naming_the_key() {
     for (key, blank) in [
@@ -331,9 +321,7 @@ fn a_blank_issuer_or_audience_is_refused_naming_the_key() {
 }
 
 /// BIND-AUDIT: a plain http `jwks_url` raises the diagnostic the Statement declares,
-/// `BUSBAR-4032`, at warn, in the very words `open` logs, so the host audits the loaded
-/// but flagged instance on the plugin's behalf (`plugin.open`, `degraded`). An https one raises
-/// nothing, and a `refresh` to https stops raising it.
+
 #[test]
 fn a_plain_http_jwks_url_raises_its_declared_diagnostic() {
     let plain = serde_json::json!({
@@ -372,8 +360,7 @@ fn a_plain_http_jwks_url_raises_its_declared_diagnostic() {
 }
 
 /// S2: bad settings answer FAILED at validate and open alike, each line in the contract's
-/// instance-relative form (`settings[.<path>]: <reason>`, which the host renders under the
-/// provider's own name), and a lent secret that is not text names its reference.
+
 #[test]
 fn bad_settings_are_refused_in_the_contracts_settings_line_form() {
     use busbar_contract::abi::mechanism::lifecycle::{check_validate_refusal, refusal_lines};
@@ -446,7 +433,7 @@ fn present_blank_optional_settings_are_refused_by_validate_and_open() {
             }
         }
     }
-    // Omitting optional fields retains the defaults and discovery behavior.
+
     let cfg = serde_json::json!({ "issuer": ISSUER, "audience": AUDIENCE }).to_string();
     assert!(<Oidc as Life>::validate(cfg.as_bytes()).is_ok());
     assert!(Oidc::open(cfg.as_bytes(), &lent(b""), 1).is_ok());
@@ -518,7 +505,7 @@ fn configured_endpoint_schemes_are_checked_without_echoing_settings_values() {
             );
         }
     }
-    // Configured private token endpoints retain the existing plaintext exception.
+
     let mut cfg: serde_json::Value = serde_json::from_slice(&settings()).unwrap();
     cfg["token_endpoint"] = serde_json::json!("http://192.168.1.2/token");
     let cfg = cfg.to_string();
@@ -527,8 +514,7 @@ fn configured_endpoint_schemes_are_checked_without_echoing_settings_values() {
 }
 
 /// L15: a `refresh` that keeps the opened module (the admin cache flush, unchanged settings) has
-/// the issuer's discovery document asked for again on its next use, as a `refresh` with new
-/// settings would.
+
 #[test]
 fn a_refresh_rediscovers_the_issuer_s_document() {
     let settings = serde_json::json!({ "issuer": ISSUER, "audience": AUDIENCE })
@@ -557,7 +543,7 @@ fn a_refresh_rediscovers_the_issuer_s_document() {
 }
 
 /// A short-answer lease owns its cursor and callback identity. Lifecycle cleanup cannot leave
-/// either behind, and an older lease cannot remove a later continuation on the same ticket.
+
 #[test]
 fn short_login_cursor_cleanup_owns_only_its_continuation() {
     for cleanup in ["release", "cancel", "retire"] {

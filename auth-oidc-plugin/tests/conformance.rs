@@ -2,45 +2,12 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! **ONE AUTH MODULE, BOTH DOORS, ONE CONNECTOR** — the OIDC module's linked + dropped-in
-//! conformance on the auth kind's memory ABI (THE DESIGN 11.4: compiled in or dropped in, one door,
-//! one table), run against the busbar rev this repo pins (`.busbar-ref`).
-//!
-//! The door is held two ways at once: LINKED (`busbar_auth_oidc::door::door`, the row a busbar
-//! build that compiles the module in registers, `LinkedRow::of`) and DROPPED IN (this crate's built
-//! cdylib, signed first-party into a temp `plugins/` directory under a manifest stating the door's
-//! Statement, found by the loader's scan and admitted against that signed Statement). Each is bound
-//! to a real dispatcher serving the host's clock and to a connection table that PLAYS THE IdP
-//! (`support::Idp`: discovery document, JWKS, token endpoint; the first read of every reply PENDING,
-//! the op's ticket woken from another thread). The module never dials (THE DESIGN 5: "No plugin
-//! opens a socket, dials, binds or does TLS"): its declared needs carry every request (three
-//! trusting `ca_cert_pem`, three their public-roots twins for a config that names none).
-//!
-//! Both doors run the same script — open with NO jwks_url and NO login endpoints, so the first
-//! verify discovers the JWKS url and fetches the JWKS, each request crossing PENDING; real ES256
-//! tokens verified (valid, forged, wrong audience, not a JWT, none; a short identity buffer
-//! re-called once); the authorize URL from the discovered endpoint; the login's own token exchange
-//! (an identity, a short buffer served without a second exchange, a forged `id_token`, an
-//! `invalid_grant`, an IdP outage) — and the two transcripts, the requests the IdP saw included,
-//! must be identical.
-//!
-//! THE RED ARMS, same file: the same cdylib under a different config is a different transcript; the
-//! same bytes stated as `secret` are refused at the manifest's kind; a Statement that is not the
-//! door's is refused at admit; an unreachable issuer fails verify with 1.5.5's discovery text; a
-//! ticketless call (which may not pend) fails at once and asks the IdP nothing; the rendered
-//! Statement declares exactly the six needs; a config with no `ca_cert_pem` answers the same
-//! script over the public-roots needs, the ones trusting it refused at declaration; and the net
-//! ban's own RED arm (`support/net_ban.rs`). A missing cdylib PANICS — this test IS the dropped-in door's proof, and
-//! never skips.
 
 mod support;
 
 #[path = "support/retry_after.rs"]
 mod retry_after;
 
-// BUSBAR'S PUBLISHED CONFORMANCE SUITE (plugin-ci's conformance step): the linked door and this
-// crate's cdylib through the one loader, driven by the auth kind's script (verify, the login
-// family, the far ends the module's needs reach: `conformance.json`), exact crossings, both folds
-// equal, its RED arms kept.
 busbar_test_kit::conformance_suite! {
     door: busbar_auth_oidc::door::door,
     cdylib: "busbar_auth_oidc_plugin",
@@ -97,7 +64,7 @@ fn cdylib() -> Vec<u8> {
 }
 
 /// The manifest the packer signs for the module as `kind`, stating the Statement rendering
-/// `statement` (lowercase hex, as `busbar-plugin-pack` writes it).
+
 fn manifest(kind: &str, statement: &[u8]) -> Manifest {
     Manifest {
         name: NAME.into(),
@@ -125,7 +92,7 @@ fn manifest(kind: &str, statement: &[u8]) -> Manifest {
 }
 
 /// `lib` signed first-party under `manifest` into a fresh `plugins/` directory, scanned under a
-/// policy holding the release key.
+
 fn scanned(tag: &str, manifest: Manifest, lib: &[u8]) -> PluginRegistry {
     let dir = std::env::temp_dir().join(format!("auth-oidc-conf-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -167,7 +134,7 @@ fn admitted(registry: &PluginRegistry) -> (Vec<u8>, Vec<u8>) {
 }
 
 /// The operator config: only the issuer and the audience (the JWKS url and both login endpoints
-/// are DISCOVERED), and an extra trusted root (the anchored needs' `trust_from`).
+
 fn config(audience: &str) -> String {
     serde_json::json!({
         "issuer": ISSUER,
@@ -179,7 +146,7 @@ fn config(audience: &str) -> String {
 }
 
 /// The same config with NO extra trusted root (`ca_cert_pem` is optional, as in 1.5.5): the
-/// public roots only.
+
 fn config_public(audience: &str) -> String {
     let mut cfg: serde_json::Value = serde_json::from_str(&config(audience)).unwrap();
     cfg.as_object_mut().unwrap().remove("ca_cert_pem");
@@ -196,7 +163,7 @@ struct Tokens {
 }
 
 /// The nonce the core minted at `begin` (in the login cookie), handed to `complete_login`; every
-/// identity token the IdP answers for this login carries it.
+
 const NONCE: &str = "conformance-nonce";
 
 fn claims(aud: &str) -> serde_json::Value {
@@ -230,8 +197,7 @@ fn tokens(key: &Issuer) -> Tokens {
 }
 
 /// A signed audience must still have the JWT string-or-array-of-strings shape. Exercise the
-/// actual bearer and browser callback doors, including their Pending discovery/JWKS/exchange IO,
-/// with a separate resource audience and login client id.
+
 #[test]
 fn signed_mixed_type_audiences_are_refused_by_both_doors_and_login_modes() {
     let _one = support::serial();
@@ -315,8 +281,7 @@ fn signed_mixed_type_audiences_are_refused_by_both_doors_and_login_modes() {
 }
 
 /// What one door does with the module opened under `cfg`, against its own IdP, as one comparable
-/// transcript: every answer, then every need the loader declared, every request the IdP saw and
-/// how many reads pended.
+
 fn transcript(b: &Bound, cfg: &str, t: &Tokens) -> Vec<String> {
     let id_token = |token: &str| serde_json::json!({ "id_token": token }).to_string();
     let callback = |code: &str, cap| b.complete(code, ("st", NONCE), REDIRECT, "the-verifier", cap);
@@ -368,7 +333,7 @@ fn transcript(b: &Bound, cfg: &str, t: &Tokens) -> Vec<String> {
 }
 
 /// The OIDC module behaves as ONE module through either door, every request through the host's
-/// connector — and the RED arms show the comparison is not vacuous.
+
 #[test]
 fn the_linked_and_the_dropped_in_oidc_module_are_one_module() {
     let _one = support::serial();
@@ -396,7 +361,6 @@ fn the_linked_and_the_dropped_in_oidc_module_are_one_module() {
     let b = transcript(&dropped, &cfg, &t);
     assert_eq!(a, b, "the two doors are not one module");
 
-    // Not a vacuous pass: the script did what the module is for.
     let text = a.join("\n");
     assert_eq!(a[0], format!("name {NAME}"), "{text}");
     assert_eq!(a[1], "open Ok(())", "{text}");
@@ -451,11 +415,6 @@ fn the_linked_and_the_dropped_in_oidc_module_are_one_module() {
         "an identity token minted for another login's nonce fails the security check: {text}"
     );
 
-    // THE NEEDS, as the loader declared them: six outbound https needs (discovery and the JWKS
-    // open-web, the token exchange the default class: a private IdP address is refused unless
-    // allowlisted, security item 3), the three
-    // trusting `ca_cert_pem` then their public-roots twins; discovery pinned to the issuer
-    // setting's value. With `ca_cert_pem` set every one is carried.
     let anchor = "\"settings.ca_cert_pem\"";
     for (need, target_from, trust_from, target) in [
         (
@@ -489,12 +448,8 @@ fn the_linked_and_the_dropped_in_oidc_module_are_one_module() {
         assert!(a.contains(&want), "missing {want:?} in:\n{text}");
     }
 
-    // THE REQUESTS: ONE discovery GET and ONE JWKS GET for the whole script (single-flight and
-    // the cache), each to the URL the module named, on its own need; the token POSTs on the token
-    // need, carrying the lent secret.
     let sent = linked.idp.sent();
-    // NO CONNECTION OUTSIDE THE DECLARED NEEDS: every establish names a declared need index and
-    // that need's configured target.
+
     let needs = rendering::read(&row.statement).expect("reads").needs.len() as u32;
     for idp in [&linked.idp, &dropped.idp] {
         assert_eq!(
@@ -540,8 +495,6 @@ fn the_linked_and_the_dropped_in_oidc_module_are_one_module() {
         "every request crossed PENDING and was resumed on its wake: {text}"
     );
 
-    // RED ARM 1: the same cdylib under a different operator config (another audience) is a
-    // different transcript — the token the linked door identified is now refused.
     let other = bind(
         &Arm::Dropped {
             lib: &lib,
@@ -555,10 +508,6 @@ fn the_linked_and_the_dropped_in_oidc_module_are_one_module() {
         "a different config must not read as the same module"
     );
 
-    // THE PUBLIC ROOTS: with no `ca_cert_pem` (optional, as in 1.5.5) the needs trusting it are
-    // refused at declaration (the host refuses a `trust_from` that names nothing), and the module
-    // answers the same script the same way over their public-roots twins, asking nothing of a
-    // refused need.
     let public = bind(
         &Arm::Dropped {
             lib: &lib,
@@ -597,7 +546,6 @@ fn the_linked_and_the_dropped_in_oidc_module_are_one_module() {
         p.join("\n")
     );
 
-    // RED ARM 2: the same bytes stated as `secret` are refused at the manifest's kind.
     let arm = Arm::Dropped {
         lib: &lib,
         stated: &stated,
@@ -608,7 +556,6 @@ fn the_linked_and_the_dropped_in_oidc_module_are_one_module() {
         Ok(_) => panic!("an auth door stated as secret must not load"),
     }
 
-    // RED ARM 3: a manifest whose Statement is not the door's is refused at admit.
     let mut tampered = stated.clone();
     let version = env!("CARGO_PKG_VERSION").as_bytes();
     let at = tampered
@@ -631,8 +578,7 @@ fn the_linked_and_the_dropped_in_oidc_module_are_one_module() {
 }
 
 /// RED: an unreachable issuer fails verify with 1.5.5's discovery text (1.5.5 refused boot with
-/// it; the module now fetches nothing at open — THE SEAM), and a call on no ticket, which may not
-/// pend, fails at once and asks the IdP nothing. Both doors alike.
+
 #[test]
 fn red_an_unreachable_issuer_and_a_ticketless_call_fail_verify_in_1_5_5_s_words() {
     let _one = support::serial();
@@ -655,8 +601,6 @@ fn red_an_unreachable_issuer_and_a_ticketless_call_fail_verify_in_1_5_5_s_words(
         let b = bind(&arm, &idp);
         open(&b.plugin, &config(AUDIENCE), None).expect("opens: nothing is fetched at open");
 
-        // ON THE SPOT (no ticket) the verify needs a fetch it may not pend on: REFUSED, so the
-        // host makes it again on a ticket (`abi::auth`).
         let ticketless = verify_ticketless(&b.plugin, Some(&token));
         assert!(ticketless.starts_with("Refused"), "{ticketless}");
         assert!(
@@ -678,8 +622,7 @@ fn red_an_unreachable_issuer_and_a_ticketless_call_fail_verify_in_1_5_5_s_words(
 }
 
 /// SINGLE-FLIGHT through the real dispatcher (THE DESIGN, auth: "a cold key id pends verify, one
-/// `exchange()` fetches, every waiter wakes"): two cold verifies in flight at once make ONE
-/// discovery request and ONE JWKS request between them, and both identify.
+
 #[test]
 fn concurrent_cold_verifies_make_one_discovery_and_one_jwks_request() {
     cold_verifies(true);
@@ -692,7 +635,7 @@ fn simultaneous_cold_verifies_make_one_discovery_and_one_jwks_request() {
 }
 
 /// Two cold verifies on one instance; the second submitted once the first pended (`staggered`) or
-/// at once.
+
 fn cold_verifies(staggered: bool) {
     let _one = support::serial();
     let key = Issuer::start(UNUSED_ISSUER, KID);
@@ -710,8 +653,7 @@ fn cold_verifies(staggered: bool) {
             )
         })
         .collect();
-    // The first verify is submitted, and the second only once the first has pended on its
-    // discovery request: the second arrives while the first's fetch is in flight.
+
     let mut replies = Vec::new();
     for (i, (bytes, groups)) in bufs.iter_mut().enumerate() {
         if i == 1 && staggered {
@@ -756,8 +698,7 @@ fn cold_verifies(staggered: bool) {
 }
 
 /// A discovery reply far past the 1 MiB cap names the document and stops reading at the cap,
-/// rather than buffering the SDK's
-/// 16 MiB reply ceiling first (1.5.5 read at most cap + 1 bytes).
+
 #[test]
 fn red_an_oversized_reply_is_cut_off_at_the_cap_not_buffered_whole() {
     let _one = support::serial();
@@ -804,7 +745,7 @@ fn a_non_utf8_discovery_reply_names_the_document_without_echoing_the_body() {
 }
 
 /// THE STATUS IS JUDGED BEFORE THE BODY, as 1.5.5 judged it: a non-2xx discovery reply with a body
-/// far past the cap is refused naming its status, and is still cut off at the cap while reading.
+
 #[test]
 fn red_an_oversized_error_reply_names_its_status_and_is_cut_off_at_the_cap() {
     let _one = support::serial();
@@ -834,10 +775,7 @@ fn red_an_oversized_error_reply_names_its_status_and_is_cut_off_at_the_cap() {
 }
 
 /// THE LOGIN WHOSE KEY SET CANNOT BE HAD, through the real dispatcher (OWNER-SIGNED 2026-10-30:
-/// an IdP outage is never a 401). The token endpoint answers an identity token, but the key set's
-/// URL is to be discovered and the issuer's discovery answers 503: the door answers
-/// `LOGIN_OUTAGE` (the IdP could not be had), never `LOGIN_BAD_CREDENTIAL` (1.5.5 rendered this
-/// as the declined sign-in; the owner reversed that).
+
 #[test]
 fn a_login_whose_key_set_cannot_be_had_is_an_outage_not_declined() {
     let _one = support::serial();
@@ -863,9 +801,7 @@ fn a_login_whose_key_set_cannot_be_had_is_an_outage_not_declined() {
 }
 
 /// THE WAKE through the real dispatcher (THE DESIGN, auth: "every waiter wakes"): a verify that
-/// waits on another verify's discovery and JWKS fetches is woken when each lands, arming its
-/// backstop timer once per wait, rather than polling a short timer for as long as the fetch takes.
-/// Each IdP reply pends 400 ms; a waiter polling every 25 ms reads the host clock dozens of times.
+
 #[test]
 fn a_waiter_is_woken_by_the_fetch_it_waits_on_not_a_polling_timer() {
     let _one = support::serial();
@@ -929,11 +865,7 @@ fn a_waiter_is_woken_by_the_fetch_it_waits_on_not_a_polling_timer() {
 }
 
 /// THE TICK (THE DESIGN, auth: "`tick` refreshes ahead of the TTL, with 1.5.5's timings"), through
-/// the real dispatcher on the instance's driver ticket: a tick before the key set is due fetches
-/// nothing; once it is within one tick period (`jwks_min_refetch_secs`) of its TTL, the tick fetches
-/// it — pending, carried on by `drive` when the IdP's answer wakes the driver ticket — before the
-/// TTL runs out, so no request is the one that waits on the refresh. Each tick asks for the next one
-/// a period on.
+
 #[test]
 fn a_tick_refreshes_the_key_set_ahead_of_its_ttl() {
     let _one = support::serial();
@@ -970,7 +902,6 @@ fn a_tick_refreshes_the_key_set_ahead_of_its_ttl() {
     assert_eq!(tick(at), at + 1_000_000_000, "the next tick, one period on");
     assert_eq!(idp.sent_to("/keys").len(), 1, "not due: nothing fetched");
 
-    // Within one period of the 3 s TTL, before it runs out.
     std::thread::sleep(Duration::from_millis(2100));
     tick(now_ns());
     let until = std::time::Instant::now() + Duration::from_secs(10);
@@ -987,7 +918,7 @@ fn a_tick_refreshes_the_key_set_ahead_of_its_ttl() {
 }
 
 /// RED: a request on an undeclared need index, or to a target its need does not name, is caught by
-/// the check the conformance transcript holds every establish to.
+
 #[test]
 fn red_an_undeclared_need_or_a_foreign_target_is_caught() {
     let sent = |need: u32, target: &str| support::Sent {
@@ -1025,10 +956,7 @@ fn red_an_undeclared_need_or_a_foreign_target_is_caught() {
 }
 
 /// RED: the rendered Statement declares exactly the six needs — outbound, `http`, discovery and the
-/// JWKS open-web and the token exchange the default class (a private IdP address refused unless
-/// allowlisted, security item 3; the token exchange still takes 1.5.5's http to a private host), three
-/// trusting `ca_cert_pem` then their public-roots twins, discovery pinned to `issuer` — and both
-/// doors state the same rendering.
+
 #[test]
 fn red_the_statement_declares_six_outbound_http_needs_in_their_classes() {
     let row = row();
@@ -1084,11 +1012,7 @@ fn red_the_statement_declares_six_outbound_http_needs_in_their_classes() {
 }
 
 /// A BEARER THAT IS NOT UTF-8 IS NOT THIS MODULE'S CREDENTIAL, ANSWERED AS ONE (Q128 auth-oidc
-/// MEDIUM, reader r61 on 7b84416; THE DESIGN §6 "Auth points and guest lists": every auth called
-/// names its credential lines whatever its verdict): PASS with the chain's CONTINUE decision and the
-/// credential line named for the transport to strip, as 1.5.5 passed a header that did not read as
-/// text (no bearer for this module). RED before the fix: PASS with no decision and no strip name,
-/// which the host faults.
+
 #[test]
 fn a_bearer_that_is_not_utf8_passes_with_a_decision_and_its_line_named() {
     let _one = support::serial();
@@ -1115,9 +1039,7 @@ fn a_bearer_that_is_not_utf8_passes_with_a_decision_and_its_line_named() {
 }
 
 /// AN IDENTITY CARRIES THE CREDENTIAL IT WAS VERIFIED FROM (Q128 auth-oidc LOW, reader r81 on
-/// 59293c0; THE DESIGN §6 "Auth points and guest lists", step 4; `IdentityOut::credential`): the
-/// kernel holds it on the unit for the `caller-credential` style. RED before the fix: the span was
-/// absent.
+
 #[test]
 fn an_identity_carries_the_credential_it_was_verified_from() {
     let _one = support::serial();
@@ -1161,9 +1083,7 @@ fn an_identity_carries_the_credential_it_was_verified_from() {
 }
 
 /// ONE CLOCK (THE DESIGN §1): a token's expiry is judged at the request's own timestamp, the
-/// host's clock as it arrived, never one the plugin reads; a request stating none (`0`) fails
-/// closed. A token valid for the next hour is refused at a request two hours on. RED before the fix:
-/// the plugin judged expiry on the OS clock, so the late request was identified.
+
 #[test]
 fn a_token_s_expiry_is_judged_at_the_request_s_timestamp() {
     let _one = support::serial();
@@ -1187,7 +1107,7 @@ fn a_token_s_expiry_is_judged_at_the_request_s_timestamp() {
 }
 
 /// A `verify` of `token` submitted on its own ticket and left in flight; the closure waits for
-/// its answer (`verdict N`, or the outcome). `token` must outlive the call of the closure.
+
 fn verify_in_flight<'b>(b: &'b Bound, token: &str) -> impl FnOnce() -> String + 'b {
     let bytes: &'static mut [u8] = Box::leak(vec![0_u8; IDENTITY_BUF_BYTES].into_boxed_slice());
     let groups: &'static mut [Span] =
@@ -1229,7 +1149,7 @@ fn until_pended(idp: &Idp, n: u32) {
 }
 
 /// Replace the settings and secret through the existing lifecycle Door while another op is
-/// PENDING. Its parked exchange must keep the module that owns that exchange.
+
 fn refresh_pending(b: &Bound, settings: &str) {
     use busbar_contract::abi::mechanism::call::{Blob, BLOB_JSON, BLOB_OCTETS};
     use busbar_contract::abi::mechanism::lifecycle::{slot as life, RefreshIn};
@@ -1270,7 +1190,7 @@ fn until_read_held(idp: &Idp) {
 }
 
 /// Change issuer, audience, client, endpoints, secret and CA selection together. Old operations
-/// retain the original configuration; a fresh operation must visibly use this replacement.
+
 fn replacement_config() -> String {
     serde_json::json!({
         "issuer": "https://replacement.conformance.example",
@@ -1357,8 +1277,7 @@ fn pending_verify_and_begin_keep_their_opened_configuration_across_refresh() {
 fn pending_complete_keeps_its_client_and_token_answer_across_refresh() {
     let _one = support::serial();
     let key = Issuer::start(UNUSED_ISSUER, KID);
-    // The token response is still in flight in the first case; in the second it has been
-    // consumed once and parked while signature verification waits on the JWKS.
+
     for path in ["/token", "/keys"] {
         let idp = Idp::new(&key);
         let b = bind(&Arm::Linked, &idp);
@@ -1417,10 +1336,7 @@ fn pending_complete_keeps_its_client_and_token_answer_across_refresh() {
 }
 
 /// L1: a verify that claimed the key set's refresh and pended on it, re-entered after ANOTHER
-/// verify cached the same token's identity meanwhile, still LANDS its own fetch: the rotated key
-/// the IdP answered is installed, so a token signed by it verifies at once. (Before, the re-entry
-/// answered from the verdict cache and dropped the fetch: the flight stayed claimed, the new key
-/// never arrived and the rate limit refused the rotation refetch.)
+
 #[test]
 fn a_verify_meeting_the_verdict_cache_on_re_entry_still_lands_its_fetch() {
     let _one = support::serial();
@@ -1436,7 +1352,6 @@ fn a_verify_meeting_the_verdict_cache_on_re_entry_still_lands_its_fetch() {
         .verify(Some(&old.sign(&claims(AUDIENCE))), None)
         .starts_with("verdict 1 "));
 
-    // The set goes stale and the rate limit lets a refresh through; the IdP has rotated.
     std::thread::sleep(Duration::from_millis(2100));
     let keys = |i: &Issuer| {
         serde_json::from_str::<serde_json::Value>(i.jwks()).unwrap()["keys"][0].clone()
@@ -1451,7 +1366,7 @@ fn a_verify_meeting_the_verdict_cache_on_re_entry_still_lands_its_fetch() {
     let token = old.sign(&c);
     let a = verify_in_flight(&b, &token);
     until_pended(&idp, pended + 1);
-    // Another verify of the same token, on the stale set, caches its identity.
+
     assert!(b.verify(Some(&token), None).starts_with("verdict 1 "));
     assert_eq!(a(), "verdict 1");
 
@@ -1464,7 +1379,7 @@ fn a_verify_meeting_the_verdict_cache_on_re_entry_still_lands_its_fetch() {
 }
 
 /// L2: a tick arriving while the previous tick's refresh is still in flight on the driver ticket
-/// carries THAT fetch on rather than starting a second exchange for the same key set.
+
 #[test]
 fn a_tick_during_the_last_tick_s_fetch_does_not_fetch_again() {
     let _one = support::serial();
@@ -1503,7 +1418,7 @@ fn a_tick_during_the_last_tick_s_fetch_does_not_fetch_again() {
 }
 
 /// L6: `ready` meeting another op's discovery in flight WAITS for it (woken when it settles),
-/// rather than approving the boot unseen: a discovery that then fails refuses the boot.
+
 #[test]
 fn ready_waits_on_another_op_s_discovery_and_a_failure_refuses_the_boot() {
     let _one = support::serial();
@@ -1567,7 +1482,7 @@ fn ready_audits_refused_warmup_destinations_without_changing_best_effort_boot() 
 }
 
 /// T2: a login's id_token is judged for expiry at the HOST's wall clock (`clock.now`), through the
-/// real door: one that expired, or is not yet valid, is a declined login; a fresh one identifies.
+
 #[test]
 fn a_login_id_token_s_expiry_is_judged_at_the_host_clock() {
     let _one = support::serial();
@@ -1604,8 +1519,7 @@ fn a_login_id_token_s_expiry_is_judged_at_the_host_clock() {
 }
 
 /// OIO1: a short login answer expires on the host's monotonic clock, with the existing inclusive
-/// ten-minute boundary. The IdP refuses a second redemption, so serving the saved identity and
-/// re-entering the exchange are distinguishable through the real loaded door.
+
 #[test]
 fn a_short_login_answer_uses_the_host_monotonic_expiry_boundary() {
     let _one = support::serial();
@@ -1736,8 +1650,7 @@ fn a_broken_successful_token_response_is_a_login_outage() {
 }
 
 /// T3: an IdP destination the host's guard REFUSES is audited through the door: the verify fails,
-/// and the door raises its declared `OIDC_IDP_DESTINATION_REFUSED` at error naming the host and
-/// the rule (never the URL's path) — once per module, not once per request.
+
 #[test]
 fn a_refused_idp_destination_raises_its_declared_diagnostic_once() {
     let _one = support::serial();
@@ -1747,7 +1660,7 @@ fn a_refused_idp_destination_raises_its_declared_diagnostic_once() {
     let mut cfg: serde_json::Value = serde_json::from_str(&config(AUDIENCE)).unwrap();
     cfg["jwks_min_refetch_secs"] = serde_json::json!(1);
     open(&b.plugin, &cfg.to_string(), None).expect("opens");
-    // The JWKS need (anchored set: `ca_cert_pem` is configured) is refused by the guard.
+
     idp.refuse(1);
     let token = key.sign(&claims(AUDIENCE));
     assert!(b.verify(Some(&token), None).starts_with("Failed"));
@@ -1759,14 +1672,14 @@ fn a_refused_idp_destination_raises_its_declared_diagnostic_once() {
             && !raised[0].contains("/keys"),
         "{raised:?}"
     );
-    // Past the retry bound the fetch is made, and refused, again: not raised again.
+
     std::thread::sleep(Duration::from_millis(1100));
     assert!(b.verify(Some(&token), None).starts_with("Failed"));
     assert_eq!(idp.diags().len(), 1, "raised once: {:?}", idp.diags());
 }
 
 /// L17: READY and tick keep connector state outside the generic parked operation. Cancelling
-/// one ticket or refreshing the instance must release its actual host connection immediately.
+
 #[test]
 fn ready_and_tick_release_held_connections_on_cancel_or_refresh() {
     use busbar_contract::abi::mechanism::lifecycle::{
@@ -1866,7 +1779,7 @@ fn ready_and_tick_release_held_connections_on_cancel_or_refresh() {
 }
 
 /// A refresh can finish while a driver is inside a host call. The old exchange must not be
-/// published after a successful refresh, including a refresh that keeps the same module.
+
 #[test]
 fn executing_driver_does_not_repark_an_exchange_after_successful_refresh() {
     use busbar_contract::abi::mechanism::call::{Blob, BLOB_JSON};
@@ -1924,9 +1837,7 @@ fn executing_driver_does_not_repark_an_exchange_after_successful_refresh() {
                                 std::thread::yield_now();
                             }
                             assert_eq!(driven.answers(), seen + 1, "exactly one drive answered");
-                            // With exactly one answer observed, no terminal answer means that
-                            // answer was Pending. The read hold prevents another host wake;
-                            // check the count again so a competing answer fails this proof.
+
                             let outcome = driven
                                 .answered_after(seen, Duration::ZERO)
                                 .unwrap_or(Outcome::Pending);

@@ -2,9 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! THE MODULE FROM ITS SETTINGS: the engine's JSON config adapted into an [`OidcModule`]. The
-//! door's `validate`, `open` and `refresh` ([`crate::door`]) build their instance here. Nothing is
-//! fetched at `open`: it runs on no ticket and is handed no connector, so the JWKS and (when a URL
-//! is not configured) the issuer's discovery document are fetched by the first op that needs them.
 
 use crate::{check_jwks_url, OidcConfig, OidcModule};
 
@@ -75,7 +72,7 @@ pub fn config(cfg: &str) -> Result<OidcConfig, String> {
 }
 
 /// Keep the existing plaintext exceptions: local issuer/browser URLs, and private or loopback
-/// token endpoints. Destination authorization remains the host's. Refusals never repeat input.
+
 fn configured_url(key: &str, value: &str, token: bool) -> Result<(), String> {
     let parsed =
         url::Url::parse(value).map_err(|_| format!("settings.{key}: must be a valid URL"))?;
@@ -108,8 +105,7 @@ fn configured_url(key: &str, value: &str, token: bool) -> Result<(), String> {
 }
 
 /// The module `open` builds from the settings: parsed, its explicit `jwks_url` https, or plain
-/// http, which opens with a WARNING naming it ([`check_jwks_url`]), logged and answered beside the
-/// module (the door raises it as its declared diagnostic).
+
 pub(crate) fn module(cfg: &str) -> Result<(OidcModule, Option<String>), String> {
     let cfg = config(cfg)?;
     let warning = check_jwks_url(&cfg)?;

@@ -2,11 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! A SCRIPTED IdP for the module's sans-IO tests: one document every GET answers (or an error), the
-//! token endpoint's reply, and a count of every request made. A [`Caller`] is one op's requests
-//! against it, as the door's exchange makes them: one that pends answers its FIRST ask of a request
-//! `Pending` and the same ask on the op's re-entry `Ready`, like an exchange whose first read
-//! pends. A fetch that lands wakes its waiters through the caller ([`Fetch::wake`]); the IdP
-//! records every ticket woken. No network.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
@@ -102,7 +97,7 @@ impl Idp {
     }
 
     /// Swap the served body in place — the provider rotating its JWKS underneath an
-    /// already-running module.
+
     pub fn set_body(&self, body: String) {
         self.set_answer(Ok(body));
     }
@@ -152,7 +147,7 @@ pub struct Caller<'a> {
 
 impl Caller<'_> {
     /// Whether a request to `url` is answered now: a re-ask of the one in flight is; a new one is
-    /// started, and answered now unless this op pends.
+
     fn answered(&mut self, url: &str) -> bool {
         if self.in_flight.as_deref() == Some(url) {
             self.in_flight = None;

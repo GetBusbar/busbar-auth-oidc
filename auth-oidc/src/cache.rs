@@ -2,36 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The JWKS cache: fetch-on-demand, TTL refresh, and a BOUNDED refetch — when a token names a `kid`
-//! absent from the cached set (the provider rotated its signing key), refetch once, rate-limited,
-//! and retry. Guards against a bogus-`kid` flood turning into a fetch storm.
-//!
-//! ## Sans-IO single-flight
-//!
-//! The cache never blocks and never dials: its fetch is the caller's [`Fetch`], which answers
-//! PENDING while the caller's own exchange is in flight. A cold key id pends `verify`; ONE caller
-//! claims the fetch (the [`Flight`]) and its op re-enters on its exchange's wake; every other caller
-//! with nothing to serve answers [`Step::Wait`], is noted as a waiter, and is WOKEN when the fetch
-//! settles ([`Fetch::wake`]), taking the winner's keys. A caller that already holds a usable key set
-//! never waits on another's fetch: it serves from what it has while the winner refreshes.
-//!
-//! ## Refresh ahead of the TTL
-//!
-//! `tick` refreshes the set before it goes stale ([`JwksCache::refresh_ahead`]), on the instance's
-//! driver ticket, so no request is the one that waits on the TTL refresh; the request path keeps
-//! its own refresh for a set the tick has not reached. The cache's lock is held for the microseconds it
-//! takes to clone an `Arc` or write one back — never across a fetch, never across a signature
-//! verification (`f` runs on a snapshot with nothing held).
-//!
-//! ## Why every fetch trigger is rate-limited
-//!
-//! Every trigger — cold start, TTL-stale, and unknown-`kid` rotation alike — goes through the same
-//! `min_refetch_interval` rate limit anchored on the last fetch ATTEMPT (failures included).
-//! Bounding the rotation path alone is not enough: because `fetched_at` advances only on success, an
-//! unreachable IdP would leave the set permanently TTL-stale and every single request would issue its
-//! own fresh GET — an unbounded fetch storm against the provider.
-//! The one exception: a caller with nothing to serve may take over a flight abandoned past
-//! [`crate::flight::FLIGHT_MAX`] (its op was cancelled before it settled), which made no attempt
-//! the window can stand for; that is bounded at one fetch per `FLIGHT_MAX`.
 
 use crate::fetch::{Doc, Fetch};
 use crate::flight::{Flight, Step};
@@ -79,19 +49,13 @@ impl KeyError {
 }
 
 /// A JWKS cache. Holds the last-fetched key set, the timestamps that bound refresh and the fetch in
-/// flight.
+
 pub struct JwksCache {
     /// Minimum gap between fetch ATTEMPTS — the bound on every refetch trigger (cold, TTL-stale,
-    /// kid-rotation), so no flood of requests can turn into a fetch storm.
     min_refetch_interval: Duration,
     /// TTL after which the cached set is considered stale and proactively refetched on next use.
     ttl: Duration,
     /// Absolute ceiling on how long a cached key set may keep serving while every refetch attempt
-    /// fails. `ttl`-staleness alone has no upper bound — a transient blip correctly keeps serving the
-    /// last-known-good keys (see `settle`), but with no ceiling an IdP outage of days would keep
-    /// validating signatures against a key the provider may have rotated out BECAUSE it was
-    /// compromised. Derived from `ttl` (not a new config field): `max(ttl * 24, 24h)`, so a short-TTL
-    /// deployment gets a generous-but-bounded window and a long-TTL one still has SOME bound.
     max_stale: Duration,
     /// The cached data. Held for microseconds only — NEVER across a fetch or a signature verify.
     inner: Mutex<Inner>,
@@ -127,15 +91,7 @@ impl JwksCache {
     }
 
     /// Run `f` against the key matching `kid`, the JWKS fetched from `url` through `io`. If the
-    /// cache is empty or stale, fetch first. If `kid` still misses after that (key ROTATION),
-    /// refetch ONCE — rate-limited by `min_refetch_interval` — and retry. `f` receives the found
-    /// key; a miss after the bounded refetch is a precise error. The error says whether the key
-    /// set could not be had ([`KeyError::Unavailable`]) or no key in it verifies
-    /// ([`KeyError::Mismatch`]).
-    ///
-    /// PENDING while this caller's fetch is in flight (re-enter with the same `io` state: the call
-    /// carries on from where it fetched, at the instant it claimed the fetch); WAIT while another
-    /// caller's is and this one has nothing to serve.
+
     pub fn with_key<T>(
         &self,
         url: &str,
@@ -148,8 +104,7 @@ impl JwksCache {
     }
 
     /// [`Self::with_key`] for a token signed with `alg`: a token naming NO kid (`kid` empty) is
-    /// verified by the set's single usable signing key for `alg` ([`JwkSet::select`]), if there is
-    /// exactly one.
+
     pub fn with_key_for<T>(
         &self,
         url: &str,
@@ -159,8 +114,6 @@ impl JwksCache {
         io: &mut dyn Fetch,
         f: impl Fn(&Jwk) -> Result<T, String>,
     ) -> Step<Result<T, KeyError>> {
-        // RESUME: this caller's own fetch, then on from the point it claimed it. One lock reads
-        // both the flight and the snapshot.
         let (mine, snapshot) = {
             let inner = self.lock();
             let mine = inner.flight.filter(|(fl, _)| fl.mine(io.caller()));
@@ -179,17 +132,11 @@ impl JwksCache {
             }
             None => {
                 let (mut keys, stale, expired) = snapshot;
-                // Past the absolute staleness ceiling: treat exactly like a cold cache. `settle`
-                // itself refuses to fall back to these same keys once they are this old, so forcing
-                // the "nothing to serve" path here — rather than trying `keys` first — means an
-                // outage this long surfaces the honest "cannot verify" error instead of silently
-                // keeping a possibly-revoked key alive.
+
                 if expired {
                     keys = None;
                 }
-                // Ensure we have a (fresh enough) key set. A cold cache has nothing to serve, so it
-                // WAITS for the in-flight fetch; a merely TTL-stale one does not — stale keys still
-                // verify tokens, and waiting on the refresh is what turns a slow IdP into an outage.
+
                 if keys.is_none() || stale {
                     let wait = keys.is_none();
                     keys = match step!(self.refresh(io, url, now, wait, Point::Refresh)) {
@@ -200,9 +147,7 @@ impl JwksCache {
                 (keys, now)
             }
         };
-        // Still nothing: the provider is unreachable AND we are inside the retry bound, so we are
-        // deliberately not asking again yet. Say that, rather than the "unknown kid" error below —
-        // which would blame the token for the provider being down.
+
         let Some(set) = keys else {
             return Step::Ready(Err(KeyError::Unavailable(format!(
                 "no JWKS has been fetched from {} yet (the last fetch attempt failed and the \
@@ -210,14 +155,11 @@ impl JwksCache {
                 crate::fetch::shown(url)
             ))));
         };
-        // First lookup. More than one key can share `kid` (RFC 7517 §4.5 — e.g. an RSA and an EC key
-        // coexisting under one `kid` during an algorithm migration), so try every match and return
-        // the first that verifies; keep the last error if none do.
+
         if let Some(result) = Self::try_all(&set, kid, alg, &f) {
             return Step::Ready(result.map_err(KeyError::Mismatch));
         }
-        // Miss ⇒ possible key rotation. Refetch ONCE if the rate limit permits, then retry. Never
-        // waits: a caller in this branch is about to reject the token anyway.
+
         let keys = match step!(self.refresh(io, url, now, false, Point::Rotation)) {
             Ok(keys) => keys,
             Err(e) => return Step::Ready(Err(KeyError::Unavailable(e))),
@@ -226,9 +168,7 @@ impl JwksCache {
     }
 
     /// THE WARM-UP (`ready`, at boot): fetch the key set once when the cache holds none, so the
-    /// first verdicts are answered on the spot. PENDING while this caller's fetch is in flight
-    /// (re-enter with the same `io` state); WAIT while another caller's is. A failed fetch is the
-    /// fetch's error; the cache is left as any failed fetch leaves it.
+
     pub fn warm(&self, url: &str, now: Instant, io: &mut dyn Fetch) -> Step<Result<(), String>> {
         let mine = self.lock().flight.filter(|(fl, _)| fl.mine(io.caller()));
         if let Some((flight, _)) = mine {
@@ -244,10 +184,7 @@ impl JwksCache {
     }
 
     /// THE TICK'S REFRESH AHEAD OF THE TTL: when the set is due (none yet, or within `lead` of its
-    /// TTL), fetch it on this caller's ticket, rate-limited like every trigger, never waiting on
-    /// another caller's fetch. PENDING while this caller's fetch is in flight (re-enter with the
-    /// same `io` state); READY otherwise, with the fetch's error when it failed with nothing to
-    /// keep.
+
     pub fn refresh_ahead(
         &self,
         url: &str,
@@ -271,7 +208,7 @@ impl JwksCache {
     }
 
     /// Whether the set is due for its refresh at `now`: none fetched, or `lead` or less short of
-    /// its TTL.
+
     fn due(&self, now: Instant, lead: Duration) -> bool {
         self.lock()
             .fetched_at
@@ -279,8 +216,7 @@ impl JwksCache {
     }
 
     /// The lookup after the bounded rotation refetch: a match, or the unknown-`kid` error — a
-    /// MISMATCH when the set in hand is the one the IdP last answered, an OUTAGE when its latest
-    /// fetch failed (the rotated key may be in the set that could not be had).
+
     fn after_rotation<T>(
         &self,
         keys: Option<&JwkSet>,
@@ -300,10 +236,7 @@ impl JwksCache {
                 crate::fetch::shown(url)
             )));
         }
-        // `kid` comes from the UNSIGNED header of an untrusted bearer and this error reaches a
-        // log before any signature has been accepted, so it is escaped and capped
-        // ([`crate::untrusted`]): a kid carrying a newline or a terminal escape must not forge or
-        // colour log records. Short printable kids are byte-identical.
+
         if kid.is_empty() {
             return Err(KeyError::Mismatch(
                 "the token has no kid and the JWKS does not select exactly one usable signing key"
@@ -319,9 +252,7 @@ impl JwksCache {
     }
 
     /// Try `f` against every key in `set` selected for `kid` and `alg` ([`JwkSet::select`]),
-    /// returning the first `Ok`. If at least one key matched but all errored, returns the LAST
-    /// error. Returns `None` when zero keys matched at all, so the caller can distinguish "no key
-    /// with this kid" from "keys existed but none verified".
+
     fn try_all<T>(
         set: &JwkSet,
         kid: &str,
@@ -339,7 +270,7 @@ impl JwksCache {
     }
 
     /// Snapshot the cached set, whether it is past TTL, and whether it is past the absolute staleness
-    /// ceiling (`max_stale`). Holds the lock for an `Arc` clone.
+
     fn snapshot(&self, now: Instant) -> (Option<Arc<JwkSet>>, bool, bool) {
         self.snapshot_of(&self.lock(), now)
     }
@@ -354,15 +285,7 @@ impl JwksCache {
     }
 
     /// Bring the cache up to date if the rate limit allows, and answer the current key set.
-    ///
-    /// Never fails on a fetch error when the cache already holds keys: a transient provider blip
-    /// must not stop tokens signed by keys we already have from verifying. A cold cache DOES
-    /// propagate the error, because there is nothing to fall back to and the caller needs the
-    /// reason.
-    ///
-    /// `wait` distinguishes the two single-flight behaviours: `false` (the common case) means "if
-    /// someone else is already fetching, don't wait — use what we have"; `true` means "we have
-    /// nothing to serve, so wait for the in-flight fetch and take its result".
+
     fn refresh(
         &self,
         io: &mut dyn Fetch,
@@ -374,17 +297,13 @@ impl JwksCache {
         let me = io.caller();
         {
             let mut inner = self.lock();
-            // DESPERATE = the caller has nothing at all to serve: no keys, or only keys past the
-            // staleness ceiling. Such a caller must wait for the in-flight fetch rather than be
-            // turned away by the rate limit — being rate-limited out of a fetch that is happening
-            // right now would fail the very first requests after boot.
+
             let desperate = wait && (inner.keys.is_none() || self.past_ceiling(&inner, now));
-            // RATE LIMIT, checked before the flight so a rate-limited caller never waits.
+
             if !desperate && !self.permits_attempt(&inner, now) {
                 return Step::Ready(self.serve_within_ceiling(&inner, url, now));
             }
-            // SINGLE-FLIGHT. A caller with usable keys serves them rather than waiting on a fetch
-            // it does not need; a desperate one waits for it.
+
             if inner.flight.is_some_and(|(fl, _)| fl.held_against(me, now)) {
                 if !desperate {
                     return Step::Ready(self.serve_within_ceiling(&inner, url, now));
@@ -397,24 +316,19 @@ impl JwksCache {
                 }
                 return Step::Wait;
             }
-            // Re-check the rate limit for the desperate caller: the fetch it would have waited for
-            // has already been made, and re-fetching immediately would defeat the bound. A flight
-            // past FLIGHT_MAX was abandoned without settling, so it made no attempt this window can
-            // stand for; taking it over is bounded by FLIGHT_MAX.
+
             if inner.flight.is_none() && !self.permits_attempt(&inner, now) {
                 return Step::Ready(self.serve_within_ceiling(&inner, url, now));
             }
-            // A call on no ticket may not pend, so it may not claim a fetch either: it would hold
-            // the rate-limit window without ever asking.
+
             let Some(owner) = me else {
                 return Step::Ready(Err(io.cannot_pend(url)));
             };
-            // Claim the window BEFORE the fetch so concurrent callers see it and back off. This is
-            // also what makes the rate limit apply to FAILURES — the anchor advances either way.
+
             inner.last_attempt = Some(now);
             inner.flight = Some((Flight { owner, at: now }, point));
         }
-        // THE FETCH — no lock held.
+
         self.land(io, url, now)
     }
 
@@ -432,10 +346,7 @@ impl JwksCache {
     }
 
     /// The fetch claimed at `at` answered `fetched`: install a parsed set, or keep the previous keys
-    /// (a transient provider blip must not blow away a working key set) — UNLESS those are already
-    /// past the absolute staleness ceiling, in which case a days-long outage must not keep
-    /// validating signatures against keys the provider may have rotated out specifically because
-    /// they were compromised. Ends the caller's flight and wakes every op waiting on it.
+
     fn settle(
         &self,
         io: &dyn Fetch,
@@ -454,8 +365,6 @@ impl JwksCache {
         let mut kept_through: Option<String> = None;
         let mut nothing_kept: Option<String> = None;
         let settled = match fetched {
-            // A late answer to a flight another caller has since taken over never replaces keys
-            // fetched after it was claimed.
             Ok(set) if inner.fetched_at.is_none_or(|t| t <= at) => {
                 inner.keys = Some(Arc::new(set));
                 inner.fetched_at = Some(at);
@@ -464,8 +373,6 @@ impl JwksCache {
             }
             Ok(_) => Ok(inner.keys.clone()),
             Err(e) => {
-                // A late failure of a flight claimed before the set in hand was fetched says
-                // nothing about that set.
                 if inner.fetched_at.is_none_or(|t| t <= at) {
                     inner.failing = true;
                 }
@@ -484,10 +391,6 @@ impl JwksCache {
         };
         drop(inner);
         if let Some(e) = kept_through {
-            // The fallback hides the failure from every caller, so it is logged here: otherwise an
-            // IdP serving 5xx, a TLS failure or an empty key set leaves no trace until a
-            // rotated-key token is rejected as "unknown kid". The attempt window rate-limits this.
-            // The error names the URL and the cause only.
             tracing::warn!(
                 module = "oidc",
                 url = %crate::fetch::shown(url),
@@ -496,8 +399,6 @@ impl JwksCache {
             );
         }
         if let Some(e) = nothing_kept {
-            // Nothing to fall back to, so the error goes to the caller; `warm` and `refresh_ahead`
-            // discard it, which would leave a cold-cache failure unlogged.
             tracing::warn!(
                 module = "oidc",
                 url = %crate::fetch::shown(url),
@@ -505,8 +406,7 @@ impl JwksCache {
                 "JWKS fetch failed; no key set to serve"
             );
         }
-        // The waiters re-enter on this wake, after the cache is settled: the keys are in, or the
-        // fetch failed and they answer as a failed fetch leaves the cache.
+
         if !waiters.is_empty() {
             io.wake(&waiters);
         }
@@ -514,8 +414,7 @@ impl JwksCache {
     }
 
     /// Whether a fetch ATTEMPT is allowed now. Anchored on the last attempt (not the last success),
-    /// so failures are rate-limited exactly like successes and an unreachable provider cannot be
-    /// turned into a per-request fetch storm.
+
     fn permits_attempt(&self, inner: &Inner, now: Instant) -> bool {
         match inner.last_attempt {
             None => true,
@@ -531,12 +430,7 @@ impl JwksCache {
     }
 
     /// Return the currently cached keys, but ONLY if they are within the absolute staleness ceiling
-    /// (`max_stale`). Every early return in [`Self::refresh`] that would otherwise serve the cached
-    /// set routes through here, so `max_stale` is enforced UNIFORMLY, not only on the fetch-failure
-    /// branch. Without this, a sustained IdP outage under traffic (where nearly every request takes
-    /// one of those early returns) would keep verifying tokens against a key set old enough that the
-    /// provider may have rotated it out precisely because it was compromised. Past the ceiling it
-    /// fails closed with the same "cannot verify" posture the fetch-failure path uses.
+
     fn serve_within_ceiling(
         &self,
         inner: &Inner,
@@ -557,7 +451,7 @@ impl JwksCache {
     }
 
     /// Take the data lock, recovering from poisoning rather than failing auth: the guarded data is a
-    /// public key cache, and a panic elsewhere leaves it structurally intact.
+
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
         self.inner.lock().unwrap_or_else(|p| p.into_inner())
     }

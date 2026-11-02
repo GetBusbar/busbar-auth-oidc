@@ -2,10 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The verdict cache's rules, as 1.5.5's engine credential cache held them (v1.5.5
-//! `crates/busbar/src/auth_cache.rs`, its `verdict_rules_and_expiry`, `bounded_eviction` and
-//! flush-generation tests): an identity held for its TTL (default 300 s, never past 3600 s), a
-//! flush drops everything and counts it, an insert computed before a flush is dropped, the bound
-//! holds.
 
 use super::*;
 
@@ -48,7 +44,7 @@ fn a_flush_drops_everything_and_counts_it() {
 }
 
 /// 1.5.5's flush-generation rule: a verify in flight across a flush cannot put back the identity
-/// it judged before the flush.
+
 #[test]
 fn an_identity_judged_before_a_flush_is_not_put_back_after_it() {
     let c = VerdictCache::default();
@@ -86,7 +82,7 @@ fn the_bound_holds_by_evicting_the_oldest_inserted() {
 }
 
 /// L18: an identity whose TTL is zero is never inserted: it could never be served, and it would
-/// hold a slot (and be counted by the admin flush).
+
 #[test]
 fn a_zero_ttl_identity_is_not_inserted() {
     let c = VerdictCache::default();
@@ -96,8 +92,7 @@ fn a_zero_ttl_identity_is_not_inserted() {
 }
 
 /// L19: an identity larger than 8 KiB (its id, name and roles) is not cached — a token carrying
-/// thousands of roles cannot make the 4096-entry bound hold gigabytes; it is judged afresh each
-/// time. One under the bound still is.
+
 #[test]
 fn an_identity_over_8_kib_is_not_cached() {
     let c = VerdictCache::default();

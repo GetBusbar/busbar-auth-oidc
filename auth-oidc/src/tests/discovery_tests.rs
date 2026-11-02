@@ -2,8 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The discovery document's single flight: the claimer pends on ONE fetch, a caller arriving
-//! meanwhile waits and takes the claimer's document, and the boot-time `ready` resolution runs it
-//! (an explicit `jwks_url` skips it).
 
 use super::*;
 use crate::script::{ready, ticket, Idp, ME};
@@ -101,7 +99,7 @@ fn ready_resolves_the_jwks_url_at_boot_and_an_explicit_one_skips_it() {
 }
 
 /// An op whose fetch answers `Err`, but only after another op has taken over its abandoned flight:
-/// the interleaving a late answer from a flight past `FLIGHT_MAX` produces.
+
 struct TakenOver<'a> {
     a: crate::script::Caller<'a>,
     b: crate::script::Caller<'a>,
@@ -141,7 +139,7 @@ fn a_late_failure_from_an_abandoned_flight_does_not_overwrite_the_live_one() {
     let late = t0 + crate::flight::FLIGHT_MAX + Duration::from_secs(1);
     let mut a = idp.pending(ticket(1));
     assert_eq!(d.document(&c, t0, &mut a), Step::Pending);
-    // A re-enters past FLIGHT_MAX; while its fetch answers, B takes over the abandoned flight.
+
     let mut a = TakenOver {
         a,
         b: idp.pending(ticket(2)),
@@ -184,9 +182,7 @@ fn a_failed_discovery_logs_one_warn_with_the_error() {
 }
 
 /// L15: the discovery document is not held for the module's life: 24 h after it was fetched the
-/// issuer is asked again (an IdP that moved its keys or endpoints is followed), and while that
-/// re-discovery is in flight or has failed, the previous document keeps serving (a re-discovery
-/// that fails is asked again after the retry bound, not a day later).
+
 #[test]
 fn the_document_is_rediscovered_after_a_day_serving_the_previous_one_meanwhile() {
     let (c, d) = (cfg(None), Discovery::new(Duration::from_secs(60)));

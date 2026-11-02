@@ -2,24 +2,17 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! Single-flight, sans-IO (a cold key id pends verify, one `exchange()` fetches, every waiter
-//! wakes). The module never blocks and never
-//! dials: a read that needs the IdP answers [`Step::Pending`] while the caller's own exchange is in
-//! flight, or [`Step::Wait`] while ANOTHER caller's is, and the op re-enters (on its wake, or on its
-//! timer) and asks again. [`Flight`] is who is fetching, and since when.
 
 use std::time::{Duration, Instant};
 
 use busbar_contract::abi::mechanism::ticket::Ticket;
 
 /// How long past its own deadline a fetch's owner may take to re-enter with the answer (the
-/// timeout's, at worst) and settle its flight.
+
 const FLIGHT_MARGIN_MS: u64 = 5_000;
 
 /// How long one fetch may hold its flight before another caller takes it over: STRICTLY past the
-/// bound on a discovery or JWKS fetch (`FETCH_TIMEOUT_MS`, connect + total), by
-/// [`FLIGHT_MARGIN_MS`], so a fetch that runs to its timeout is settled by its owner, never
-/// declared abandoned first. An op whose exchange outlived it was cancelled or faulted, and never
-/// settles its flight.
+
 pub const FLIGHT_MAX: Duration =
     Duration::from_millis(crate::fetch::FETCH_TIMEOUT_MS + FLIGHT_MARGIN_MS);
 
@@ -72,7 +65,7 @@ impl Flight {
     }
 
     /// Whether another caller's fetch still holds the flight at `now` (one past [`FLIGHT_MAX`] was
-    /// abandoned).
+
     pub fn held_against(&self, me: Option<Ticket>, now: Instant) -> bool {
         !self.mine(me) && now.saturating_duration_since(self.at) < FLIGHT_MAX
     }

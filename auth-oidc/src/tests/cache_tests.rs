@@ -2,10 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The JWKS cache's contract, sans-IO: single-flight (a cold kid pends ONE fetch, every waiter takes
-//! its keys), a caller with usable keys never waits on another's fetch, every trigger rate-limited,
-//! failures fall back to the previous keys up to the staleness ceiling, and 1.5.5's timings. The
-//! IdP is the scripted one (`crate::script`): an op that pends answers its first ask `Pending` and
-//! the re-ask on its re-entry `Ready`.
 
 use super::*;
 use crate::script::{ready, ticket, Idp, ME};
@@ -15,7 +11,7 @@ use std::sync::Barrier;
 const URL: &str = "https://idp.example/jwks";
 
 /// A minimal but real JWKS document. These tests exercise the CACHE's contract, not the crypto —
-/// `f` is whatever the test needs it to be — so the key material only has to parse.
+
 fn jwks(kid: &str) -> String {
     format!(r#"{{"keys":[{{"kty":"EC","crv":"P-256","kid":"{kid}","x":"AAAA","y":"BBBB"}}]}}"#)
 }
@@ -27,8 +23,7 @@ fn serve(c: &JwksCache, idp: &Idp, now: Instant) -> Result<(), String> {
 }
 
 /// THE CLASS TEST: signature verification must not be serialised. `f` runs on a snapshot with no
-/// lock held, so concurrent verifications overlap; with the lock held across `f` the observed
-/// concurrency would be exactly 1.
+
 #[test]
 fn concurrent_verifications_are_not_serialised() {
     let c = JwksCache::new(Duration::from_secs(60), Duration::from_secs(3600));
@@ -67,9 +62,7 @@ fn concurrent_verifications_are_not_serialised() {
 }
 
 /// THE SPEC'S SINGLE FLIGHT: a cold kid pends verify, ONE exchange fetches, every waiter wakes and
-/// takes its keys. Three cold callers: the first claims the fetch and pends on it, the other two
-/// WAIT (they fetch nothing), and once the first re-enters with the answer both are served the
-/// same keys.
+
 #[test]
 fn a_cold_kid_pends_one_fetch_and_every_waiter_takes_its_keys() {
     let c = JwksCache::new(Duration::from_secs(60), Duration::from_secs(3600));
@@ -87,12 +80,11 @@ fn a_cold_kid_pends_one_fetch_and_every_waiter_takes_its_keys() {
     assert_eq!(c.with_key(URL, "k1", t0, &mut d, f), Step::Wait);
     assert_eq!(idp.calls(), 1, "one fetch for three cold callers");
 
-    // The claimer re-enters on its exchange's wake: its answer lands.
     assert_eq!(
         c.with_key(URL, "k1", t0, &mut a, f),
         Step::Ready(Ok("verified"))
     );
-    // The waiters re-enter: the keys are there.
+
     let later = t0 + Duration::from_millis(25);
     assert_eq!(
         c.with_key(URL, "k1", later, &mut b, f),
@@ -106,8 +98,7 @@ fn a_cold_kid_pends_one_fetch_and_every_waiter_takes_its_keys() {
 }
 
 /// THE WAKE (THE DESIGN, auth: "one `exchange()` fetches, every waiter wakes"): the fetch that
-/// lands wakes every op that waited on it, once each, and only after the keys are in; the claimer
-/// itself is not woken by its own settle. A failed fetch wakes them too.
+
 #[test]
 fn the_fetch_that_lands_wakes_every_waiter_once() {
     let c = JwksCache::new(Duration::from_secs(60), Duration::from_secs(3600));
@@ -122,7 +113,7 @@ fn the_fetch_that_lands_wakes_every_waiter_once() {
     assert_eq!(c.with_key(URL, "k1", t0, &mut a, f), Step::Pending);
     assert_eq!(c.with_key(URL, "k1", t0, &mut b, f), Step::Wait);
     assert_eq!(c.with_key(URL, "k1", t0, &mut d, f), Step::Wait);
-    // A waiter re-entering before the fetch lands waits again: it is noted once.
+
     assert_eq!(c.with_key(URL, "k1", t0, &mut b, f), Step::Wait);
     assert!(
         idp.woken().is_empty(),
@@ -134,7 +125,7 @@ fn the_fetch_that_lands_wakes_every_waiter_once() {
         Step::Ready(Ok("verified"))
     );
     assert_eq!(idp.woken(), vec![ticket(2), ticket(3)]);
-    // Woken, each takes the keys at once.
+
     assert_eq!(
         c.with_key(URL, "k1", t0, &mut b, f),
         Step::Ready(Ok("verified"))
@@ -145,7 +136,6 @@ fn the_fetch_that_lands_wakes_every_waiter_once() {
     );
     assert_eq!(idp.woken().len(), 2, "no second wake");
 
-    // A failed fetch wakes its waiter as well: it re-enters and fails closed.
     let c = JwksCache::new(Duration::from_secs(60), Duration::from_secs(3600));
     let down = Idp::answering(Err("connection refused".into()));
     let (mut a, mut b) = (down.pending(ticket(1)), down.pending(ticket(2)));
@@ -159,8 +149,7 @@ fn the_fetch_that_lands_wakes_every_waiter_once() {
 }
 
 /// THE TICK'S REFRESH AHEAD OF THE TTL: not before the set is within `lead` of its TTL, then one
-/// fetch on the tick's own ticket (pending, carried on by its re-entry), so the request that comes
-/// just past the old TTL finds a fresh set and fetches nothing.
+
 #[test]
 fn a_due_key_set_is_refreshed_ahead_of_its_ttl_and_not_before() {
     let c = JwksCache::new(Duration::from_secs(60), Duration::from_secs(3600));
@@ -193,7 +182,6 @@ fn a_due_key_set_is_refreshed_ahead_of_its_ttl_and_not_before() {
         "the request past the old TTL fetches nothing"
     );
 
-    // A cold cache (the warm-up failed) is due at once.
     let cold = JwksCache::new(Duration::from_secs(60), Duration::from_secs(3600));
     assert_eq!(
         cold.refresh_ahead(URL, lead, t0, &mut idp.at_once(Some(ME))),
@@ -203,8 +191,7 @@ fn a_due_key_set_is_refreshed_ahead_of_its_ttl_and_not_before() {
 }
 
 /// THE LIVENESS RULE: a slow JWKS endpoint must not stall a caller that already has a usable key.
-/// While one caller's TTL refresh is in flight, another holding the (stale) cached set serves it at
-/// once — whether the rate limit turns it away or it finds the flight taken.
+
 #[test]
 fn a_fetch_in_flight_does_not_stall_a_caller_that_already_has_the_key() {
     for min_refetch in [Duration::from_secs(60), Duration::ZERO] {
@@ -213,7 +200,6 @@ fn a_fetch_in_flight_does_not_stall_a_caller_that_already_has_the_key() {
         let t0 = Instant::now();
         serve(&c, &idp, t0).expect("prime");
 
-        // Past the TTL and past the rate limit: the next caller refreshes.
         let now = t0 + Duration::from_secs(61);
         let mut winner = idp.pending(ticket(1));
         assert_eq!(
@@ -222,7 +208,6 @@ fn a_fetch_in_flight_does_not_stall_a_caller_that_already_has_the_key() {
         );
         assert_eq!(idp.calls(), 2);
 
-        // Another caller with the stale set serves it at once and fetches nothing.
         let mut other = idp.pending(ticket(2));
         assert_eq!(
             c.with_key(URL, "k1", now, &mut other, |_| Ok(())),
@@ -238,7 +223,7 @@ fn a_fetch_in_flight_does_not_stall_a_caller_that_already_has_the_key() {
 }
 
 /// The TTL-stale path obeys the SAME rate limit as the kid-rotation path: an unreachable IdP is
-/// retried once per `min_refetch_interval`, not once per request.
+
 #[test]
 fn a_failing_provider_does_not_produce_a_fetch_storm() {
     let c = JwksCache::new(Duration::from_secs(60), Duration::from_millis(1));
@@ -372,7 +357,7 @@ fn a_fetch_failure_keeps_serving_the_previously_fetched_keys() {
 }
 
 /// OIDC-8: a failed refresh that falls back to the previous keys logs a warn carrying the fetch
-/// error, so an IdP outage is visible before the first rotated-key token is rejected.
+
 #[test]
 fn a_failed_refresh_that_keeps_the_previous_keys_logs_a_warn_with_the_error() {
     let c = JwksCache::new(Duration::from_millis(1), Duration::from_millis(1));
@@ -444,7 +429,7 @@ fn with_key_reports_the_last_error_when_no_key_sharing_a_kid_verifies() {
 }
 
 /// KEY ROTATION: a kid absent from a fresh set refetches ONCE (rate-limited), pending on that
-/// fetch, and the call carries on from the rotation point when it re-enters.
+
 #[test]
 fn an_unknown_kid_pends_one_rotation_refetch_and_carries_on_from_it() {
     let c = JwksCache::new(Duration::from_secs(60), Duration::from_secs(3600));
@@ -465,7 +450,6 @@ fn an_unknown_kid_pends_one_rotation_refetch_and_carries_on_from_it() {
     );
     assert_eq!(idp.calls(), 2, "exactly one refetch for the rotation");
 
-    // Inside the rate-limit window a third, unknown kid is refused off the set in hand.
     let err = ready(c.with_key(
         URL,
         "ghost",
@@ -482,7 +466,7 @@ fn an_unknown_kid_pends_one_rotation_refetch_and_carries_on_from_it() {
 }
 
 /// The absolute staleness ceiling: once every refetch has failed for longer than `max_stale`
-/// (derived from `ttl`), the cache stops serving the ancient key set.
+
 #[test]
 fn a_permanently_unreachable_provider_stops_serving_keys_past_the_staleness_ceiling() {
     let c = JwksCache::new(Duration::from_millis(1), Duration::from_millis(1));
@@ -499,8 +483,7 @@ fn a_permanently_unreachable_provider_stops_serving_keys_past_the_staleness_ceil
 }
 
 /// The ceiling on the RATE-LIMITED EARLY RETURN: once a request past the ceiling has triggered (and
-/// failed) a fetch, the next one inside the rate-limit window fails closed with the ceiling error
-/// rather than serving the ancient keys.
+
 #[test]
 fn the_rate_limited_early_return_also_enforces_the_staleness_ceiling() {
     let c = JwksCache::new(Duration::from_secs(60), Duration::from_millis(1));
@@ -541,8 +524,7 @@ fn max_stale_scales_with_a_long_ttl() {
 }
 
 /// OIDC-7: a caller whose cached keys are past `max_stale` is treated as a COLD cache: while a
-/// recovery fetch is in flight it waits for it and then serves its fresh keys, rather than being
-/// rejected with the ceiling error.
+
 #[test]
 fn a_caller_past_the_ceiling_waits_for_the_in_flight_recovery_fetch() {
     let c = JwksCache::new(Duration::from_secs(60), Duration::from_millis(1));
@@ -572,8 +554,7 @@ fn a_caller_past_the_ceiling_waits_for_the_in_flight_recovery_fetch() {
 }
 
 /// A caller past the ceiling never serves keys past it: when the flight it would wait on is older
-/// than a fetch may take (abandoned), it makes its own recovery fetch, and when that fails it fails
-/// closed — never the winner's set, never the ancient one.
+
 #[test]
 fn a_caller_past_the_ceiling_never_serves_keys_past_the_ceiling() {
     let c = JwksCache::new(Duration::ZERO, Duration::from_millis(1));
@@ -612,8 +593,7 @@ fn a_caller_past_the_ceiling_never_serves_keys_past_the_ceiling() {
 }
 
 /// A cold caller that waited on a fetch which then FAILED re-checks the rate limit when it
-/// re-enters: inside the window it does not start a second immediate fetch, and it fails closed
-/// with the honest "cannot verify" error.
+
 #[test]
 fn a_waiter_whose_fetch_failed_fails_closed_inside_the_rate_limit() {
     let c = JwksCache::new(Duration::from_secs(60), Duration::from_millis(1));
@@ -643,9 +623,7 @@ fn a_waiter_whose_fetch_failed_fails_closed_inside_the_rate_limit() {
 }
 
 /// O6: a fetch that runs to its OWN timeout (`FETCH_TIMEOUT_MS`, connect + total) is not yet
-/// abandoned: its owner re-enters with the timeout's answer and settles it, so a caller arriving
-/// at that instant waits on it rather than taking it over (dropping the owner's result and making
-/// a second fetch). The abandonment bound is strictly past the fetch's deadline.
+
 #[test]
 fn a_fetch_running_to_its_own_timeout_is_not_taken_over() {
     let c = JwksCache::new(Duration::from_millis(1), Duration::from_secs(3600));
@@ -667,7 +645,7 @@ fn a_fetch_running_to_its_own_timeout_is_not_taken_over() {
 }
 
 /// A flight whose op never came back (cancelled, faulted) is abandoned after 1.5.5's fetch bound:
-/// a cold caller waits on it until then, and takes it over after.
+
 #[test]
 fn an_abandoned_flight_is_taken_over_after_the_fetch_bound() {
     let c = JwksCache::new(Duration::from_millis(1), Duration::from_secs(3600));
@@ -698,7 +676,7 @@ fn an_abandoned_flight_is_taken_over_after_the_fetch_bound() {
 }
 
 /// A call on no ticket may not pend: it neither claims a fetch (which would hold the rate-limit
-/// window without ever asking) nor waits. It fails at once, and the next ticketed caller fetches.
+
 #[test]
 fn a_ticketless_caller_never_claims_or_waits() {
     let c = JwksCache::new(Duration::from_secs(60), Duration::from_secs(3600));
@@ -732,8 +710,7 @@ fn a_ticketless_caller_never_claims_or_waits() {
 }
 
 /// An abandoned single flight (its owner pended and never re-entered) must not keep the rate-limit
-/// window shut: past FLIGHT_MAX a cold caller takes it over and fetches, rather than being told a
-/// fetch attempt failed when none did.
+
 #[test]
 fn an_abandoned_flight_does_not_keep_the_rate_limit_window_shut_for_a_cold_caller() {
     let c = JwksCache::new(Duration::from_secs(60), Duration::from_secs(3600));

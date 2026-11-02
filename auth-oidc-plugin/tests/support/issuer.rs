@@ -2,17 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! **A LOCAL OIDC ISSUER FOR TESTS** (test-side only: never in a shipped crate).
-//!
-//! A host that loads this module — busbar's own auth-chain and stdio-serve tests, this repo's
-//! conformance tests — needs a real issuer to point it at: an ES256 key whose JWKS the host's
-//! connector can reach over a certificate-verified connection (the module never dials: its needs
-//! do), and genuinely signed tokens to present. [`Issuer::start`] provides exactly that on the
-//! loopback interface: a self-signed certificate (trusted through the module's `ca_cert_pem`
-//! setting, the needs' `trust_from`, so nothing is disabled), one background thread answering every
-//! request with the JWKS, and [`Issuer::sign`] signing tokens with the matching key. A
-//! test that plays the IdP as a connection table itself serves [`Issuer::jwks`] and signs with
-//! [`Issuer::sign`]. This server is a TEST'S: it lives in the plugin crate's tests, so its TLS stack is
-//! never in a shipped closure.
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use ring::signature::{EcdsaKeyPair, KeyPair as _, ECDSA_P256_SHA256_FIXED_SIGNING};
@@ -60,7 +49,7 @@ pub struct Issuer {
 
 impl Issuer {
     /// Start an issuer named `issuer` (the `iss` its tokens carry), signing under key id `kid`, with
-    /// its JWKS served on a fresh loopback port for the life of the process.
+
     pub fn start(issuer: &str, kid: &str) -> Issuer {
         let rng = ring::rand::SystemRandom::new();
         let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng)

@@ -2,19 +2,7 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! Shared by this crate's integration tests (`e2e.rs`, `conformance.rs`):
-//!
-//! * the tests' own local issuer (`issuer.rs`) — a REAL
-//!   ES256 key, its JWKS, and genuinely signed tokens;
-//! * THE IdP AS THE HOST'S CONNECTION TABLE ([`Idp`]): the module never dials, its needs do, so the
-//!   far end is what the host's connector hands its framed requests to. It answers each request by
-//!   its path (the discovery document, the JWKS, the token endpoint), and answers the FIRST read of
-//!   every reply PENDING, waking the op's ticket from another thread, so every request crosses
-//!   PENDING and its op is re-entered on the wake;
-//! * the HOST side of the auth door, through the real loader: a dispatcher serving the host's clock,
-//!   a bind lending the connection table, and one call per op on a fresh ticket, each answer
-//!   rendered as one comparable line.
-//!
-//! No stubbed crypto, no stubbed door.
+
 #![allow(dead_code)]
 
 use std::collections::{HashMap, HashSet};
@@ -65,24 +53,19 @@ pub fn z<T>() -> T {
 }
 
 /// ONE DISPATCHER AT A TIME in a test process. The loader keeps a ticketed service's answer for
-/// its replay in ONE process-wide map and forgets it when ANY dispatcher recycles an equal ticket
-/// (`conn_services::forget` matches the ticket alone, and every fresh dispatcher mints the same
-/// first tickets): a test recycling its tickets while another test's op is pending makes that op's
-/// replayed `establish` run again and send its request twice. Every test that binds holds this.
+
 pub fn serial() -> std::sync::MutexGuard<'static, ()> {
     static ONE: Mutex<()> = Mutex::new(());
     ONE.lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-// ── the host's clock ─────────────────────────────────────────────────────────────────────────────
-
 /// The host services a test host serves: the kernel's one clock (what an op waiting on another's
-/// fetch sets its timer by, on the dispatcher's own monotonic clock); nothing else.
+
 pub struct Clock;
 
 /// How many times an op read the host's clock: once per PENDING answer that waits on another op's
-/// fetch (it arms its backstop timer by it).
+
 static CLOCK_READS: AtomicU32 = AtomicU32::new(0);
 
 static CLOCK_MONO: Mutex<Option<u64>> = Mutex::new(None);
@@ -124,8 +107,6 @@ impl busbar_test_kit::services_double::ServicesDouble for Clock {
     }
 }
 
-// ── the IdP, as the host's connection table ──────────────────────────────────────────────────────
-
 /// The dispatcher's connection-table wake.
 type Wake = busbar_contract::conn::ConnWake;
 
@@ -141,8 +122,7 @@ pub struct Sent {
 }
 
 /// THE DECLARED NEEDS AND THEIR TARGETS: `(need index, the URL the operator's config names for
-/// it)` — discovery on need `base`, the JWKS on `base + 1`, the token endpoint on `base + 2`
-/// (`base` 0: the needs trusting `ca_cert_pem`; 3: their public-roots twins).
+
 pub fn declared_targets(base: u32) -> Vec<(u32, String)> {
     vec![
         (
@@ -155,7 +135,7 @@ pub fn declared_targets(base: u32) -> Vec<(u32, String)> {
 }
 
 /// Every request in `sent` that is NOT on a declared need index (`< needs`) or whose target is not
-/// the one `allowed` names for its need: the plugin reaching anywhere but its declared needs.
+
 pub fn strays(sent: &[Sent], needs: u32, allowed: &[(u32, String)]) -> Vec<String> {
     sent.iter()
         .filter_map(|s| {
@@ -188,8 +168,7 @@ struct Response {
 }
 
 /// THE IdP: every need framed; an open is the whole request (kept in `sent`), answered by its path
-/// from `answers` (404 when none); the first read of every reply PENDING, the op's ticket woken
-/// `delay` later from another thread.
+
 pub struct Idp {
     wake: Mutex<Option<Wake>>,
     /// `(connection, the waking ticket)` of every first read: which op made each request.
@@ -198,7 +177,6 @@ pub struct Idp {
     sent: Mutex<Vec<Sent>>,
     declared: Mutex<Vec<String>>,
     /// The needs whose declaration the table refused, as the host's connector refuses them (a
-    /// `target_from` or `trust_from` that resolved to nothing): an open on one is refused.
     refused: Mutex<HashSet<u32>>,
     reads: Mutex<HashMap<u64, Reply>>,
     next: AtomicU64,
@@ -214,7 +192,7 @@ pub struct Idp {
 }
 
 /// The envelope sink a bound door reports into: its declared diagnostics, kept on the IdP the
-/// test reads (log records, which carry no declared name, are not kept).
+
 struct Recorder(Arc<Idp>);
 
 impl EnvelopeSink for Recorder {
@@ -234,7 +212,7 @@ impl EnvelopeSink for Recorder {
 
 impl Idp {
     /// The IdP of `ISSUER`, signing with `key`: its discovery document (naming its JWKS, authorize
-    /// and token endpoints), its JWKS, and a token endpoint answering `{}`.
+
     pub fn new(key: &Issuer) -> Arc<Self> {
         let idp = Arc::new(Self {
             wake: Mutex::new(None),
@@ -500,7 +478,6 @@ impl Conns for Idp {
         let r = reads.get_mut(&conn.0).ok_or(ConnError::Closed)?;
         match r.step {
             0 => {
-                // The far end has not answered yet: the wake comes later, from elsewhere.
                 r.step = 1;
                 self.pended.fetch_add(1, Ordering::SeqCst);
                 self.woken.lock().unwrap().push((conn.0, ticket));
@@ -579,8 +556,6 @@ impl DeclaredConns for Idp {
         target: Option<&str>,
         trust: Option<&str>,
     ) -> Result<(), ConnError> {
-        // The host connector's rule: a need whose `target_from` or `trust_from` names a setting
-        // that resolved to nothing is refused.
         let unresolved = (!spec.target_from.is_empty() && target.is_none())
             || (!spec.trust_from.is_empty() && trust.is_none());
         let answer = if unresolved {
@@ -616,8 +591,6 @@ impl DeclaredConns for Idp {
     }
 }
 
-// ── the host's side ──────────────────────────────────────────────────────────────────────────────
-
 /// This crate's built cdylib (uplifted or under `deps`, newest wins), when it is built.
 pub fn cdylib_path() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
@@ -646,7 +619,7 @@ pub enum Arm<'a> {
 }
 
 /// One door bound to a dispatcher serving the host's clock and to the IdP `idp` as its connection
-/// table: the plugin (not yet opened).
+
 pub struct Bound {
     pub dispatcher: Arc<Dispatcher>,
     pub idp: Arc<Idp>,
@@ -758,7 +731,7 @@ fn identity(out: &IdentifyOut, bytes: &[u8], groups: &[Span]) -> String {
 }
 
 /// `open` `p` over `settings`, lending `secret` as its one secret; the operator's text for a
-/// refusal.
+
 pub fn open(p: &Plugin<Auth>, settings: &str, secret: Option<&str>) -> Result<(), String> {
     let secrets: Vec<Blob> = secret
         .iter()
@@ -805,8 +778,7 @@ impl Bound {
     }
 
     /// One identity op (`verify`, `complete_login`) on a fresh ticket, with host buffers of `cap`
-    /// bytes and groups; a short answer is re-submitted once on the same ticket with buffers of the
-    /// size it named.
+
     fn identify<I: InFrame>(
         &self,
         op: u32,
@@ -881,7 +853,7 @@ impl Bound {
     }
 
     /// `begin_login` for the core's `state`, `challenge` and `nonce`: the authorize URL, or the
-    /// refusal.
+
     pub fn begin(&self, redirect: &str, state: &str, challenge: &str, nonce: &str) -> String {
         let mut i: BeginLoginIn = z();
         i.head = in_head();
@@ -957,16 +929,14 @@ pub fn verify_in(credential: Option<&str>, out_buf: IdentityBuf) -> VerifyIn {
 }
 
 /// [`verify_in`] with the request's facts stating `timestamp` (unix seconds): the host's clock as
-/// the request arrived, the time a token's expiry is judged at.
+
 pub fn verify_in_at(credential: Option<&str>, out_buf: IdentityBuf, timestamp: u64) -> VerifyIn {
     let mut i: VerifyIn = z();
     i.request.timestamp = timestamp;
     i.head = in_head();
     i.credential = credential.map_or(NO_BLOB, |c| blob(c.as_bytes(), BLOB_OCTETS));
     i.out_buf = out_buf;
-    // The strip array a host hands `verify` to start (`FIELDS_MAX` entries), as the kernel's door
-    // and the published suite hand it: the plugin names its credential line there. Each call gets
-    // its own (leaked: a test's few hundred bytes), so concurrent verifies never share one.
+
     let strips: &'static mut [StripName] =
         Box::leak(vec![z::<StripName>(); FIELDS_MAX as usize].into_boxed_slice());
     i.strip = strips.as_mut_ptr();
@@ -1005,7 +975,7 @@ pub fn verify_ticketless(p: &Plugin<Auth>, credential: Option<&str>) -> String {
 }
 
 /// A `verify` of the raw `credential` bytes made with NO ticket: `(verdict, decision, strip_len)`,
-/// or the outcome when it is not READY.
+
 pub fn verify_ticketless_raw(
     p: &Plugin<Auth>,
     credential: &[u8],
