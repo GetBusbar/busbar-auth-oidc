@@ -318,6 +318,23 @@ impl Idp {
         ReadHold(self)
     }
 
+    /// Wake the real driver for the controlled reply without releasing its read hold.
+    pub fn wake_held_reads(&self) -> usize {
+        let wakes = self
+            .read_hold
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|(_, wakes)| wakes.clone())
+            .unwrap_or_default();
+        let count = wakes.len();
+        let wake = self.wake.lock().unwrap().clone().expect("bound IdP");
+        for (caller, ticket) in wakes {
+            wake(caller, ticket);
+        }
+        count
+    }
+
     pub fn read_is_held(&self) -> bool {
         self.read_hold
             .lock()

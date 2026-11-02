@@ -1866,7 +1866,7 @@ fn ready_and_tick_release_held_connections_on_cancel_or_refresh() {
 fn executing_driver_does_not_repark_an_exchange_after_successful_refresh() {
     use busbar_contract::abi::mechanism::call::{Blob, BLOB_JSON};
     use busbar_contract::abi::mechanism::lifecycle::{
-        slot as life, CancelIn, CancelOut, DriveIn, RefreshIn, TickIn, TickOut,
+        slot as life, CancelIn, CancelOut, RefreshIn,
     };
     let _one = support::serial();
     let key = Issuer::start(UNUSED_ISSUER, KID);
@@ -1887,16 +1887,15 @@ fn executing_driver_does_not_repark_an_exchange_after_successful_refresh() {
                 cfg["jwks_url"] = serde_json::json!(support::JWKS_URL);
                 let settings = cfg.to_string();
                 open(&b.plugin, &settings, None).expect("opens");
-                let owner = b.dispatcher.inline_ticket().expect("driver ticket");
-                let ticket = owner.ticket();
+                let ticket = b
+                    .dispatcher
+                    .driver(&b.plugin, 0)
+                    .expect("real driver ticket");
                 let tick = || {
-                    let mut input: TickIn = z();
-                    input.head = busbar_plugin_loader::dispatch::in_head();
-                    input.now_ns = now_ns();
-                    let mut output: TickOut = z();
-                    output.head = out_head();
-                    b.plugin
-                        .call_inline(ticket, false, life::TICK, &mut Frame::new(input, output))
+                    b.dispatcher
+                        .tick(&b.plugin, ticket, now_ns())
+                        .wait(Duration::from_secs(5))
+                        .expect("the real tick answers")
                         .outcome
                 };
                 let hold = idp.hold_reads("/keys");
@@ -1908,17 +1907,26 @@ fn executing_driver_does_not_repark_an_exchange_after_successful_refresh() {
                 std::thread::scope(|scope| {
                     let pending = scope.spawn(|| {
                         if drive {
-                            let mut input: DriveIn = z();
-                            input.head = busbar_plugin_loader::dispatch::in_head();
-                            input.driver = ticket;
-                            b.plugin
-                                .call_inline(
-                                    ticket,
-                                    false,
-                                    life::DRIVE,
-                                    &mut Frame::new(input, out_head()),
-                                )
-                                .outcome
+                            let driven = &b.plugin.inner.driven;
+                            let seen = driven.answers();
+                            assert_eq!(idp.wake_held_reads(), 1, "one real driver wake");
+                            let until = std::time::Instant::now() + Duration::from_secs(5);
+                            while driven.answers() == seen {
+                                assert!(
+                                    std::time::Instant::now() < until,
+                                    "the real drive answers"
+                                );
+                                std::thread::yield_now();
+                            }
+                            assert_eq!(driven.answers(), seen + 1, "exactly one drive answered");
+                            // With exactly one answer observed, no terminal answer means that
+                            // answer was Pending. The read hold prevents another host wake;
+                            // check the count again so a competing answer fails this proof.
+                            let outcome = driven
+                                .answered_after(seen, Duration::ZERO)
+                                .unwrap_or(Outcome::Pending);
+                            assert_eq!(driven.answers(), seen + 1, "the observed answer is stable");
+                            outcome
                         } else {
                             tick()
                         }
@@ -1990,6 +1998,7 @@ fn executing_driver_does_not_repark_an_exchange_after_successful_refresh() {
                     );
                     assert!(!idp.connection_is_open(connection));
                 });
+                b.dispatcher.recycle(ticket);
                 drop(hold);
             }
         }
