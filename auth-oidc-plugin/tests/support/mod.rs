@@ -974,8 +974,11 @@ pub fn open(p: &Plugin<Auth>, settings: &str, secret: Option<&str>) -> Result<()
     let mut o: OpenOut = z();
     o.head = out_head();
     let called = p.call(life::OPEN, &mut Frame::new(i, o));
+    assert_eq!(
+        called.lease, 0,
+        "OPEN never lends a lease, including refusal"
+    );
     if called.outcome == Outcome::Ready {
-        assert_eq!(called.lease, 0);
         assert!(called.error.is_none());
     }
     match called.outcome {

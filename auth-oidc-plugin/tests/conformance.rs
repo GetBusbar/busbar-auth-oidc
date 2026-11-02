@@ -2165,7 +2165,9 @@ fn configured_oidc_cases_validate_refresh_close_and_never_echo_credentials_both_
             }
             answers.push(format!(
                 "validate {:?} lease={} error={:?}",
-                called.outcome, called.lease, called.error
+                called.outcome,
+                called.lease,
+                called.error.as_deref().map(String::from_utf8_lossy)
             ));
             if cfg != settings {
                 let before = crossings();
@@ -2264,7 +2266,9 @@ fn configured_oidc_cases_validate_refresh_close_and_never_echo_credentials_both_
         assert_eq!(called.lease, 0);
         answers.push(format!(
             "OPEN_OUTBOUND {:?} lease={} error={:?}",
-            called.outcome, called.lease, called.error
+            called.outcome,
+            called.lease,
+            called.error.as_deref().map(String::from_utf8_lossy)
         ));
         let mut i: busbar_contract::abi::auth::OutboundReadyIn = z();
         i.head = busbar_plugin_loader::dispatch::in_head();
@@ -2278,7 +2282,9 @@ fn configured_oidc_cases_validate_refresh_close_and_never_echo_credentials_both_
         assert_eq!(called.lease, 0);
         answers.push(format!(
             "OUTBOUND_READY {:?} lease={} error={:?}",
-            called.outcome, called.lease, called.error
+            called.outcome,
+            called.lease,
+            called.error.as_deref().map(String::from_utf8_lossy)
         ));
         let mut i: busbar_contract::abi::auth::FieldsIn = z();
         i.head = busbar_plugin_loader::dispatch::in_head();
@@ -2292,7 +2298,9 @@ fn configured_oidc_cases_validate_refresh_close_and_never_echo_credentials_both_
         assert_eq!(called.lease, 0);
         answers.push(format!(
             "FIELDS {:?} lease={} error={:?}",
-            called.outcome, called.lease, called.error
+            called.outcome,
+            called.lease,
+            called.error.as_deref().map(String::from_utf8_lossy)
         ));
         let mut tick: TickIn = z();
         tick.head = busbar_plugin_loader::dispatch::in_head();
@@ -2306,7 +2314,10 @@ fn configured_oidc_cases_validate_refresh_close_and_never_echo_credentials_both_
         counts.push(crossings() - before);
         answers.push(format!(
             "tick {:?} lease={} error={:?} next={}",
-            called.outcome, called.lease, called.error, frame.out.next_tick_ns
+            called.outcome,
+            called.lease,
+            called.error.as_deref().map(String::from_utf8_lossy),
+            frame.out.next_tick_ns
         ));
         let mut refresh: RefreshIn = z();
         refresh.head = busbar_plugin_loader::dispatch::in_head();
@@ -2328,7 +2339,9 @@ fn configured_oidc_cases_validate_refresh_close_and_never_echo_credentials_both_
         assert!(called.error.is_none());
         answers.push(format!(
             "refresh {:?} lease={} error={:?}",
-            called.outcome, called.lease, called.error
+            called.outcome,
+            called.lease,
+            called.error.as_deref().map(String::from_utf8_lossy)
         ));
         let before = crossings();
         let after = oidc_verify_answer(&b, Some(credential), timestamp, false, true);
@@ -2348,7 +2361,9 @@ fn configured_oidc_cases_validate_refresh_close_and_never_echo_credentials_both_
         assert!(closed.error.is_none());
         answers.push(format!(
             "close {:?} lease={} error={:?}",
-            closed.outcome, closed.lease, closed.error
+            closed.outcome,
+            closed.lease,
+            closed.error.as_deref().map(String::from_utf8_lossy)
         ));
         let before = crossings();
         let after = oidc_verify_answer(&b, Some(credential), timestamp, false, true);
@@ -2407,7 +2422,9 @@ fn configured_oidc_cases_validate_refresh_close_and_never_echo_credentials_both_
         assert!(closed.error.is_none());
         answers.push(format!(
             "rotated close {:?} lease={} error={:?}",
-            closed.outcome, closed.lease, closed.error
+            closed.outcome,
+            closed.lease,
+            closed.error.as_deref().map(String::from_utf8_lossy)
         ));
         for secret in input["auth"]["never_echoed"].as_array().unwrap() {
             for answer in &answers {
@@ -2491,7 +2508,7 @@ fn oidc_verify_answer(
         if short { "short=true " } else { "" },
         outcome,
         lease != 0,
-        error,
+        error.as_deref().map(String::from_utf8_lossy),
         out.needed_bytes,
         out.needed_groups,
         out.identity.groups_len,
