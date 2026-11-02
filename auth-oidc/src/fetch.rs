@@ -407,6 +407,16 @@ pub struct IoState {
     retry_after_secs: Option<u64>,
 }
 
+impl IoState {
+    /// A new exchange after a completed short answer uses unused handles in the same op epoch.
+    pub(crate) fn following(issued: u32) -> Self {
+        Self {
+            issued,
+            ..Self::default()
+        }
+    }
+}
+
 impl std::fmt::Debug for IoState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("IoState").finish_non_exhaustive()
@@ -482,6 +492,11 @@ impl<'h> HostIo<'h> {
     /// become the hint for a later endpoint that did not answer.
     pub(crate) fn retry_after_secs(&self) -> Option<u64> {
         self.state.retry_after_secs
+    }
+
+    /// The first unused completion handle after the exchanges this entry completed.
+    pub(crate) fn issued(&self) -> u32 {
+        self.state.issued
     }
 
     /// What to park across PENDING.

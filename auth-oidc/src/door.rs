@@ -33,7 +33,7 @@
 
 use std::collections::HashMap;
 use std::marker::PhantomData;
-use std::sync::{Arc, Mutex, PoisonError, RwLock};
+use std::sync::{Arc, Mutex, PoisonError, RwLock, Weak};
 use std::task::Poll;
 use std::time::Instant;
 
@@ -54,7 +54,7 @@ use busbar_contract::abi::mechanism::door::{
 use busbar_contract::abi::mechanism::extensions::{self, EXT_DECLARES};
 use busbar_contract::abi::mechanism::lifecycle::{DriveIn, ReadyIn, TickIn, TickOut};
 use busbar_contract::abi::mechanism::ticket::Ticket;
-use busbar_contract::abi::sdk::auth_door::{carrier, verify_tail, with_tail};
+use busbar_contract::abi::sdk::auth_door::{carrier, short_reply, verify_tail, with_tail};
 use busbar_contract::abi::sdk::auth_kit::{login_identity, login_outage};
 use busbar_contract::abi::sdk::conn::{ConnFailure, Host};
 use busbar_contract::abi::sdk::cred::{self, Cred};
@@ -343,11 +343,59 @@ fn keep(map: &mut HashMap<Ticket, Reached>, max: usize, ticket: Ticket, r: Reach
     map.insert(ticket, r);
 }
 
+/// A short callback's service cursor survives identity expiry, but not its answer's lease.
+struct LoginCursor {
+    marker: Arc<()>,
+    issued: u32,
+}
+
+type LoginCursors = Mutex<HashMap<Ticket, LoginCursor>>;
+type ReachedMap = Mutex<HashMap<Ticket, Reached>>;
+
+/// RELEASE, cancellation and instance teardown must not leave a callback's cursor or identity.
+/// An old lease cannot remove a newer continuation reusing the same operation ticket.
+struct ReleaseLogin {
+    ticket: Ticket,
+    marker: Arc<()>,
+    cursors: Weak<LoginCursors>,
+    reached: Weak<ReachedMap>,
+}
+
+impl Drop for ReleaseLogin {
+    fn drop(&mut self) {
+        let Some(cursors) = self.cursors.upgrade() else {
+            return;
+        };
+        let removed = {
+            let mut cursors = cursors.lock().unwrap_or_else(PoisonError::into_inner);
+            if cursors
+                .get(&self.ticket)
+                .is_some_and(|c| Arc::ptr_eq(&c.marker, &self.marker))
+            {
+                cursors.remove(&self.ticket);
+                true
+            } else {
+                false
+            }
+        };
+        if removed {
+            if let Some(reached) = self.reached.upgrade() {
+                let retired = reached
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .remove(&self.ticket);
+                drop(retired);
+            }
+        }
+    }
+}
+
 /// THE INSTANCE: the opened module (replaced whole by a `refresh` with new settings) and the
 /// identities kept for a short-buffer re-call.
 pub struct Oidc {
     now: RwLock<Arc<Opened>>,
-    reached: Mutex<HashMap<Ticket, Reached>>,
+    reached: Arc<ReachedMap>,
+    login_cursors: Arc<LoginCursors>,
     /// A `ready` in flight: its requests' state, by its ticket, across PENDING.
     readying: Mutex<HashMap<Ticket, IoState>>,
     /// The tick's key-set refresh in flight on the driver ticket: the module it refreshes and its
@@ -477,7 +525,8 @@ impl Life for Oidc {
     fn open(settings: &[u8], secrets: &[&[u8]], _generation: u64) -> Result<Self, Refusal> {
         Ok(Self {
             now: RwLock::new(Arc::new(Opened::new(settings, secrets)?)),
-            reached: Mutex::default(),
+            reached: Arc::default(),
+            login_cursors: Arc::default(),
             readying: Mutex::default(),
             driving: Mutex::default(),
         })
@@ -541,7 +590,24 @@ impl Life for Oidc {
         })
     }
 
+    fn retire(&self, _generation: u64) {
+        let cursors = std::mem::take(
+            &mut *self
+                .login_cursors
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        );
+        let reached =
+            std::mem::take(&mut *self.reached.lock().unwrap_or_else(PoisonError::into_inner));
+        drop((cursors, reached));
+    }
+
     fn cancel(&self, ticket: Ticket) -> u32 {
+        let cursor = self
+            .login_cursors
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&ticket);
         let ready = self
             .readying
             .lock()
@@ -565,7 +631,7 @@ impl Life for Oidc {
             }
         };
         // Exchange destruction calls the host; no instance map guard may be held here.
-        drop((ready, reached, driving));
+        drop((ready, reached, driving, cursor));
         CANCEL_ABANDONED
     }
 }
@@ -593,9 +659,17 @@ fn resume<'h>(
     instance: &Instance<'_, Held<Oidc>>,
     h: &'h Held<Oidc>,
 ) -> (Arc<Opened>, HostIo<'h>, Parked) {
+    resume_after(instance, h, None)
+}
+
+fn resume_after<'h>(
+    instance: &Instance<'_, Held<Oidc>>,
+    h: &'h Held<Oidc>,
+    issued: Option<u32>,
+) -> (Arc<Opened>, HostIo<'h>, Parked) {
     let mut parked = instance.resume::<Parked>().map_or_else(
         || Parked {
-            io: IoState::default(),
+            io: IoState::following(issued.unwrap_or(0)),
             answer: None,
             opened: h.life().now(),
         },
@@ -942,6 +1016,21 @@ impl SafeSlot for Complete {
         let state = input.field(|i| &i.state).bytes();
         let code = blob_text(input.field(|i| &i.code));
         let code_bytes = code.map_or(&[][..], str::as_bytes);
+        let cursor = oidc
+            .login_cursors
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&instance.ticket())
+            .map(|c| c.issued);
+        match short_reply::decode(input.field(|i| &i.head.extensions).bytes()) {
+            Ok(Some(_)) if cursor.is_none() => {
+                return out.fail(Refusal::refused(
+                    "oidc: short login continuation is no longer held",
+                ));
+            }
+            Err(why) => return out.fail(Refusal::refused(why)),
+            _ => {}
+        }
         let now = reached_now(h.host(), instance.ticket());
         let mut reached = oidc.reached.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(now) = now {
@@ -951,10 +1040,10 @@ impl SafeSlot for Complete {
             .remove(&instance.ticket())
             .filter(|r| now.is_some() && r.serves(state, code_bytes));
         drop(reached);
-        let principal = match kept {
-            Some(r) => r.principal,
+        let (principal, issued) = match kept {
+            Some(r) => (r.principal, cursor.unwrap_or(0)),
             None => {
-                let (opened, mut io, mut parked) = resume(&instance, h);
+                let (opened, mut io, mut parked) = resume_after(&instance, h, cursor);
                 let login = opened.login(
                     code,
                     str_text(input.field(|i| &i.redirect_uri)),
@@ -965,7 +1054,7 @@ impl SafeSlot for Complete {
                 );
                 raise_refusals(&opened.module, &mut io, &mut out);
                 match login {
-                    Step::Ready(Login::Identity(p)) => p,
+                    Step::Ready(Login::Identity(p)) => (p, io.issued()),
                     Step::Ready(Login::Bad) => {
                         out.set(|o| &o.verdict, LOGIN_BAD_CREDENTIAL);
                         return Outcome::Ready;
@@ -989,6 +1078,41 @@ impl SafeSlot for Complete {
         };
         let answered = login_identity(&principal, input.field(|i| &i.out_buf), &mut out);
         if answered == Outcome::Failed {
+            let marker = Arc::new(());
+            {
+                let mut cursors = oidc
+                    .login_cursors
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                if cursors.len() >= REACHED_MAX && !cursors.contains_key(&instance.ticket()) {
+                    out.set(|o| &o.needed_bytes, 0);
+                    out.set(|o| &o.needed_groups, 0);
+                    return out.fail(Refusal::failed("oidc: too many held short login answers"));
+                }
+                cursors.insert(
+                    instance.ticket(),
+                    LoginCursor {
+                        marker: Arc::clone(&marker),
+                        issued,
+                    },
+                );
+            }
+            out.keep(
+                h.leases(),
+                ReleaseLogin {
+                    ticket: instance.ticket(),
+                    marker,
+                    cursors: Arc::downgrade(&oidc.login_cursors),
+                    reached: Arc::downgrade(&oidc.reached),
+                },
+            );
+            let lease = out.get().head.lease;
+            out.lease(
+                |o| &o.head.extensions,
+                h.leases(),
+                short_reply::encode(lease),
+                BLOB_OCTETS,
+            );
             let Some(now) = reached_now(h.host(), instance.ticket()) else {
                 return answered;
             };

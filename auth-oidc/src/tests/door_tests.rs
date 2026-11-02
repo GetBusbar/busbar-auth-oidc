@@ -555,3 +555,65 @@ fn a_refresh_rediscovers_the_issuer_s_document() {
         "the refresh has the document asked for again"
     );
 }
+
+/// A short-answer lease owns its cursor and callback identity. Lifecycle cleanup cannot leave
+/// either behind, and an older lease cannot remove a later continuation on the same ticket.
+#[test]
+fn short_login_cursor_cleanup_owns_only_its_continuation() {
+    for cleanup in ["release", "cancel", "retire"] {
+        let oidc = Oidc::open(&settings(), &lent(b""), 1).expect("opens");
+        let marker = Arc::new(());
+        oidc.login_cursors.lock().unwrap().insert(
+            ticket(1),
+            LoginCursor {
+                marker: marker.clone(),
+                issued: 17,
+            },
+        );
+        oidc.reached
+            .lock()
+            .unwrap()
+            .insert(ticket(1), kept_for(1, 0));
+        let guard = ReleaseLogin {
+            ticket: ticket(1),
+            marker,
+            cursors: Arc::downgrade(&oidc.login_cursors),
+            reached: Arc::downgrade(&oidc.reached),
+        };
+        match cleanup {
+            "release" => drop(guard),
+            "cancel" => {
+                oidc.cancel(ticket(1));
+                drop(guard);
+            }
+            "retire" => {
+                oidc.retire(1);
+                drop(guard);
+            }
+            _ => unreachable!(),
+        }
+        assert!(oidc.login_cursors.lock().unwrap().is_empty(), "{cleanup}");
+        assert!(oidc.reached.lock().unwrap().is_empty(), "{cleanup}");
+    }
+    let oidc = Oidc::open(&settings(), &lent(b""), 1).expect("opens");
+    let old = ReleaseLogin {
+        ticket: ticket(1),
+        marker: Arc::new(()),
+        cursors: Arc::downgrade(&oidc.login_cursors),
+        reached: Arc::downgrade(&oidc.reached),
+    };
+    oidc.login_cursors.lock().unwrap().insert(
+        ticket(1),
+        LoginCursor {
+            marker: Arc::new(()),
+            issued: 29,
+        },
+    );
+    oidc.reached
+        .lock()
+        .unwrap()
+        .insert(ticket(1), kept_for(1, 0));
+    drop(old);
+    assert_eq!(oidc.login_cursors.lock().unwrap()[&ticket(1)].issued, 29);
+    assert!(oidc.reached.lock().unwrap().contains_key(&ticket(1)));
+}
