@@ -326,10 +326,50 @@ impl Drop for ReleaseLogin {
     }
 }
 
+/// An immutable VERIFY result awaiting its same-ticket SHORT retry. The credential is wiped
+/// when the result is served, expired, released or abandoned.
+struct Verified {
+    at: u64,
+    lease: u64,
+    marker: Arc<()>,
+    principal: Option<Principal>,
+    ttl: Option<u64>,
+    credential: Zeroizing<Vec<u8>>,
+    decision: u32,
+    verdict: u32,
+}
+type VerifiedMap = Mutex<HashMap<Ticket, Verified>>;
+
+struct ReleaseVerify {
+    ticket: Ticket,
+    marker: Arc<()>,
+    verified: Weak<VerifiedMap>,
+}
+impl Drop for ReleaseVerify {
+    fn drop(&mut self) {
+        let Some(verified) = self.verified.upgrade() else {
+            return;
+        };
+        let retired = {
+            let mut verified = verified.lock().unwrap_or_else(PoisonError::into_inner);
+            if verified
+                .get(&self.ticket)
+                .is_some_and(|v| Arc::ptr_eq(&v.marker, &self.marker))
+            {
+                verified.remove(&self.ticket)
+            } else {
+                None
+            }
+        };
+        drop(retired);
+    }
+}
+
 /// THE INSTANCE: the opened module (replaced whole by a `refresh` with new settings) and the
 pub struct Oidc {
     now: RwLock<Arc<Opened>>,
     reached: Arc<ReachedMap>,
+    verified: Arc<VerifiedMap>,
     login_cursors: Arc<LoginCursors>,
     /// A `ready` in flight: its requests' state, by its ticket, across PENDING.
     readying: Mutex<HashMap<Ticket, IoState>>,
@@ -450,6 +490,7 @@ impl Life for Oidc {
         Ok(Self {
             now: RwLock::new(Arc::new(Opened::new(settings, secrets)?)),
             reached: Arc::default(),
+            verified: Arc::default(),
             login_cursors: Arc::default(),
             readying: Mutex::default(),
             driving: Mutex::default(),
@@ -515,7 +556,9 @@ impl Life for Oidc {
         );
         let reached =
             std::mem::take(&mut *self.reached.lock().unwrap_or_else(PoisonError::into_inner));
-        drop((cursors, reached));
+        let verified =
+            std::mem::take(&mut *self.verified.lock().unwrap_or_else(PoisonError::into_inner));
+        drop((cursors, reached, verified));
     }
 
     fn cancel(&self, ticket: Ticket) -> u32 {
@@ -547,7 +590,12 @@ impl Life for Oidc {
             }
         };
 
-        drop((ready, reached, driving, cursor));
+        let verified = self
+            .verified
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&ticket);
+        drop((ready, reached, driving, cursor, verified));
         CANCEL_ABANDONED
     }
 }
@@ -738,6 +786,105 @@ fn answer(
     Outcome::Ready
 }
 
+/// Retain only when the actual answer is SHORT. The existing lease mechanism owns cleanup;
+/// the marker prevents an old lease from discarding a later result that reused the ticket.
+fn verify_answer(
+    h: &Held<Oidc>,
+    ticket: Ticket,
+    principal: Option<&Principal>,
+    ttl: Option<u64>,
+    credential: Option<&[u8]>,
+    decision: u32,
+    verdict: u32,
+    input: Lent<'_, VerifyIn>,
+    out: &mut Out<'_, IdentifyOut>,
+) -> Outcome {
+    let answered = answer(
+        principal,
+        ttl,
+        credential,
+        Some((input.strip(), decision)),
+        input.field(|i| &i.out_buf),
+        out,
+        verdict,
+    );
+    if answered != Outcome::Failed {
+        return answered;
+    }
+    let Some(now) = reached_now(h.host(), ticket) else {
+        out.set(|o| &o.needed_bytes, 0);
+        out.set(|o| &o.needed_groups, 0);
+        out.set(|o| &o.needed_strip, 0);
+        return out.fail(Refusal::failed(
+            "oidc: host clock unavailable for short verify answer",
+        ));
+    };
+    let mut verified = h
+        .life()
+        .verified
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    verified
+        .retain(|_, v| std::time::Duration::from_nanos(now.saturating_sub(v.at)) <= REACHED_TTL);
+    if verified.len() >= REACHED_MAX || verified.contains_key(&ticket) {
+        out.set(|o| &o.needed_bytes, 0);
+        out.set(|o| &o.needed_groups, 0);
+        out.set(|o| &o.needed_strip, 0);
+        return out.fail(Refusal::failed("oidc: too many held short verify answers"));
+    }
+    let marker = Arc::new(());
+    // Reserve under the bound, but never call lease code while holding this map's lock:
+    // releasing the lease invokes ReleaseVerify, which takes the same lock.
+    verified.insert(
+        ticket,
+        Verified {
+            at: now,
+            lease: 0,
+            marker: marker.clone(),
+            principal: principal.cloned(),
+            ttl,
+            credential: Zeroizing::new(
+                credential
+                    .filter(|_| principal.is_some())
+                    .unwrap_or_default()
+                    .to_vec(),
+            ),
+            decision,
+            verdict,
+        },
+    );
+    drop(verified);
+    out.keep(
+        h.leases(),
+        ReleaseVerify {
+            ticket,
+            marker: marker.clone(),
+            verified: Arc::downgrade(&h.life().verified),
+        },
+    );
+    let lease = out.get().head.lease;
+    {
+        let mut verified = h
+            .life()
+            .verified
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(kept) = verified
+            .get_mut(&ticket)
+            .filter(|v| Arc::ptr_eq(&v.marker, &marker))
+        {
+            kept.lease = lease;
+        }
+    }
+    out.lease(
+        |o| &o.head.extensions,
+        h.leases(),
+        short_reply::encode(lease),
+        BLOB_OCTETS,
+    );
+    answered
+}
+
 /// `verify`: the presented credential judged as a bearer token.
 #[derive(Debug)]
 pub struct Verify;
@@ -753,6 +900,56 @@ impl SafeSlot for Verify {
         let Some(h) = instance.get() else {
             return Outcome::Fault;
         };
+        let continuation = match short_reply::decode(input.field(|i| &i.head.extensions).bytes()) {
+            Ok(lease) => lease,
+            Err(why) => return out.fail(Refusal::refused(why)),
+        };
+        // A ticket identifies the logical call even when the host's fresh retry carries no
+        // continuation extension. Ticketless recalls use the loader's private lease marker.
+        let retained = !instance.ticket().is_none()
+            && h.life()
+                .verified
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .contains_key(&instance.ticket());
+        if continuation.is_some() || retained {
+            let now = reached_now(h.host(), instance.ticket());
+            let kept = {
+                let mut verified = h
+                    .life()
+                    .verified
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                if let Some(now) = now {
+                    verified.retain(|_, v| {
+                        std::time::Duration::from_nanos(now.saturating_sub(v.at)) <= REACHED_TTL
+                    });
+                }
+                if now.is_some()
+                    && verified
+                        .get(&instance.ticket())
+                        .is_some_and(|v| continuation.is_none_or(|lease| v.lease == lease))
+                {
+                    verified.remove(&instance.ticket())
+                } else {
+                    None
+                }
+            };
+            let Some(kept) = kept else {
+                return out.fail(Refusal::refused(
+                    "oidc: short verify continuation is no longer held",
+                ));
+            };
+            return answer(
+                kept.principal.as_ref(),
+                kept.ttl,
+                Some(&kept.credential),
+                Some((input.strip(), kept.decision)),
+                input.field(|i| &i.out_buf),
+                &mut out,
+                kept.verdict,
+            );
+        }
         let c = input.field(|i| &i.credential);
         let credential = (c.fmt != BLOB_ABSENT && !c.ptr.is_null()).then(|| c.bytes());
         let token = match credential.map(std::str::from_utf8) {
@@ -762,14 +959,16 @@ impl SafeSlot for Verify {
                     reason = "non-text-bearer",
                     "credential is not a text JWT; passing to the next auth module"
                 );
-                return answer(
+                return verify_answer(
+                    h,
+                    instance.ticket(),
                     None,
                     None,
                     None,
-                    Some((input.strip(), DECISION_CONTINUE)),
-                    input.field(|i| &i.out_buf),
-                    &mut out,
+                    DECISION_CONTINUE,
                     VERDICT_PASS,
+                    input,
+                    &mut out,
                 );
             }
             Some(Ok(token)) => Some(token),
@@ -785,14 +984,16 @@ impl SafeSlot for Verify {
             .then(|| token.and_then(|t| opened.module.cached(t, request_now)))
             .flatten();
         if let Some(hit) = hit {
-            return answer(
+            return verify_answer(
+                h,
+                instance.ticket(),
                 Some(&*hit.principal),
                 hit.ttl_secs,
                 token.map(str::as_bytes),
-                Some((input.strip(), DECISION_CONTINUE)),
-                input.field(|i| &i.out_buf),
-                &mut out,
+                DECISION_CONTINUE,
                 VERDICT_IDENTITY,
+                input,
+                &mut out,
             );
         }
         let judged = opened
@@ -817,14 +1018,16 @@ impl SafeSlot for Verify {
             AuthVerdict::Pass => (None, VERDICT_PASS, DECISION_CONTINUE),
             AuthVerdict::Reject => (None, VERDICT_REJECT, DECISION_STOP),
         };
-        answer(
+        verify_answer(
+            h,
+            instance.ticket(),
             p,
             p.and_then(|p| p.ttl_secs),
             token.map(str::as_bytes),
-            Some((input.strip(), decision)),
-            input.field(|i| &i.out_buf),
-            &mut out,
+            decision,
             verdict,
+            input,
+            &mut out,
         )
     }
 }
