@@ -916,6 +916,10 @@ fn a_token_with_no_aud_or_a_malformed_aud_is_denied() {
         serde_json::json!(true),
         serde_json::json!({ "aud": AUDIENCE }),
         serde_json::json!(null),
+        serde_json::json!([AUDIENCE, 42]),
+        serde_json::json!([AUDIENCE, null]),
+        serde_json::json!([AUDIENCE, { "aud": AUDIENCE }]),
+        serde_json::json!([AUDIENCE, [AUDIENCE]]),
     ] {
         let mut c = base_claims(now);
         c["aud"] = malformed.clone();
@@ -1052,6 +1056,20 @@ fn an_id_token_aud_follows_the_oidc_azp_rules_against_the_client_id() {
         ),
         "an azp present with a single aud must name the client (§3.1.3.7 step 5)"
     );
+    for extra in [
+        serde_json::json!(42),
+        serde_json::json!(null),
+        serde_json::json!({ "aud": "cid" }),
+        serde_json::json!(["cid"]),
+    ] {
+        assert!(
+            matches!(
+                login(serde_json::json!(["cid", extra]), Some("cid")),
+                LoginOutcome::Reject
+            ),
+            "a matching azp cannot make a mixed-type audience array valid"
+        );
+    }
 }
 
 #[test]

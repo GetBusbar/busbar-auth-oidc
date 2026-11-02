@@ -224,6 +224,91 @@ fn tokens(key: &Issuer) -> Tokens {
     }
 }
 
+/// A signed audience must still have the JWT string-or-array-of-strings shape. Exercise the
+/// actual bearer and browser callback doors, including their Pending discovery/JWKS/exchange IO,
+/// with a separate resource audience and login client id.
+#[test]
+fn signed_mixed_type_audiences_are_refused_by_both_doors_and_login_modes() {
+    let _one = support::serial();
+    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let row = row();
+    let registry = scanned("mixed-aud", manifest("auth", &row.statement), &cdylib());
+    let (lib, stated) = admitted(&registry);
+    let mut cfg: serde_json::Value = serde_json::from_str(&config(AUDIENCE)).unwrap();
+    const CLIENT: &str = "conformance-login-client";
+    cfg["client_id"] = serde_json::json!(CLIENT);
+    let cfg = cfg.to_string();
+    for arm in [
+        Arm::Linked,
+        Arm::Dropped {
+            lib: &lib,
+            stated: &stated,
+        },
+    ] {
+        let b = bind(&arm, &Idp::new(&key));
+        open(&b.plugin, &cfg, Some(CLIENT_SECRET)).unwrap();
+        for (index, extra) in [
+            serde_json::json!(42),
+            serde_json::json!(null),
+            serde_json::json!({ "aud": AUDIENCE }),
+            serde_json::json!([AUDIENCE]),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut bearer = claims(AUDIENCE);
+            bearer["aud"] = serde_json::json!([AUDIENCE, extra.clone()]);
+            assert_eq!(b.verify(Some(&key.sign(&bearer)), None), "verdict 2 ");
+            let mut login = claims(CLIENT);
+            login["aud"] = serde_json::json!([CLIENT, extra]);
+            login["azp"] = serde_json::json!(CLIENT);
+            b.idp.answer(
+                "/token",
+                200,
+                &serde_json::json!({ "id_token": key.sign(&login) }).to_string(),
+            );
+            assert_eq!(
+                b.complete(
+                    &format!("mixed-aud-{index}"),
+                    ("mixed-aud-state", NONCE),
+                    REDIRECT,
+                    "the-verifier",
+                    None,
+                ),
+                "verdict 2 ",
+                "a valid client azp and login nonce cannot repair a non-string audience"
+            );
+        }
+        let mut bearer = claims(AUDIENCE);
+        bearer["aud"] = serde_json::json!([AUDIENCE, "another-resource"]);
+        assert!(
+            b.verify(Some(&key.sign(&bearer)), None)
+                .starts_with("verdict 1 "),
+            "a valid bearer can name several resource audiences without azp"
+        );
+        let mut login = claims(CLIENT);
+        login["aud"] = serde_json::json!([CLIENT, "another-client"]);
+        login["azp"] = serde_json::json!(CLIENT);
+        b.idp.answer(
+            "/token",
+            200,
+            &serde_json::json!({ "id_token": key.sign(&login) }).to_string(),
+        );
+        assert!(
+            b.complete(
+                "valid-multi-aud",
+                ("mixed-aud-state", NONCE),
+                REDIRECT,
+                "the-verifier",
+                None,
+            )
+            .starts_with("verdict 1 "),
+            "an all-string id_token audience array keeps the authorized-party rule"
+        );
+        assert!(b.idp.pended() > 0, "the loaded door crossed Pending IO");
+    }
+}
+
 /// What one door does with the module opened under `cfg`, against its own IdP, as one comparable
 /// transcript: every answer, then every need the loader declared, every request the IdP saw and
 /// how many reads pended.
