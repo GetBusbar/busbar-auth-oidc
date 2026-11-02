@@ -161,7 +161,7 @@ fn a_late_failure_from_an_abandoned_flight_does_not_overwrite_the_live_one() {
 fn a_failed_discovery_logs_one_warn_with_the_error() {
     let (c, d) = (cfg(None), Discovery::new(Duration::from_secs(60)));
     let idp = Idp::answering(Err("connection refused".into()));
-    let cap = busbar_test_kit::warn_capture::WarnCapture::default();
+    let cap = crate::tests::diagnostics::WarnCapture::default();
     tracing::subscriber::with_default(cap.clone(), || {
         let now = Instant::now();
         assert!(ready(d.document(&c, now, &mut idp.at_once(Some(ME)))).is_err());
@@ -310,7 +310,7 @@ fn a_discovered_jwks_failure_scrubs_userinfo_without_changing_the_fetch_url() {
             url,
             asked: Vec::new(),
         };
-        let capture = busbar_test_kit::warn_capture::WarnCapture::default();
+        let capture = crate::tests::diagnostics::WarnCapture::default();
         tracing::subscriber::with_default(capture.clone(), || {
             assert_eq!(ready(module.ready(Instant::now(), &mut io)), Ok(()));
         });

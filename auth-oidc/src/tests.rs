@@ -703,8 +703,8 @@ fn a_rejected_token_is_logged_at_info_with_a_reason() {
         ("forged", forged, "reason=signature"),
     ] {
         let (warn, all) = (
-            busbar_test_kit::warn_capture::WarnCapture::default(),
-            busbar_test_kit::warn_capture::WarnCapture::capturing_debug(),
+            crate::tests::diagnostics::WarnCapture::default(),
+            crate::tests::diagnostics::WarnCapture::capturing_debug(),
         );
         for cap in [&warn, &all] {
             let verdict = tracing::subscriber::with_default(cap.clone(), || {
@@ -731,7 +731,7 @@ fn an_unreadable_host_clock_is_a_failure_not_a_bad_credential() {
     let key = TestKey::generate(KID);
     let m = module_with(&key, "groups");
     let token = key.mint(&base_claims(now_unix()));
-    let cap = busbar_test_kit::warn_capture::WarnCapture::default();
+    let cap = crate::tests::diagnostics::WarnCapture::default();
     let (bearer, login) = tracing::subscriber::with_default(cap.clone(), || {
         let bearer = ready(m.m.verify(
             Some(&token),
@@ -1573,7 +1573,7 @@ fn a_key_set_that_cannot_be_had_at_login_is_an_outage_not_a_decline() {
     ] {
         let m = OidcModule::new(&c);
         let down = Idp::answering(Err(cause.to_string()));
-        let cap = busbar_test_kit::warn_capture::WarnCapture::default();
+        let cap = crate::tests::diagnostics::WarnCapture::default();
         let outcome = tracing::subscriber::with_default(cap.clone(), || {
             ready(m.identity_from_token_response(
                 &response,
@@ -1913,8 +1913,8 @@ fn only_an_rfc_6749_credential_error_at_the_token_endpoint_is_a_decline() {
             body: body.to_string(),
         };
         let (warn, all) = (
-            busbar_test_kit::warn_capture::WarnCapture::default(),
-            busbar_test_kit::warn_capture::WarnCapture::capturing_debug(),
+            crate::tests::diagnostics::WarnCapture::default(),
+            crate::tests::diagnostics::WarnCapture::capturing_debug(),
         );
         let mut outcome = None;
         for cap in [&warn, &all] {
@@ -1991,7 +1991,7 @@ fn a_begin_login_with_no_nonce_is_refused_and_logged() {
             nonce: nonce.clone(),
             scopes: Vec::new(),
         };
-        let cap = busbar_test_kit::warn_capture::WarnCapture::default();
+        let cap = crate::tests::diagnostics::WarnCapture::default();
         let begun = tracing::subscriber::with_default(cap.clone(), || {
             ready(m.begin_login(&begin, Instant::now(), &mut idp.at_once(Some(ME))))
         });
@@ -2288,7 +2288,7 @@ fn the_token_response_holds_its_tokens_in_wiped_holders() {
 #[test]
 fn a_logged_idp_url_drops_its_userinfo() {
     let key = TestKey::generate(KID);
-    let cap = busbar_test_kit::warn_capture::WarnCapture::default();
+    let cap = crate::tests::diagnostics::WarnCapture::default();
     tracing::subscriber::with_default(cap.clone(), || {
         let c = crate::cache::JwksCache::new(Duration::from_secs(1), Duration::from_secs(1));
         let url = "https://jwks-user:SECRETPW@jwks.test/keys";
@@ -2330,7 +2330,7 @@ fn skipped_jwks_entries_are_counted_in_one_warn() {
         "keys": [good, {"kid": "no-kty-SECRET"}, {"kty": 7}],
     })
     .to_string();
-    let cap = busbar_test_kit::warn_capture::WarnCapture::default();
+    let cap = crate::tests::diagnostics::WarnCapture::default();
     let set = tracing::subscriber::with_default(cap.clone(), || jwks::JwkSet::parse(&body))
         .expect("the usable key parses");
     assert_eq!(set.keys.len(), 1);
@@ -2338,7 +2338,7 @@ fn skipped_jwks_entries_are_counted_in_one_warn() {
     assert!(cap.contains("skipped=2"), "{:?}", cap.messages());
     assert!(!cap.contains("SECRET"), "{:?}", cap.messages());
 
-    let quiet = busbar_test_kit::warn_capture::WarnCapture::default();
+    let quiet = crate::tests::diagnostics::WarnCapture::default();
     tracing::subscriber::with_default(quiet.clone(), || jwks::JwkSet::parse(&key.jwks()))
         .expect("parses");
     assert!(quiet.messages().is_empty(), "{:?}", quiet.messages());
@@ -2359,7 +2359,7 @@ fn a_refused_token_response_is_logged_with_its_reason() {
             status,
             body: body.to_string(),
         };
-        let cap = busbar_test_kit::warn_capture::WarnCapture::capturing_debug();
+        let cap = crate::tests::diagnostics::WarnCapture::capturing_debug();
         let outcome = tracing::subscriber::with_default(cap.clone(), || {
             ready(m.identity_from_token_response(
                 &response,
@@ -2386,7 +2386,7 @@ fn a_refused_token_exchange_is_logged_with_its_reason() {
     c.token_endpoint = Some("https://idp.test/token".to_string());
     let idp = Idp::new(String::new());
     let run = |m: &OidcModule, code: Option<&str>| {
-        let cap = busbar_test_kit::warn_capture::WarnCapture::capturing_debug();
+        let cap = crate::tests::diagnostics::WarnCapture::capturing_debug();
         let out = tracing::subscriber::with_default(cap.clone(), || {
             ready(m.token_exchange(
                 code,
@@ -2410,7 +2410,7 @@ fn a_refused_token_exchange_is_logged_with_its_reason() {
     none.token_endpoint = None;
     idp.set_body(serde_json::json!({ "issuer": ISSUER }).to_string());
     let mut io = idp.at_once(Some(ME));
-    let cap = busbar_test_kit::warn_capture::WarnCapture::default();
+    let cap = crate::tests::diagnostics::WarnCapture::default();
     let out = tracing::subscriber::with_default(cap.clone(), || {
         ready(OidcModule::new(&none).token_exchange(
             Some("c"),
@@ -2475,8 +2475,8 @@ fn an_end_user_decline_logs_at_info_and_an_idp_failure_at_warn() {
             body: r#"{"error":"invalid_grant"}"#.to_string(),
         };
         let (warn, all) = (
-            busbar_test_kit::warn_capture::WarnCapture::default(),
-            busbar_test_kit::warn_capture::WarnCapture::capturing_debug(),
+            crate::tests::diagnostics::WarnCapture::default(),
+            crate::tests::diagnostics::WarnCapture::capturing_debug(),
         );
         for cap in [&warn, &all] {
             let _ = tracing::subscriber::with_default(cap.clone(), || {
@@ -2495,8 +2495,8 @@ fn an_end_user_decline_logs_at_info_and_an_idp_failure_at_warn() {
     assert_eq!(refused(503), (true, true), "a 5xx is the IdP's: warn");
 
     let (warn, all) = (
-        busbar_test_kit::warn_capture::WarnCapture::default(),
-        busbar_test_kit::warn_capture::WarnCapture::capturing_debug(),
+        crate::tests::diagnostics::WarnCapture::default(),
+        crate::tests::diagnostics::WarnCapture::capturing_debug(),
     );
     for cap in [&warn, &all] {
         tracing::subscriber::with_default(cap.clone(), || {
@@ -2568,7 +2568,7 @@ fn a_token_of_the_second_provider_passes_the_first_and_is_admitted_by_the_second
     let (key_a, a, key_b, b) = two_providers();
     let now = 1_700_000_000;
     let token = key_b.mint(&claims_of(ISSUER_B, AUDIENCE_B, now));
-    let cap = busbar_test_kit::warn_capture::WarnCapture::capturing_debug();
+    let cap = crate::tests::diagnostics::WarnCapture::capturing_debug();
     let walked = tracing::subscriber::with_default(cap.clone(), || chain(&[&a, &b], &token, now));
     assert_eq!(walked, Walked::Admitted(1, "oidc:object-guid".to_string()));
     assert_eq!(
@@ -2603,7 +2603,7 @@ fn a_token_claiming_the_first_providers_issuer_with_a_bad_signature_is_refused_b
         let sig = key_b.kp.sign(&key_b.rng, input.as_bytes()).unwrap();
         format!("{input}.{}", URL_SAFE_NO_PAD.encode(sig.as_ref()))
     };
-    let cap = busbar_test_kit::warn_capture::WarnCapture::capturing_debug();
+    let cap = crate::tests::diagnostics::WarnCapture::capturing_debug();
     let walked = tracing::subscriber::with_default(cap.clone(), || chain(&[&a, &b], &forged, now));
     assert_eq!(walked, Walked::Refused(0));
     assert_eq!(b.idp.calls(), 0, "B never judged it");
@@ -2657,7 +2657,7 @@ fn a_begin_login_with_no_authorize_endpoint_is_logged() {
         nonce: Some("nc".to_string()),
         scopes: Vec::new(),
     };
-    let cap = busbar_test_kit::warn_capture::WarnCapture::default();
+    let cap = crate::tests::diagnostics::WarnCapture::default();
     let out = tracing::subscriber::with_default(cap.clone(), || {
         ready(OidcModule::new(&none).begin_login(
             &begin,
@@ -2675,7 +2675,7 @@ fn a_begin_login_with_no_authorize_endpoint_is_logged() {
 
 #[test]
 fn malformed_role_values_are_reported_without_changing_valid_roles_or_echoing_claims() {
-    let cap = busbar_test_kit::warn_capture::WarnCapture::default();
+    let cap = crate::tests::diagnostics::WarnCapture::default();
     let value = serde_json::json!(["admin", {"SecretRoleClaim":true}, 7]);
     let roles =
         tracing::subscriber::with_default(cap.clone(), || extract_string_list(Some(&value)));
@@ -2706,3 +2706,6 @@ fn an_unreadable_idp_document_is_refused_without_echoing_it() {
     assert!(!err.contains("Zq7distinctiveValue"), "echoed: {err}");
     assert!(err.contains("withheld"), "{err}");
 }
+
+#[path = "tests/diagnostics.rs"]
+mod diagnostics;

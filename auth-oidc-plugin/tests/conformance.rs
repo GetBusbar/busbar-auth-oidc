@@ -8,12 +8,6 @@ mod support;
 #[path = "support/retry_after.rs"]
 mod retry_after;
 
-busbar_test_kit::conformance_suite! {
-    door: busbar_auth_oidc::door::door,
-    cdylib: "busbar_auth_oidc_plugin",
-    inputs: include_str!("conformance.json"),
-}
-
 #[path = "support/net_ban.rs"]
 mod net_ban;
 
@@ -1869,5 +1863,788 @@ fn executing_driver_does_not_repark_an_exchange_after_successful_refresh() {
                 drop(hold);
             }
         }
+    }
+}
+
+/// Actual signed OIDC roles force both host identity buffers to grow. Advancing the request
+/// past exp between SHORT and recall would reject a second judgment of the same credential.
+#[test]
+fn wide_verified_identity_keeps_its_first_judgment_through_both_doors() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    let _one = support::serial();
+    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let lib = cdylib();
+    let stated = row().statement;
+    let mut c = claims(AUDIENCE);
+    c["roles"] = serde_json::json!((0..300).map(|i| format!("group-{i}")).collect::<Vec<_>>());
+    let token = key.sign(&c);
+    let valid_at = c["exp"].as_u64().unwrap() - 10;
+    for arm in [
+        Arm::Linked,
+        Arm::Dropped {
+            lib: &lib,
+            stated: &stated,
+        },
+    ] {
+        let idp = Idp::new(&key);
+        let b = bind(&arm, &idp);
+        open(&b.plugin, &config(AUDIENCE), None).expect("opens");
+        for _ in 0..4 {
+            let timestamp = AtomicU64::new(valid_at);
+            let before = idp.sent().len();
+            let answer = b.identify_after_short(
+                slot::VERIFY,
+                |buf| support::verify_in_at(Some(&token), buf, timestamp.load(Ordering::SeqCst)),
+                (8, 0),
+                || {
+                    timestamp.store(valid_at + 7200, Ordering::SeqCst);
+                },
+            );
+            assert!(answer.starts_with("short(needed "), "{answer}");
+            assert!(
+                answer.contains("verdict 1 subject=Some(\"oidc:conformance-subject\")"),
+                "{answer}"
+            );
+            assert_eq!(
+                answer.matches("\"group-").count(),
+                300,
+                "all signed role entries survive"
+            );
+            assert!(
+                answer.contains("\"group-299\""),
+                "all 300 signed roles survive recall: {answer}"
+            );
+            assert_eq!(
+                idp.sent().len() - before,
+                if before == 0 { 2 } else { 0 },
+                "one discovery/JWKS fetch, no recall fetch"
+            );
+        }
+        let mut bytes = vec![0; 65536];
+        let mut groups = vec![z::<Span>(); 300];
+        let mut out: IdentifyOut = z();
+        out.head = out_head();
+        let mut frame = Frame::new(
+            support::verify_in_at(
+                Some(&token),
+                identity_buf(&mut bytes, &mut groups),
+                valid_at + 7200,
+            ),
+            out,
+        );
+        assert_eq!(
+            b.plugin.call(slot::VERIFY, &mut frame).outcome,
+            Outcome::Ready
+        );
+        assert_eq!(
+            frame.out.verdict, 2,
+            "a fresh judgment at the advanced timestamp rejects expiry"
+        );
+    }
+}
+
+#[test]
+fn abandoned_wide_oidc_verdicts_release_and_closed_instances_refuse_recall_both_ways() {
+    use busbar_contract::abi::mechanism::call::DeadlineClass;
+    use busbar_contract::abi::mechanism::lifecycle::{slot as life, ReleaseIn, TickIn, TickOut};
+    let _one = support::serial();
+    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let lib = cdylib();
+    let stated = row().statement;
+    let mut c = claims(AUDIENCE);
+    c["roles"] = serde_json::json!((0..300).map(|i| format!("group-{i}")).collect::<Vec<_>>());
+    let token = key.sign(&c);
+    let frame = || {
+        let mut output: IdentifyOut = z();
+        output.head = out_head();
+        Frame::new(verify_in(Some(&token), z()), output)
+    };
+    for arm in [
+        Arm::Linked,
+        Arm::Dropped {
+            lib: &lib,
+            stated: &stated,
+        },
+    ] {
+        let b = bind(&arm, &Idp::new(&key));
+        open(&b.plugin, &config(AUDIENCE), None).expect("opens");
+        assert!(
+            b.verify(Some(&token), None).contains("group-299"),
+            "warm the actual JWKS and wide identity"
+        );
+        let mut first = frame();
+        let short = b.plugin.call(slot::VERIFY, &mut first);
+        assert_eq!(short.outcome, Outcome::Failed);
+        assert_eq!(short.lease, 0, "negotiated storage stays private");
+        let lease = first.out.head.lease;
+        assert_ne!(lease, 0);
+        drop(short.recall.expect("one recall token"));
+        let release = |lease| {
+            b.plugin
+                .call(
+                    life::RELEASE,
+                    &mut Frame::new(
+                        ReleaseIn {
+                            head: busbar_plugin_loader::dispatch::in_head(),
+                            lease,
+                        },
+                        out_head(),
+                    ),
+                )
+                .outcome
+        };
+        assert_eq!(
+            release(lease),
+            Outcome::Refused,
+            "token drop returned its lease"
+        );
+        for cancel in [false, true] {
+            let ticket = b.dispatcher.mint(0).unwrap();
+            let done = b
+                .dispatcher
+                .submit(
+                    &b.plugin,
+                    ticket,
+                    slot::VERIFY,
+                    frame(),
+                    DeadlineClass::Call,
+                    0,
+                )
+                .wait(Duration::from_secs(10))
+                .unwrap();
+            assert!(done.short);
+            assert_eq!(done.lease, 0);
+            let lease = done.frame.unwrap().out.head.lease;
+            if cancel {
+                b.dispatcher.drop_client(ticket);
+            } else {
+                b.dispatcher.recycle(ticket);
+            }
+            for _ in 0..2 {
+                let barrier = b.dispatcher.mint(0).unwrap();
+                let mut input: TickIn = z();
+                input.head = busbar_plugin_loader::dispatch::in_head();
+                let mut output: TickOut = z();
+                output.head = out_head();
+                assert_eq!(
+                    b.dispatcher
+                        .submit(
+                            &b.plugin,
+                            barrier,
+                            life::TICK,
+                            Frame::new(input, output),
+                            DeadlineClass::Call,
+                            0
+                        )
+                        .wait(Duration::from_secs(10))
+                        .unwrap()
+                        .outcome,
+                    Outcome::Ready
+                );
+                b.dispatcher.recycle(barrier);
+            }
+            assert_eq!(
+                release(lease),
+                Outcome::Refused,
+                "ticket lifecycle returned its lease"
+            );
+            if cancel {
+                b.dispatcher.recycle(ticket);
+            }
+        }
+        let token = b.plugin.call(slot::VERIFY, &mut frame()).recall.unwrap();
+        assert_eq!(
+            b.plugin
+                .call(
+                    life::CLOSE,
+                    &mut Frame::new(busbar_plugin_loader::dispatch::in_head(), out_head())
+                )
+                .outcome,
+            Outcome::Ready
+        );
+        assert!(!b.plugin.is_open());
+        assert!(matches!(
+            b.plugin.recall(token, slot::VERIFY, &mut frame()).outcome,
+            Outcome::Refused | Outcome::Fault
+        ));
+    }
+}
+
+/// The former macro's OIDC-specific cases remain data-driven ordinary Rust assertions.
+#[test]
+fn configured_oidc_cases_validate_refresh_close_and_never_echo_credentials_both_ways() {
+    use busbar_contract::abi::mechanism::call::{Blob, BLOB_JSON};
+    use busbar_contract::abi::mechanism::lifecycle::{slot as life, RefreshIn, ValidateIn};
+    let _one = support::serial();
+    let input: serde_json::Value = serde_json::from_str(include_str!("conformance.json")).unwrap();
+    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let lib = cdylib();
+    let stated = row().statement;
+    let settings = input["settings"].to_string();
+    let mut results = Vec::new();
+    for arm in [
+        Arm::Linked,
+        Arm::Dropped {
+            lib: &lib,
+            stated: &stated,
+        },
+    ] {
+        let idp = Idp::new(&key);
+        for far in input["far_ends"].as_array().unwrap() {
+            let url = far["url"].as_str().unwrap();
+            let path = format!(
+                "/{}",
+                url.strip_prefix("https://")
+                    .unwrap()
+                    .split_once('/')
+                    .unwrap()
+                    .1
+            );
+            idp.answer(
+                &path,
+                far["status"].as_u64().unwrap() as u32,
+                far["body"].as_str().unwrap(),
+            );
+        }
+        let b = bind(&arm, &idp);
+        let mut answers = Vec::new();
+        let mut actual_crossings = Vec::new();
+        let crossings = || {
+            use std::sync::atomic::Ordering::SeqCst;
+            b.plugin.inner.crossings.load(SeqCst) - b.plugin.inner.resumes.load(SeqCst)
+        };
+        let credential = input["auth"]["cases"][0]["credential"].as_str().unwrap();
+        assert!(
+            !verify_ticketless(&b.plugin, Some(credential)).starts_with("verdict"),
+            "unopened verify is refused"
+        );
+        for cfg in input["auth"]["bad_settings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(std::iter::once(&input["settings"]))
+        {
+            let cfg = cfg
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| cfg.to_string());
+            let mut reason = [0u8; 1024];
+            let mut validation: ValidateIn = z();
+            validation.head = busbar_plugin_loader::dispatch::in_head();
+            validation.settings = Blob {
+                ptr: cfg.as_ptr(),
+                len: cfg.len(),
+                fmt: BLOB_JSON,
+                flags: 0,
+            };
+            validation.err_buf = reason.as_mut_ptr();
+            validation.err_cap = reason.len();
+            let output = out_head();
+            let outcome = b
+                .plugin
+                .call(life::VALIDATE, &mut Frame::new(validation, output))
+                .outcome;
+            assert_eq!(
+                outcome,
+                if cfg == settings {
+                    Outcome::Ready
+                } else {
+                    Outcome::Failed
+                }
+            );
+            if cfg != settings {
+                let error = open(&b.plugin, &cfg, None).expect_err("bad settings refuse open");
+                assert!(!error.is_empty(), "bad open names why");
+                answers.push(error);
+            }
+        }
+        open(&b.plugin, &settings, None).expect("configured open");
+        b.plugin
+            .ready(&b.dispatcher, Duration::from_secs(10))
+            .expect("ready warms actual keys");
+        assert_eq!(idp.sent_to("/keys").len(), 1);
+        for case in input["auth"]["cases"].as_array().unwrap() {
+            let credential = case["credential"].as_str();
+            let verdict = match case["verdict"].as_str().unwrap() {
+                "reject" => 2,
+                "pass" => 3,
+                _ => 1,
+            };
+            let before = crossings();
+            let now = verify_ticketless(&b.plugin, credential);
+            actual_crossings.push(crossings() - before);
+            assert_eq!(
+                crossings() - before,
+                1,
+                "ticketless verification crosses once"
+            );
+            assert_eq!(now, format!("verdict {verdict}"));
+            let before = crossings();
+            let submitted = b.verify(credential, None);
+            actual_crossings.push(crossings() - before);
+            assert_eq!(
+                crossings() - before,
+                1,
+                "submitted verification crosses once, resumes counted separately"
+            );
+            assert!(
+                submitted.starts_with(&format!("verdict {verdict} ")),
+                "{submitted}"
+            );
+            if verdict == 1 {
+                assert!(submitted.contains("oidc:conformance-subject"));
+            }
+            answers.extend([now, submitted]);
+        }
+        let before = crossings();
+        let short = b.verify(Some(credential), Some((8, 0)));
+        actual_crossings.push(crossings() - before);
+        assert_eq!(
+            crossings() - before,
+            3,
+            "SHORT, recall and private lease cleanup"
+        );
+        assert!(
+            short.starts_with("short(needed ") && short.contains("verdict 1 "),
+            "{short}"
+        );
+        answers.push(short);
+        answers.push(b.begin(
+            REDIRECT,
+            "conformance-state",
+            "conformance-challenge",
+            NONCE,
+        ));
+        assert!(answers
+            .last()
+            .unwrap()
+            .starts_with("shape 1 https://idp.conformance.example/authorize?"));
+        let login = b.complete(
+            "conformance-code",
+            ("conformance-state", NONCE),
+            REDIRECT,
+            "conformance-verifier",
+            None,
+        );
+        assert!(
+            login.starts_with("verdict 1 subject=Some(\"oidc:conformance-subject\")"),
+            "{login}"
+        );
+        answers.push(login);
+        assert_eq!(idp.sent_to("/token").len(), 1);
+        let mut undeclared: busbar_contract::abi::auth::OpenOutboundIn = z();
+        undeclared.head = busbar_plugin_loader::dispatch::in_head();
+        let mut undeclared_out: busbar_contract::abi::auth::OpenOutboundOut = z();
+        undeclared_out.head = out_head();
+        assert_eq!(
+            b.plugin
+                .call(
+                    slot::OPEN_OUTBOUND,
+                    &mut Frame::new(undeclared, undeclared_out)
+                )
+                .outcome,
+            Outcome::Refused
+        );
+        let mut undeclared: busbar_contract::abi::auth::OutboundReadyIn = z();
+        undeclared.head = busbar_plugin_loader::dispatch::in_head();
+        let mut undeclared_out: busbar_contract::abi::auth::OutboundReadyOut = z();
+        undeclared_out.head = out_head();
+        assert_eq!(
+            b.plugin
+                .call(
+                    slot::OUTBOUND_READY,
+                    &mut Frame::new(undeclared, undeclared_out)
+                )
+                .outcome,
+            Outcome::Refused
+        );
+        let mut undeclared: busbar_contract::abi::auth::FieldsIn = z();
+        undeclared.head = busbar_plugin_loader::dispatch::in_head();
+        let mut undeclared_out: busbar_contract::abi::auth::FieldsOut = z();
+        undeclared_out.head = out_head();
+        assert_eq!(
+            b.plugin
+                .call(slot::FIELDS, &mut Frame::new(undeclared, undeclared_out))
+                .outcome,
+            Outcome::Refused
+        );
+        let mut refresh: RefreshIn = z();
+        refresh.head = busbar_plugin_loader::dispatch::in_head();
+        refresh.generation = 2;
+        refresh.settings = Blob {
+            ptr: settings.as_ptr(),
+            len: settings.len(),
+            fmt: BLOB_JSON,
+            flags: 0,
+        };
+        assert_eq!(
+            b.plugin
+                .call(life::REFRESH, &mut Frame::new(refresh, out_head()))
+                .outcome,
+            Outcome::Ready
+        );
+        assert!(b.verify(Some(credential), None).starts_with("verdict 1 "));
+        assert_eq!(
+            b.plugin
+                .call(
+                    life::CLOSE,
+                    &mut Frame::new(busbar_plugin_loader::dispatch::in_head(), out_head())
+                )
+                .outcome,
+            Outcome::Ready
+        );
+        assert!(
+            !verify_ticketless(&b.plugin, Some(credential)).starts_with("verdict"),
+            "closed verify is refused"
+        );
+        for secret in input["auth"]["never_echoed"].as_array().unwrap() {
+            for answer in &answers {
+                assert!(
+                    !answer.contains(secret.as_str().unwrap()),
+                    "no credential crosses back"
+                );
+            }
+        }
+        let pinned = vec![1, 1, 1, 1, 1, 1, 1, 1, 3];
+        assert_eq!(actual_crossings, pinned);
+        let mut moved = actual_crossings.clone();
+        moved[0] += 1;
+        assert_ne!(
+            moved, pinned,
+            "a moved crossing is refused by the exact comparison"
+        );
+        assert_ne!(
+            actual_crossings.iter().map(|n| n * 2).collect::<Vec<_>>(),
+            pinned,
+            "double crossings are refused"
+        );
+        results.push(answers);
+    }
+    assert_eq!(results[0], results[1]);
+    assert!(
+        !(cfg!(debug_assertions) && std::env::var_os("BUSBAR_EXPECT_RELEASE").is_some()),
+        "BUSBAR_EXPECT_RELEASE requires --release"
+    );
+}
+
+#[test]
+fn real_oidc_requires_a_connection_table_and_refuses_a_mismatched_linked_statement() {
+    use busbar_plugin_loader::dispatch::{
+        load_dropped_bytes, load_linked, Bind, ConnTable, DispatchConfig, Dispatcher, NoSink,
+    };
+    use std::sync::Arc;
+    let _one = support::serial();
+    let d = Dispatcher::new(DispatchConfig::default());
+    let bind = |conns| Bind {
+        instance: Arc::from("oidc-negative"),
+        max_inflight_cap: 64,
+        sink: Arc::new(NoSink),
+        dispatcher: d.adopter(),
+        conns,
+    };
+    let mut row = row();
+    let lib = cdylib();
+    let want = LoadError::NoConnectionTable {
+        plugin: NAME.into(),
+        needs: 6,
+    };
+    let linked = load_linked::<Auth>(&row, bind(ConnTable::NoNeeds))
+        .map(|_| ())
+        .expect_err("networked linked door requires table");
+    assert_eq!(linked, want);
+    assert!(linked.to_string().contains(&format!("plugin '{NAME}'")));
+    assert_eq!(
+        load_dropped_bytes::<Auth>(&lib, NAME, &row.statement, bind(ConnTable::NoNeeds))
+            .map(|_| ())
+            .err(),
+        Some(want)
+    );
+    load_linked::<Auth>(&row, bind(ConnTable::Probe)).expect("a probe needs no serving table");
+    assert!(
+        matches!(
+            load_linked::<busbar_plugin_loader::dispatch::kinds::secret::Secret>(
+                &row,
+                bind(ConnTable::Probe)
+            )
+            .map(|_| ())
+            .err(),
+            Some(LoadError::WrongKind { .. }) | Some(LoadError::ManifestKind { .. })
+        ),
+        "auth must not load as secret"
+    );
+    assert!(
+        matches!(
+            load_dropped_bytes::<busbar_plugin_loader::dispatch::kinds::secret::Secret>(
+                &lib,
+                NAME,
+                &row.statement,
+                bind(ConnTable::Probe)
+            )
+            .map(|_| ())
+            .err(),
+            Some(LoadError::WrongKind { .. }) | Some(LoadError::ManifestKind { .. })
+        ),
+        "auth must not load as secret"
+    );
+    assert!(
+        matches!(
+            load_linked::<busbar_plugin_loader::dispatch::kinds::store::Store>(
+                &row,
+                bind(ConnTable::Probe)
+            )
+            .map(|_| ())
+            .err(),
+            Some(LoadError::WrongKind { .. }) | Some(LoadError::ManifestKind { .. })
+        ),
+        "auth must not load as store"
+    );
+    assert!(
+        matches!(
+            load_dropped_bytes::<busbar_plugin_loader::dispatch::kinds::store::Store>(
+                &lib,
+                NAME,
+                &row.statement,
+                bind(ConnTable::Probe)
+            )
+            .map(|_| ())
+            .err(),
+            Some(LoadError::WrongKind { .. }) | Some(LoadError::ManifestKind { .. })
+        ),
+        "auth must not load as store"
+    );
+    assert!(
+        matches!(
+            load_linked::<busbar_plugin_loader::dispatch::kinds::transport::Transport>(
+                &row,
+                bind(ConnTable::Probe)
+            )
+            .map(|_| ())
+            .err(),
+            Some(LoadError::WrongKind { .. }) | Some(LoadError::ManifestKind { .. })
+        ),
+        "auth must not load as transport"
+    );
+    assert!(
+        matches!(
+            load_dropped_bytes::<busbar_plugin_loader::dispatch::kinds::transport::Transport>(
+                &lib,
+                NAME,
+                &row.statement,
+                bind(ConnTable::Probe)
+            )
+            .map(|_| ())
+            .err(),
+            Some(LoadError::WrongKind { .. }) | Some(LoadError::ManifestKind { .. })
+        ),
+        "auth must not load as transport"
+    );
+    assert!(
+        matches!(
+            load_linked::<busbar_plugin_loader::dispatch::kinds::export::Export>(
+                &row,
+                bind(ConnTable::Probe)
+            )
+            .map(|_| ())
+            .err(),
+            Some(LoadError::WrongKind { .. }) | Some(LoadError::ManifestKind { .. })
+        ),
+        "auth must not load as export"
+    );
+    assert!(
+        matches!(
+            load_dropped_bytes::<busbar_plugin_loader::dispatch::kinds::export::Export>(
+                &lib,
+                NAME,
+                &row.statement,
+                bind(ConnTable::Probe)
+            )
+            .map(|_| ())
+            .err(),
+            Some(LoadError::WrongKind { .. }) | Some(LoadError::ManifestKind { .. })
+        ),
+        "auth must not load as export"
+    );
+    assert!(
+        matches!(
+            load_linked::<busbar_plugin_loader::dispatch::kinds::hook::Hook>(
+                &row,
+                bind(ConnTable::Probe)
+            )
+            .map(|_| ())
+            .err(),
+            Some(LoadError::WrongKind { .. }) | Some(LoadError::ManifestKind { .. })
+        ),
+        "auth must not load as hook"
+    );
+    assert!(
+        matches!(
+            load_dropped_bytes::<busbar_plugin_loader::dispatch::kinds::hook::Hook>(
+                &lib,
+                NAME,
+                &row.statement,
+                bind(ConnTable::Probe)
+            )
+            .map(|_| ())
+            .err(),
+            Some(LoadError::WrongKind { .. }) | Some(LoadError::ManifestKind { .. })
+        ),
+        "auth must not load as hook"
+    );
+    assert!(
+        matches!(
+            load_linked::<busbar_plugin_loader::dispatch::kinds::plane::Plane>(
+                &row,
+                bind(ConnTable::Probe)
+            )
+            .map(|_| ())
+            .err(),
+            Some(LoadError::WrongKind { .. }) | Some(LoadError::ManifestKind { .. })
+        ),
+        "auth must not load as plane"
+    );
+    assert!(
+        matches!(
+            load_dropped_bytes::<busbar_plugin_loader::dispatch::kinds::plane::Plane>(
+                &lib,
+                NAME,
+                &row.statement,
+                bind(ConnTable::Probe)
+            )
+            .map(|_| ())
+            .err(),
+            Some(LoadError::WrongKind { .. }) | Some(LoadError::ManifestKind { .. })
+        ),
+        "auth must not load as plane"
+    );
+    let version = env!("CARGO_PKG_VERSION").as_bytes();
+    let at = row
+        .statement
+        .windows(version.len())
+        .position(|v| v == version)
+        .unwrap();
+    row.statement[at] = if row.statement[at] == b'9' {
+        b'8'
+    } else {
+        b'9'
+    };
+    rendering::read(&row.statement).expect("the mismatched rendering remains well formed");
+    assert_eq!(
+        load_linked::<Auth>(&row, bind(ConnTable::Probe))
+            .map(|_| ())
+            .err(),
+        Some(LoadError::StatementMismatch)
+    );
+    assert_eq!(
+        load_dropped_bytes::<Auth>(&lib, NAME, &row.statement, bind(ConnTable::Probe))
+            .map(|_| ())
+            .err(),
+        Some(LoadError::StatementMismatch)
+    );
+}
+
+#[test]
+fn the_declared_needs_are_the_statements() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap();
+    let candidates: Vec<_> = [
+        root.join("declares.json"),
+        root.join("auth-oidc/declares.json"),
+        root.join("auth-oidc-plugin/declares.json"),
+    ]
+    .into_iter()
+    .filter(|p| p.is_file())
+    .collect();
+    assert_eq!(
+        candidates.len(),
+        1,
+        "one actual declares.json is required; no absent-metadata skip"
+    );
+    let declared: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&candidates[0]).unwrap()).unwrap();
+    let mut needs: Vec<_> = declared["needs"]
+        .as_array()
+        .map(|v| v.iter().map(|v| v.as_str().unwrap().to_owned()).collect())
+        .unwrap_or_default();
+    needs.sort();
+    needs.dedup();
+    let mut stated: Vec<_> = rendering::read(&row().statement)
+        .unwrap()
+        .needs
+        .into_iter()
+        .map(|n| n.transport)
+        .collect();
+    stated.sort();
+    stated.dedup();
+    assert_eq!(needs, stated);
+}
+
+/// Malformed metadata only: the actual product dispatch table and implementation stay intact.
+#[test]
+fn an_oidc_door_at_another_abi_or_layout_is_refused() {
+    use busbar_contract::abi::mechanism::door::{Door, DoorParts};
+    use busbar_plugin_loader::dispatch::{
+        load_dropped_bytes, load_linked, Bind, ConnTable, DispatchConfig, Dispatcher, LinkedRow,
+        NoSink,
+    };
+    use std::sync::{
+        atomic::{AtomicPtr, Ordering},
+        Arc,
+    };
+    static MALFORMED: AtomicPtr<Door> = AtomicPtr::new(std::ptr::null_mut());
+    extern "C" fn malformed() -> *const Door {
+        MALFORMED.load(Ordering::SeqCst)
+    }
+    let _one = support::serial();
+    let actual = row();
+    // SAFETY: the actual product's door has static storage and the documented door layout.
+    let real = unsafe { Door::read_parts((actual.door)()) };
+    let d = Dispatcher::new(DispatchConfig::default());
+    let bind = || Bind {
+        instance: Arc::from("oidc-malformed"),
+        max_inflight_cap: 64,
+        sink: Arc::new(NoSink),
+        dispatcher: d.adopter(),
+        conns: ConnTable::Probe,
+    };
+    let lib = cdylib();
+    load_linked::<Auth>(&actual, bind()).expect("actual linked door loads");
+    load_dropped_bytes::<Auth>(&lib, NAME, &actual.statement, bind())
+        .expect("actual dropped door loads");
+    for abi in [real.kind_abi + 1, real.kind_abi.wrapping_sub(1)] {
+        // SAFETY: only a scalar ABI tag is invalidated, all pointers remain the actual static door's.
+        let door = unsafe {
+            Door::__from_parts(DoorParts {
+                kind_abi: abi,
+                ..real
+            })
+        };
+        MALFORMED.store(Box::into_raw(Box::new(door)), Ordering::SeqCst);
+        let error = LinkedRow::of_raw(malformed).expect_err("another ABI must not render");
+        assert!(
+            matches!(error, LoadError::KindAbi { door, host, .. } if door == abi && host == real.kind_abi)
+        );
+        assert!(error.to_string().contains("rebuild"));
+        let mut statement = actual.statement.clone();
+        let at = rendering::RENDERING_MAGIC.len() + 8;
+        statement[at..at + 4].copy_from_slice(&abi.to_le_bytes());
+        assert_eq!(
+            load_dropped_bytes::<Auth>(&lib, NAME, &statement, bind())
+                .map(|_| ())
+                .err(),
+            Some(LoadError::ManifestKindAbi {
+                stated: abi,
+                host: real.kind_abi
+            })
+        );
+    }
+    for layout in [real.layout ^ 1, 0] {
+        // SAFETY: only the layout fingerprint is invalidated; nothing can dispatch this door.
+        let door = unsafe { Door::__from_parts(DoorParts { layout, ..real }) };
+        MALFORMED.store(Box::into_raw(Box::new(door)), Ordering::SeqCst);
+        let error = LinkedRow::of_raw(malformed).expect_err("another layout must not render");
+        assert!(
+            matches!(error, LoadError::KindLayout { stated, host, .. } if stated == layout && host == real.layout)
+        );
     }
 }

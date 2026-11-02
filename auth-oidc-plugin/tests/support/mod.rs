@@ -24,7 +24,10 @@ use busbar_contract::conn::{
     ConnError, ConnId, Conns, DeclaredConns, InstanceId, NeedId, OpenDesc, Piece, PieceKind,
 };
 use busbar_contract::ids::StreamId;
-use busbar_contract::services::Reading;
+use busbar_contract::services::{
+    Caller, DiskDest, HookAsk, Later, NestAsk, Ran, Reading, RecordsList, Snapshot, Stored,
+    TrustKeyRef, UNSERVED,
+};
 use busbar_contract::transport::ConnFacts;
 use busbar_plugin_loader::dispatch::kinds::auth::Auth;
 use busbar_plugin_loader::dispatch::{
@@ -92,7 +95,7 @@ pub fn clock_reads() -> u32 {
     CLOCK_READS.load(Ordering::SeqCst)
 }
 
-impl busbar_test_kit::services_double::ServicesDouble for Clock {
+impl busbar_contract::services::HostServices for Clock {
     fn now(&self) -> Reading {
         CLOCK_READS.fetch_add(1, Ordering::SeqCst);
         Reading {
@@ -101,6 +104,230 @@ impl busbar_test_kit::services_double::ServicesDouble for Clock {
                 .map_or(0, |d| d.as_nanos() as u64),
             mono_ns: CLOCK_MONO.lock().unwrap().unwrap_or_else(now_ns),
         }
+    }
+    fn dest_judge(&self, _dest: &str, _class: u32, _flags: u32, _later: Option<Later>) -> Ran {
+        busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused(
+            busbar_contract::services::UNSERVED,
+        ))
+    }
+
+    fn records_get(&self, _caller: &Caller, _kind: &str, _key: &[u8], _later: Later) -> Ran {
+        busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused(
+            busbar_contract::services::UNSERVED,
+        ))
+    }
+
+    fn records_list(&self, _caller: &Caller, _list: RecordsList, _later: Later) -> Ran {
+        busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused(
+            busbar_contract::services::UNSERVED,
+        ))
+    }
+
+    fn records_claim(
+        &self,
+        _caller: &Caller,
+        _kind: &str,
+        _key: &[u8],
+        _ttl_ms: u64,
+        _later: Later,
+    ) -> Ran {
+        busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused(
+            busbar_contract::services::UNSERVED,
+        ))
+    }
+
+    fn sign(&self, _caller: &Caller, _data: &[u8]) -> Stored {
+        Stored::refused(UNSERVED)
+    }
+
+    fn trust_sight(
+        &self,
+        _caller: &Caller,
+        _counterparty: &str,
+        _hash: &str,
+        _later: Later,
+    ) -> Ran {
+        busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused(
+            busbar_contract::services::UNSERVED,
+        ))
+    }
+
+    fn trust_unreached(&self, _caller: &Caller, _counterparty: &str) -> Stored {
+        Stored::refused(UNSERVED)
+    }
+
+    fn trust_sight_item(
+        &self,
+        _caller: &Caller,
+        _counterparty: &str,
+        _item: &str,
+        _digest: &str,
+    ) -> Stored {
+        Stored::refused(UNSERVED)
+    }
+
+    fn trust_decide(
+        &self,
+        _caller: &Caller,
+        _key: TrustKeyRef<'_>,
+        _expected: Option<&str>,
+        _approve: bool,
+    ) -> Stored {
+        Stored::refused(UNSERVED)
+    }
+
+    fn trust_state(&self, _caller: &Caller, _counterparty: &str) -> Stored {
+        Stored::refused(UNSERVED)
+    }
+
+    fn trust_serves(
+        &self,
+        _caller: &Caller,
+        _counterparty: &str,
+        _item: Option<&str>,
+        _digest: Option<&str>,
+    ) -> Stored {
+        Stored::refused(UNSERVED)
+    }
+
+    fn trust_due(&self, _caller: &Caller) -> Stored {
+        Stored::refused(UNSERVED)
+    }
+
+    fn trust_verify(
+        &self,
+        _caller: &Caller,
+        _counterparty: &str,
+        _payload: &[u8],
+        _signatures: &[u8],
+    ) -> Stored {
+        Stored::refused(UNSERVED)
+    }
+
+    fn entitlement_check(&self, _caller: &Caller, _unit: Option<u64>, _target: &str) -> Stored {
+        Stored::refused(UNSERVED)
+    }
+
+    fn session_emit(&self, _caller: &Caller, _session: u64, _bytes: &[u8]) -> Stored {
+        Stored::refused(UNSERVED)
+    }
+
+    fn ticket_mint(
+        &self,
+        _caller: &Caller,
+        _unit: Option<u64>,
+        _ttl_secs: u64,
+        _record: &[u8],
+    ) -> Stored {
+        Stored::refused(UNSERVED)
+    }
+
+    fn ticket_take(&self, _caller: &Caller, _unit: Option<u64>) -> Stored {
+        Stored::refused(UNSERVED)
+    }
+
+    fn random_fill(&self, _len: u64) -> Stored {
+        Stored::refused(UNSERVED)
+    }
+
+    fn records_secret(&self, _kind: &str, _id: &str, _later: Later) -> Ran {
+        busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused(
+            busbar_contract::services::UNSERVED,
+        ))
+    }
+
+    fn unit_nest(&self, _caller: &Caller, _unit: Option<u64>, _ask: NestAsk, _later: Later) -> Ran {
+        busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused(
+            busbar_contract::services::UNSERVED,
+        ))
+    }
+
+    fn work_open(
+        &self,
+        _caller: &Caller,
+        _unit: Option<u64>,
+        _kind: &str,
+        _record: &[u8],
+        _later: Later,
+    ) -> Ran {
+        busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused(
+            busbar_contract::services::UNSERVED,
+        ))
+    }
+
+    fn work_find(
+        &self,
+        _caller: &Caller,
+        _unit: Option<u64>,
+        _reference: &[u8],
+        _later: Later,
+    ) -> Ran {
+        busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused(
+            busbar_contract::services::UNSERVED,
+        ))
+    }
+
+    fn work_settle(
+        &self,
+        _caller: &Caller,
+        _unit: Option<u64>,
+        _handle: u64,
+        _record: &[u8],
+        _later: Later,
+    ) -> Ran {
+        busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused(
+            busbar_contract::services::UNSERVED,
+        ))
+    }
+
+    fn work_resume(
+        &self,
+        _caller: &Caller,
+        _unit: Option<u64>,
+        _handle: u64,
+        _later: Later,
+    ) -> Ran {
+        busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused(
+            busbar_contract::services::UNSERVED,
+        ))
+    }
+
+    fn disk_append(&self, _dest: &DiskDest, _bytes: Vec<u8>, _later: Later) -> Ran {
+        busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused(
+            busbar_contract::services::UNSERVED,
+        ))
+    }
+
+    fn verify_lookup(&self, _caller: &Caller, _key: &[u8], _later: Later) -> Ran {
+        busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused(
+            busbar_contract::services::UNSERVED,
+        ))
+    }
+
+    fn verify_store(&self, _caller: &Caller, _key: &[u8], _entry: &[u8], _ttl_ms: u64) -> Stored {
+        Stored::refused(UNSERVED)
+    }
+
+    fn content_scan(
+        &self,
+        _caller: &Caller,
+        _unit: Option<u64>,
+        _content: &[u8],
+        _later: Later,
+    ) -> Ran {
+        busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused(
+            busbar_contract::services::UNSERVED,
+        ))
+    }
+
+    fn hook_call(&self, _caller: &Caller, _unit: Option<u64>, _ask: HookAsk, _later: Later) -> Ran {
+        busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused(
+            busbar_contract::services::UNSERVED,
+        ))
+    }
+
+    fn snapshot_read(&self, _caller: &Caller, _scope: u32) -> Snapshot {
+        Snapshot::Refused(UNSERVED)
     }
 }
 
@@ -583,16 +810,24 @@ impl DeclaredConns for Idp {
     }
 }
 
-/// This crate's built cdylib (uplifted or under `deps`, newest wins), when it is built.
+/// The build lane supplies the fresh image explicitly. An absent image is a hard failure.
 pub fn cdylib_path() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("BUSBAR_PLUGIN_CDYLIB") {
+        let path = PathBuf::from(path);
+        assert!(path.is_absolute(), "BUSBAR_PLUGIN_CDYLIB must be absolute");
+        assert!(
+            path.is_file(),
+            "BUSBAR_PLUGIN_CDYLIB must name the freshly built OIDC cdylib: {}",
+            path.display()
+        );
+        return Some(path);
+    }
     let exe = std::env::current_exe().ok()?;
     let profile = exe.parent()?.parent()?;
     let file = busbar_plugin_loader::plugin_library_filename("busbar_auth_oidc_plugin");
     [profile.join(&file), profile.join("deps").join(&file)]
         .into_iter()
-        .filter_map(|p| Some((std::fs::metadata(&p).ok()?.modified().ok()?, p)))
-        .max()
-        .map(|(_, p)| p)
+        .find(|p| p.is_file())
 }
 
 /// THE LINKED ROW: the door and the Statement it states.
@@ -627,7 +862,7 @@ pub fn bind_as<K: busbar_plugin_loader::dispatch::Kind>(
             workers: 2,
             ..Default::default()
         },
-        Arc::new(busbar_test_kit::services_double::Double(Clock)),
+        Arc::new(Clock),
     ));
     *idp.wake.lock().unwrap() = Some(dispatcher.conn_waker());
     let conns: Arc<dyn DeclaredConns> = idp.clone();
@@ -777,7 +1012,7 @@ impl Bound {
         self.identify_after_short(op, input, cap, || {})
     }
 
-    fn identify_after_short<I: InFrame>(
+    pub fn identify_after_short<I: InFrame>(
         &self,
         op: u32,
         input: impl Fn(IdentityBuf) -> I,

@@ -353,7 +353,7 @@ fn a_failed_refresh_that_keeps_the_previous_keys_logs_a_warn_with_the_error() {
     let c = JwksCache::new(Duration::from_millis(1), Duration::from_millis(1));
     let idp = Idp::new(jwks("k1"));
     let t0 = Instant::now();
-    let cap = busbar_test_kit::warn_capture::WarnCapture::default();
+    let cap = crate::tests::diagnostics::WarnCapture::default();
     tracing::subscriber::with_default(cap.clone(), || {
         serve(&c, &idp, t0).expect("prime");
         idp.set_answer(Err("provider unreachable".into()));
@@ -717,7 +717,7 @@ fn an_abandoned_flight_does_not_keep_the_rate_limit_window_shut_for_a_cold_calle
 fn a_cold_fetch_failure_logs_a_warn_with_the_error() {
     let c = JwksCache::new(Duration::from_secs(60), Duration::from_secs(3600));
     let idp = Idp::answering(Err("provider unreachable".into()));
-    let cap = busbar_test_kit::warn_capture::WarnCapture::default();
+    let cap = crate::tests::diagnostics::WarnCapture::default();
     tracing::subscriber::with_default(cap.clone(), || {
         serve(&c, &idp, Instant::now()).unwrap_err();
     });
