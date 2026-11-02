@@ -2755,3 +2755,104 @@ fn an_oidc_door_at_another_abi_or_layout_is_refused() {
         Some(LoadError::StatementMismatch)
     );
 }
+
+/// Ticketless calls share Ticket::NONE, but each SHORT answer owns a distinct private recall.
+#[test]
+fn two_ticketless_short_verifies_keep_independent_identities_and_cleanup_both_ways() {
+    let _one = support::serial();
+    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let lib = cdylib();
+    let stated = row().statement;
+    let mut c = claims(AUDIENCE);
+    c["roles"] = serde_json::json!((0..300).map(|i| format!("group-{i}")).collect::<Vec<_>>());
+    c["sub"] = serde_json::json!("ticketless-a");
+    let a = key.sign(&c);
+    c["sub"] = serde_json::json!("ticketless-b");
+    let b = key.sign(&c);
+    for arm in [
+        Arm::Linked,
+        Arm::Dropped {
+            lib: &lib,
+            stated: &stated,
+        },
+    ] {
+        let idp = Idp::new(&key);
+        let bound = bind(&arm, &idp);
+        open(&bound.plugin, &config(AUDIENCE), None).expect("opens");
+        for token in [&a, &b] {
+            assert!(bound.verify(Some(token), None).contains("group-299"));
+        }
+        let requests = idp.sent().len();
+        for abandon_first in [false, true] {
+            let mut out: IdentifyOut = z();
+            out.head = out_head();
+            let mut first = Frame::new(verify_in(Some(&a), z()), out);
+            let first_call = bound.plugin.call(slot::VERIFY, &mut first);
+            assert_eq!(first_call.outcome, Outcome::Failed);
+            assert_eq!(first_call.lease, 0);
+            assert_ne!(first.out.head.lease, 0);
+            let first_lease = first.out.head.lease;
+            let first_token = first_call.recall.expect("first private recall");
+            let mut out: IdentifyOut = z();
+            out.head = out_head();
+            let mut second = Frame::new(verify_in(Some(&b), z()), out);
+            let second_call = bound.plugin.call(slot::VERIFY, &mut second);
+            assert_eq!(
+                second_call.outcome,
+                Outcome::Failed,
+                "a second outstanding ticketless call has its own retained result"
+            );
+            assert_eq!(second_call.lease, 0);
+            assert_ne!(second.out.head.lease, 0);
+            assert_ne!(second.out.head.lease, first_lease);
+            let second_token = second_call.recall.expect("second private recall");
+            let first_token = if abandon_first {
+                drop(first_token);
+                None
+            } else {
+                Some(first_token)
+            };
+            let mut bytes = vec![0u8; 65536];
+            let mut groups = vec![z::<Span>(); 300];
+            let mut out: IdentifyOut = z();
+            out.head = out_head();
+            let mut retry = Frame::new(
+                verify_in(Some(&b), identity_buf(&mut bytes, &mut groups)),
+                out,
+            );
+            let answered = bound.plugin.recall(second_token, slot::VERIFY, &mut retry);
+            assert_eq!(answered.outcome, Outcome::Ready);
+            assert_eq!(answered.lease, 0);
+            assert!(answered.error.is_none());
+            let identity = support::identity(&retry.out, &bytes, &groups);
+            assert!(
+                identity.starts_with("subject=Some(\"oidc:ticketless-b\")"),
+                "{identity}"
+            );
+            assert!(identity.contains("group-299"));
+            if let Some(first_token) = first_token {
+                let mut out: IdentifyOut = z();
+                out.head = out_head();
+                let mut retry = Frame::new(
+                    verify_in(Some(&a), identity_buf(&mut bytes, &mut groups)),
+                    out,
+                );
+                let answered = bound.plugin.recall(first_token, slot::VERIFY, &mut retry);
+                assert_eq!(answered.outcome, Outcome::Ready);
+                assert_eq!(answered.lease, 0);
+                assert!(answered.error.is_none());
+                let identity = support::identity(&retry.out, &bytes, &groups);
+                assert!(
+                    identity.starts_with("subject=Some(\"oidc:ticketless-a\")"),
+                    "{identity}"
+                );
+                assert!(identity.contains("group-299"));
+            }
+            assert_eq!(
+                idp.sent().len(),
+                requests,
+                "neither recall repeats provider work"
+            );
+        }
+    }
+}

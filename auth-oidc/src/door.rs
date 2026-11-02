@@ -338,10 +338,16 @@ struct Verified {
     decision: u32,
     verdict: u32,
 }
-type VerifiedMap = Mutex<HashMap<Ticket, Verified>>;
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum VerifyKey {
+    Ticket(Ticket),
+    // The marker's allocation stays alive under both the result and its release guard.
+    Ticketless(usize),
+}
+type VerifiedMap = Mutex<HashMap<VerifyKey, Verified>>;
 
 struct ReleaseVerify {
-    ticket: Ticket,
+    key: VerifyKey,
     marker: Arc<()>,
     verified: Weak<VerifiedMap>,
 }
@@ -353,10 +359,10 @@ impl Drop for ReleaseVerify {
         let retired = {
             let mut verified = verified.lock().unwrap_or_else(PoisonError::into_inner);
             if verified
-                .get(&self.ticket)
+                .get(&self.key)
                 .is_some_and(|v| Arc::ptr_eq(&v.marker, &self.marker))
             {
-                verified.remove(&self.ticket)
+                verified.remove(&self.key)
             } else {
                 None
             }
@@ -594,7 +600,7 @@ impl Life for Oidc {
             .verified
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .remove(&ticket);
+            .remove(&VerifyKey::Ticket(ticket));
         drop((ready, reached, driving, cursor, verified));
         CANCEL_ABANDONED
     }
@@ -819,6 +825,12 @@ fn verify_answer(
             "oidc: host clock unavailable for short verify answer",
         ));
     };
+    let marker = Arc::new(());
+    let key = if ticket.is_none() {
+        VerifyKey::Ticketless(Arc::as_ptr(&marker) as usize)
+    } else {
+        VerifyKey::Ticket(ticket)
+    };
     let mut verified = h
         .life()
         .verified
@@ -826,17 +838,16 @@ fn verify_answer(
         .unwrap_or_else(PoisonError::into_inner);
     verified
         .retain(|_, v| std::time::Duration::from_nanos(now.saturating_sub(v.at)) <= REACHED_TTL);
-    if verified.len() >= REACHED_MAX || verified.contains_key(&ticket) {
+    if verified.len() >= REACHED_MAX || verified.contains_key(&key) {
         out.set(|o| &o.needed_bytes, 0);
         out.set(|o| &o.needed_groups, 0);
         out.set(|o| &o.needed_strip, 0);
         return out.fail(Refusal::failed("oidc: too many held short verify answers"));
     }
-    let marker = Arc::new(());
     // Reserve under the bound, but never call lease code while holding this map's lock:
     // releasing the lease invokes ReleaseVerify, which takes the same lock.
     verified.insert(
-        ticket,
+        key,
         Verified {
             at: now,
             lease: 0,
@@ -857,7 +868,7 @@ fn verify_answer(
     out.keep(
         h.leases(),
         ReleaseVerify {
-            ticket,
+            key,
             marker: marker.clone(),
             verified: Arc::downgrade(&h.life().verified),
         },
@@ -870,7 +881,7 @@ fn verify_answer(
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         if let Some(kept) = verified
-            .get_mut(&ticket)
+            .get_mut(&key)
             .filter(|v| Arc::ptr_eq(&v.marker, &marker))
         {
             kept.lease = lease;
@@ -911,7 +922,7 @@ impl SafeSlot for Verify {
                 .verified
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .contains_key(&instance.ticket());
+                .contains_key(&VerifyKey::Ticket(instance.ticket()));
         if continuation.is_some() || retained {
             let now = reached_now(h.host(), instance.ticket());
             let kept = {
@@ -925,15 +936,21 @@ impl SafeSlot for Verify {
                         std::time::Duration::from_nanos(now.saturating_sub(v.at)) <= REACHED_TTL
                     });
                 }
-                if now.is_some()
-                    && verified
-                        .get(&instance.ticket())
-                        .is_some_and(|v| continuation.is_none_or(|lease| v.lease == lease))
-                {
-                    verified.remove(&instance.ticket())
+                let key = if instance.ticket().is_none() {
+                    verified.iter().find_map(|(key, v)| {
+                        (matches!(key, VerifyKey::Ticketless(_)) && continuation == Some(v.lease))
+                            .then_some(*key)
+                    })
                 } else {
-                    None
-                }
+                    Some(VerifyKey::Ticket(instance.ticket()))
+                };
+                key.filter(|key| {
+                    now.is_some()
+                        && verified
+                            .get(key)
+                            .is_some_and(|v| continuation.is_none_or(|lease| v.lease == lease))
+                })
+                .and_then(|key| verified.remove(&key))
             };
             let Some(kept) = kept else {
                 return out.fail(Refusal::refused(
