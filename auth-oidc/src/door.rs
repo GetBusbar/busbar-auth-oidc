@@ -1024,7 +1024,7 @@ impl SafeSlot for Ready {
         let Some(h) = instance.get() else {
             return Outcome::Fault;
         };
-        let Some(host) = input.host().map(|tables| Host::of(&tables)) else {
+        let Some(host) = input.host().map(Host::of) else {
             return Outcome::Fault;
         };
         match h
