@@ -699,8 +699,8 @@ fn a_rejected_token_is_logged_at_info_with_a_reason() {
     expired["exp"] = serde_json::json!(now - 3600);
     let forged = TestKey::generate(KID).mint(&base_claims(now));
     for (what, token, reason) in [
-        ("expired", key.mint(&expired), "reason=claims"),
-        ("forged", forged, "reason=signature"),
+        ("expired", key.mint(&expired), "reason=\"claims\""),
+        ("forged", forged, "reason=\"signature\""),
     ] {
         let (warn, all) = (
             crate::tests::diagnostics::WarnCapture::default(),
@@ -2670,7 +2670,7 @@ fn a_begin_login_with_no_authorize_endpoint_is_logged() {
     assert!(matches!(out, Ok(LoginOutcome::Reject)));
     let logged = cap.messages().join("\n");
     assert!(
-        logged.contains("authorization_endpoint") && logged.contains("module=oidc"),
+        logged.contains("authorization_endpoint") && logged.contains("module=\"oidc\""),
         "the refusal is explained: {logged:?}"
     );
 }
