@@ -40,8 +40,8 @@ busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "9edc9cf0
 busbar-plugin-loader = { git = "https://github.com/GetBusbar/busbar", rev = "9edc9cf037b3387a45d8b73a07716a6411982b14" }
 busbar-test-kit = { git = "https://github.com/GetBusbar/busbar", rev = "9edc9cf037b3387a45d8b73a07716a6411982b14" }
 "busbar-core-connector" = { "features" = ["test-support"], "git" = "https://github.com/GetBusbar/busbar", "rev" = "9edc9cf037b3387a45d8b73a07716a6411982b14" }
-"busbar-transport-http" = { "git" = "https://github.com/GetBusbar/busbar-transport-http", "rev" = "bad2d118d58086d1625289b9fec94fa6153f24d2" }
-"busbar-transport-tcp" = { "git" = "https://github.com/GetBusbar/busbar-transport-tcp", "rev" = "33fffc07693523b5ce091076cf91ebb8599f602f" }
+"busbar-transport-http" = { "git" = "https://github.com/GetBusbar/busbar-transport-http", "rev" = "ee39b74644577e446c0892b5e4fa7528f3242a74" }
+"busbar-transport-tcp" = { "git" = "https://github.com/GetBusbar/busbar-transport-tcp", "rev" = "0477102274f8ca686674ea151e05c26432351958" }
 # busbar's root [workspace.dependencies], third-party rows, at 9edc9cf037b3387a45d8b73a07716a6411982b14
 arc-swap = "1"
 async-trait = "0.1"
