@@ -354,8 +354,6 @@ fn a_fetch_failure_keeps_serving_the_previously_fetched_keys() {
     assert_eq!(idp.calls(), 2, "the refetch was attempted");
 }
 
-/// OIDC-8: a failed refresh that falls back to the previous keys logs a warn carrying the fetch
-
 #[test]
 fn a_failed_refresh_that_keeps_the_previous_keys_logs_a_warn_with_the_error() {
     let c = JwksCache::new(Duration::from_millis(1), Duration::from_millis(1));
@@ -520,8 +518,6 @@ fn max_stale_scales_with_a_long_ttl() {
     serve(&c, &idp, t0 + Duration::from_secs(47 * 3600)).expect("+47h still serves");
     assert!(serve(&c, &idp, t0 + Duration::from_secs(48 * 3600)).is_err());
 }
-
-/// OIDC-7: a caller whose cached keys are past `max_stale` is treated as a COLD cache: while a
 
 #[test]
 fn a_caller_past_the_ceiling_waits_for_the_in_flight_recovery_fetch() {

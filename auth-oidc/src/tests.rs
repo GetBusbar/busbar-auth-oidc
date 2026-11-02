@@ -1475,8 +1475,6 @@ fn build_authorize_url_escapes_delimiters_dedups_openid_and_omits_an_absent_nonc
     assert!(url.ends_with("&code_challenge_method=S256"), "{url}");
 }
 
-/// OIDC-2 (RFC 6749 §3.1): an authorization endpoint that already carries a query (Azure AD B2C's
-
 #[test]
 fn build_authorize_url_keeps_an_existing_endpoint_query() {
     let mut c = cfg("groups");
@@ -1668,8 +1666,6 @@ fn a_key_set_that_cannot_be_had_fails_a_bearer_verify_and_a_mismatch_rejects_it(
         Ok(AuthVerdict::Reject)
     ));
 }
-
-/// OIDC-1 (OIDC Core 1.0 §3.1.3.7 step 3): the browser-login `id_token`'s `aud` must contain
 
 #[test]
 fn login_id_token_audience_is_the_client_id_not_the_bearer_audience() {
