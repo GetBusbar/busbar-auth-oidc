@@ -605,7 +605,15 @@ fn the_linked_and_the_dropped_in_oidc_module_are_one_module() {
 
     // RED ARM 3: a manifest whose Statement is not the door's is refused at admit.
     let mut tampered = stated.clone();
-    *tampered.last_mut().expect("a rendering") ^= 1;
+    let version = env!("CARGO_PKG_VERSION").as_bytes();
+    let at = tampered
+        .windows(version.len())
+        .position(|bytes| bytes == version)
+        .expect("the Statement carries the package version");
+    tampered[at] = if tampered[at] == b'9' { b'8' } else { b'9' };
+    busbar_contract::abi::mechanism::rendering::read(&tampered)
+        .expect("the different Statement still has a valid rendering");
+    assert_ne!(tampered, stated);
     let arm = Arm::Dropped {
         lib: &lib,
         stated: &tampered,
