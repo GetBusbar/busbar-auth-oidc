@@ -3,35 +3,10 @@
 
 //! End-to-end coverage of the `busbar-auth-oidc-plugin` cdylib DROPPED IN through the real loader's
 
-use busbar_plugin_loader::plugin_library_filename;
-
-/// Locate the built `busbar_auth_oidc_plugin` cdylib in the target dir (mirrors the loader's own
-fn plugin_path() -> Option<std::path::PathBuf> {
-    let candidate = (|| {
-        let exe = std::env::current_exe().ok()?;
-        let profile_dir = exe.parent()?.parent()?;
-        let name = plugin_library_filename("busbar_auth_oidc_plugin");
-        let uplifted = profile_dir.join(&name);
-        let raw = profile_dir.join("deps").join(&name);
-        [uplifted, raw]
-            .into_iter()
-            .filter_map(|p| {
-                std::fs::metadata(&p)
-                    .and_then(|m| m.modified())
-                    .ok()
-                    .map(|mtime| (p, mtime))
-            })
-            .max_by_key(|(_, mtime)| *mtime)
-            .map(|(p, _)| p)
-    })();
-    if candidate.is_none() && std::env::var_os("CI").is_some() {
-        panic!(
-            "the auth-oidc plugin cdylib is not built under CI: `cargo test --workspace` must \
-             build busbar_auth_oidc_plugin (checked both the uplifted target dir and target/deps). \
-             Refusing to silently skip the only over-the-ABI coverage of the kind:auth dlopen seam."
-        );
-    }
-    candidate
+/// Use the same explicit fresh image and deterministic fallback as conformance tests.
+fn plugin_path() -> std::path::PathBuf {
+    support::cdylib_path()
+        .expect("build the actual busbar_auth_oidc_plugin cdylib before this test")
 }
 
 mod support;
@@ -41,10 +16,7 @@ use support::{Arm, Idp, Issuer, UNUSED_ISSUER};
 #[test]
 fn load_and_exercise_auth_oidc_plugin_success() {
     let _one = support::serial();
-    let Some(path) = plugin_path() else {
-        eprintln!("skip: auth-oidc plugin cdylib not built (run under --workspace)");
-        return;
-    };
+    let path = plugin_path();
 
     let key = Issuer::start(UNUSED_ISSUER, "test-kid-1");
     const AUDIENCE: &str = "api://busbar-client";
@@ -280,10 +252,7 @@ fn wait_for_admin_ready(
 /// The full install-path proof: not a direct ABI `load_auth_from_bytes` call (the tests above
 #[test]
 fn install_oidc_plugin_via_admin_api_and_authenticate() {
-    let Some(so_path) = plugin_path() else {
-        eprintln!("skip: auth-oidc-plugin cdylib not built");
-        return;
-    };
+    let so_path = plugin_path();
     if std::env::var_os("BUSBAR_CHECKOUT").is_none() {
         if std::env::var_os("CI").is_some() {
             panic!(
@@ -531,10 +500,7 @@ fn install_oidc_plugin_via_admin_api_and_authenticate() {
 #[test]
 fn load_and_exercise_auth_oidc_plugin_bad_config_fails_over_abi() {
     let _one = support::serial();
-    let Some(path) = plugin_path() else {
-        eprintln!("skip: auth-oidc plugin cdylib not built (run under --workspace)");
-        return;
-    };
+    let path = plugin_path();
     let key = Issuer::start(UNUSED_ISSUER, "k");
     let dropped = || support::bind(&Arm::File(&path), &Idp::new(&key));
 
