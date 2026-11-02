@@ -931,7 +931,7 @@ fn error_of(error: Option<&[u8]>) -> String {
 }
 
 /// The identity an answer wrote into the host's buffers, as one line.
-fn identity(out: &IdentifyOut, bytes: &[u8], groups: &[Span]) -> String {
+pub fn identity(out: &IdentifyOut, bytes: &[u8], groups: &[Span]) -> String {
     let at = |s: Span| {
         (s.offset != SPAN_ABSENT).then(|| {
             String::from_utf8_lossy(&bytes[s.offset as usize..(s.offset + s.len) as usize])
@@ -974,6 +974,10 @@ pub fn open(p: &Plugin<Auth>, settings: &str, secret: Option<&str>) -> Result<()
     let mut o: OpenOut = z();
     o.head = out_head();
     let called = p.call(life::OPEN, &mut Frame::new(i, o));
+    if called.outcome == Outcome::Ready {
+        assert_eq!(called.lease, 0);
+        assert!(called.error.is_none());
+    }
     match called.outcome {
         Outcome::Ready => Ok(()),
         _ => Err(called.open_failure(p.name())),
@@ -1044,6 +1048,13 @@ impl Bound {
             done = self.submit(ticket, op, input(buf(&mut bytes, &mut groups)), fresh());
         }
         self.dispatcher.recycle(ticket);
+        assert!(self
+            .dispatcher
+            .retirement_barrier(ticket, Duration::from_secs(10)));
+        if done.outcome == Outcome::Ready {
+            assert_eq!(done.lease, 0);
+            assert!(done.error.is_none());
+        }
         match (done.outcome, done.frame.as_ref()) {
             (Outcome::Ready, Some(f)) => format!(
                 "{short}verdict {} {}",
@@ -1092,6 +1103,8 @@ impl Bound {
         let (Outcome::Ready, Some(f)) = (done.outcome, done.frame.as_ref()) else {
             return format!("{:?} {}", done.outcome, error_of(done.error.as_deref()));
         };
+        assert_ne!(done.lease, 0, "redirect begin returns a leased URL");
+        assert!(done.error.is_none());
         let line = format!("shape {} {}", f.out.shape, text(f.out.authorize_url));
         let mut r: ReleaseIn = z();
         r.head = in_head();
@@ -1099,6 +1112,9 @@ impl Bound {
         let released = self
             .plugin
             .call(life::RELEASE, &mut Frame::new(r, out_head()));
+        assert_eq!(released.outcome, Outcome::Ready);
+        assert_eq!(released.lease, 0);
+        assert!(released.error.is_none());
         format!("{line} (release {:?})", released.outcome)
     }
 
