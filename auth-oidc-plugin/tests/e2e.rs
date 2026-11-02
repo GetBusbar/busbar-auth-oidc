@@ -107,36 +107,97 @@ fn build_real_binaries() -> (std::path::PathBuf, std::path::PathBuf) {
         "CARGO_TARGET_DIR must name the existing absolute assigned target"
     );
 
-    for args in [
-        &[
+    let metadata = std::process::Command::new("cargo")
+        .args([
             "+1.98.0",
-            "build",
+            "metadata",
             "--locked",
-            "-j2",
-            "--release",
+            "--no-deps",
+            "--format-version",
+            "1",
             "--manifest-path",
-            "dist/default/Cargo.toml",
-            "--bin",
-            "busbar",
-            "--features",
-            "test-harness",
-        ][..],
-        &[
-            "+1.98.0",
-            "build",
-            "--locked",
-            "-j2",
-            "--release",
-            "-p",
-            "busbar-plugin-loader",
-            "--features",
-            "pack",
-            "--bin",
-            "busbar-plugin-pack",
-        ][..],
-    ] {
+        ])
+        .arg(root.join("Cargo.toml"))
+        .current_dir(&root)
+        .output()
+        .expect("read actual busbar workspace binary ownership");
+    assert!(
+        metadata.status.success(),
+        "actual workspace metadata must succeed: {}",
+        String::from_utf8_lossy(&metadata.stderr)
+    );
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&metadata.stdout).expect("Cargo metadata is JSON");
+    let owners: Vec<_> = metadata["packages"]
+        .as_array()
+        .expect("workspace packages")
+        .iter()
+        .flat_map(|package| {
+            package["targets"]
+                .as_array()
+                .expect("package targets")
+                .iter()
+                .map(move |target| (package, target))
+        })
+        .filter(|(_, target)| {
+            target["name"] == "busbar-plugin-pack"
+                && target["kind"]
+                    .as_array()
+                    .expect("target kind")
+                    .iter()
+                    .any(|kind| kind == "bin")
+        })
+        .collect();
+    assert_eq!(
+        owners.len(),
+        1,
+        "selected BUSBAR_CHECKOUT must have exactly one actual busbar-plugin-pack binary owner"
+    );
+    let (owner, pack_target) = owners[0];
+    let mut pack_args: Vec<String> = [
+        "+1.98.0",
+        "build",
+        "--locked",
+        "-j2",
+        "--release",
+        "-p",
+        owner["name"].as_str().expect("binary owner package name"),
+        "--bin",
+        "busbar-plugin-pack",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    if let Some(required) = pack_target.get("required-features") {
+        let required = required
+            .as_array()
+            .expect("target required-features array")
+            .iter()
+            .map(|feature| feature.as_str().expect("required feature name"))
+            .collect::<Vec<_>>();
+        if !required.is_empty() {
+            pack_args.extend(["--features".to_owned(), required.join(",")]);
+        }
+    }
+    let busbar_args: Vec<String> = [
+        "+1.98.0",
+        "build",
+        "--locked",
+        "-j2",
+        "--release",
+        "--manifest-path",
+        "dist/default/Cargo.toml",
+        "--bin",
+        "busbar",
+        "--features",
+        "test-harness",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    for args in [busbar_args, pack_args] {
         let status = std::process::Command::new("cargo")
-            .args(args)
+            .args(&args)
             .current_dir(&root)
             .status()
             .expect("run cargo build for busbar / busbar-plugin-pack");
