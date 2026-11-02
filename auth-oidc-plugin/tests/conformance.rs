@@ -135,6 +135,11 @@ fn scanned(tag: &str, manifest: Manifest, lib: &[u8]) -> PluginRegistry {
     std::fs::write(dir.join("auth.tar.gz"), tarball).unwrap();
     let policy = TrustPolicy {
         first_party_key: Some(release().verifying_key()),
+        first_party_keys: Vec::new(),
+        revoked: Default::default(),
+        release_keys_floor: 0,
+        release_clock: None,
+        release_enforce_expiry: false,
         binary_version: env!("CARGO_PKG_VERSION").into(),
         first_party_floors: Default::default(),
         first_party_high_water: Default::default(),
