@@ -394,7 +394,6 @@ fn ca_cert_pem_only_adds_a_trusted_root_and_never_disables_verification() {
     }
 }
 
-/// S6: a token endpoint's answer is bounded at 256 KiB; discovery and the JWKS at 1 MiB.
 #[test]
 fn each_need_bounds_its_reply() {
     assert_eq!(reply_cap(NEED_TOKEN), 256 * 1024);
@@ -402,7 +401,6 @@ fn each_need_bounds_its_reply() {
     assert_eq!(reply_cap(NEED_JWKS), 1024 * 1024);
 }
 
-/// S1: a URL an error or log line names is shown with its userinfo removed.
 #[test]
 fn an_error_naming_a_url_drops_its_userinfo() {
     let url = "https://user:Zq7pw@idp.example/jwks";

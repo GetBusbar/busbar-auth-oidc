@@ -127,8 +127,6 @@ fn a_refused_refresh_keeps_the_module_and_cached_verdict() {
     }
 }
 
-/// `validate` ANSWERS AS `open` DOES (Q128 auth-oidc LOW, reader r82 on 59293c0): a plain http
-
 #[test]
 fn validate_answers_a_jwks_url_as_open_does() {
     let plaintext = serde_json::json!({
@@ -209,8 +207,6 @@ fn kept_for(n: u32, at: u64) -> Reached {
     }
 }
 
-/// T1: an identity kept for a short buffer's re-call is served ONLY to the same callback: a
-
 #[test]
 fn a_kept_identity_serves_only_its_own_state_and_code() {
     let kept = kept_for(1, 0);
@@ -268,8 +264,6 @@ fn a_ticket_kept_again_does_not_evict() {
     assert_eq!(map.len(), 2);
     assert!(map.contains_key(&ticket(1)));
 }
-
-/// L16: an identity kept for a short-buffer re-call (it carries the callback's state and code)
 
 #[test]
 fn a_kept_identity_older_than_ten_minutes_goes() {
@@ -358,8 +352,6 @@ fn a_plain_http_jwks_url_raises_its_declared_diagnostic() {
         "a refresh to https stops raising it"
     );
 }
-
-/// S2: bad settings answer FAILED at validate and open alike, each line in the contract's
 
 #[test]
 fn bad_settings_are_refused_in_the_contracts_settings_line_form() {
@@ -512,8 +504,6 @@ fn configured_endpoint_schemes_are_checked_without_echoing_settings_values() {
     assert!(<Oidc as Life>::validate(cfg.as_bytes()).is_ok());
     assert!(Oidc::open(cfg.as_bytes(), &lent(b""), 1).is_ok());
 }
-
-/// L15: a `refresh` that keeps the opened module (the admin cache flush, unchanged settings) has
 
 #[test]
 fn a_refresh_rediscovers_the_issuer_s_document() {

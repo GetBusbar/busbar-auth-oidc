@@ -153,8 +153,6 @@ fn a_loopback_http_jwks_url_opens_with_a_warning() {
     assert!(cap.messages().is_empty(), "{:?}", cap.messages());
 }
 
-/// RED: PLAIN HTTP ONLY FOR LOOPBACK (identity-providers.md: "plain http only for loopback"; RFC
-
 #[test]
 fn a_non_loopback_http_jwks_url_is_refused() {
     for (url, host) in [

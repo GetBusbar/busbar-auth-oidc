@@ -626,7 +626,7 @@ pub struct Bound {
     pub plugin: Plugin<Auth>,
 }
 
-/// `arm` bound as `kind` would be loaded (`load_dropped_bytes`), for the RED arms' refusals.
+/// Loads `arm` as `kind` through `load_dropped_bytes` for refusal checks.
 pub fn bind_as<K: busbar_plugin_loader::dispatch::Kind>(
     arm: &Arm<'_>,
     idp: &Arc<Idp>,

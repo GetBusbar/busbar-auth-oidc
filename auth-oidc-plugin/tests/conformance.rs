@@ -577,8 +577,6 @@ fn the_linked_and_the_dropped_in_oidc_module_are_one_module() {
     }
 }
 
-/// RED: an unreachable issuer fails verify with 1.5.5's discovery text (1.5.5 refused boot with
-
 #[test]
 fn red_an_unreachable_issuer_and_a_ticketless_call_fail_verify_in_1_5_5_s_words() {
     let _one = support::serial();
@@ -620,8 +618,6 @@ fn red_an_unreachable_issuer_and_a_ticketless_call_fail_verify_in_1_5_5_s_words(
     }
     assert_eq!(seen[0], seen[1], "both doors alike");
 }
-
-/// SINGLE-FLIGHT through the real dispatcher (THE DESIGN, auth: "a cold key id pends verify, one
 
 #[test]
 fn concurrent_cold_verifies_make_one_discovery_and_one_jwks_request() {
@@ -774,8 +770,6 @@ fn red_an_oversized_error_reply_names_its_status_and_is_cut_off_at_the_cap() {
     );
 }
 
-/// THE LOGIN WHOSE KEY SET CANNOT BE HAD, through the real dispatcher (OWNER-SIGNED 2026-10-30:
-
 #[test]
 fn a_login_whose_key_set_cannot_be_had_is_an_outage_not_declined() {
     let _one = support::serial();
@@ -799,8 +793,6 @@ fn a_login_whose_key_set_cannot_be_had_is_an_outage_not_declined() {
         "the key set's URL was asked for"
     );
 }
-
-/// THE WAKE through the real dispatcher (THE DESIGN, auth: "every waiter wakes"): a verify that
 
 #[test]
 fn a_waiter_is_woken_by_the_fetch_it_waits_on_not_a_polling_timer() {
@@ -864,8 +856,6 @@ fn a_waiter_is_woken_by_the_fetch_it_waits_on_not_a_polling_timer() {
     );
 }
 
-/// THE TICK (THE DESIGN, auth: "`tick` refreshes ahead of the TTL, with 1.5.5's timings"), through
-
 #[test]
 fn a_tick_refreshes_the_key_set_ahead_of_its_ttl() {
     let _one = support::serial();
@@ -917,8 +907,6 @@ fn a_tick_refreshes_the_key_set_ahead_of_its_ttl() {
     assert_eq!(refetch.need, 1, "on the JWKS need (anchored set)");
 }
 
-/// RED: a request on an undeclared need index, or to a target its need does not name, is caught by
-
 #[test]
 fn red_an_undeclared_need_or_a_foreign_target_is_caught() {
     let sent = |need: u32, target: &str| support::Sent {
@@ -954,8 +942,6 @@ fn red_an_undeclared_need_or_a_foreign_target_is_caught() {
     )
     .is_empty());
 }
-
-/// RED: the rendered Statement declares exactly the six needs — outbound, `http`, discovery and the
 
 #[test]
 fn red_the_statement_declares_six_outbound_http_needs_in_their_classes() {
@@ -1011,8 +997,6 @@ fn red_the_statement_declares_six_outbound_http_needs_in_their_classes() {
     assert_eq!(packed.as_deref(), Some(&row.statement[..]));
 }
 
-/// A BEARER THAT IS NOT UTF-8 IS NOT THIS MODULE'S CREDENTIAL, ANSWERED AS ONE (Q128 auth-oidc
-
 #[test]
 fn a_bearer_that_is_not_utf8_passes_with_a_decision_and_its_line_named() {
     let _one = support::serial();
@@ -1037,8 +1021,6 @@ fn a_bearer_that_is_not_utf8_passes_with_a_decision_and_its_line_named() {
         assert!(idp.sent().is_empty(), "nothing is fetched for it");
     }
 }
-
-/// AN IDENTITY CARRIES THE CREDENTIAL IT WAS VERIFIED FROM (Q128 auth-oidc LOW, reader r81 on
 
 #[test]
 fn an_identity_carries_the_credential_it_was_verified_from() {
@@ -1081,8 +1063,6 @@ fn an_identity_carries_the_credential_it_was_verified_from() {
         "the verified credential rides the identity"
     );
 }
-
-/// ONE CLOCK (THE DESIGN §1): a token's expiry is judged at the request's own timestamp, the
 
 #[test]
 fn a_token_s_expiry_is_judged_at_the_request_s_timestamp() {
@@ -1335,8 +1315,6 @@ fn pending_complete_keeps_its_client_and_token_answer_across_refresh() {
     }
 }
 
-/// L1: a verify that claimed the key set's refresh and pended on it, re-entered after ANOTHER
-
 #[test]
 fn a_verify_meeting_the_verdict_cache_on_re_entry_still_lands_its_fetch() {
     let _one = support::serial();
@@ -1378,8 +1356,6 @@ fn a_verify_meeting_the_verdict_cache_on_re_entry_still_lands_its_fetch() {
     assert_eq!(idp.sent_to("/keys").len(), 2, "{:?}", idp.sent());
 }
 
-/// L2: a tick arriving while the previous tick's refresh is still in flight on the driver ticket
-
 #[test]
 fn a_tick_during_the_last_tick_s_fetch_does_not_fetch_again() {
     let _one = support::serial();
@@ -1416,8 +1392,6 @@ fn a_tick_during_the_last_tick_s_fetch_does_not_fetch_again() {
         idp.sent()
     );
 }
-
-/// L6: `ready` meeting another op's discovery in flight WAITS for it (woken when it settles),
 
 #[test]
 fn ready_waits_on_another_op_s_discovery_and_a_failure_refuses_the_boot() {
@@ -1481,8 +1455,6 @@ fn ready_audits_refused_warmup_destinations_without_changing_best_effort_boot() 
     }
 }
 
-/// T2: a login's id_token is judged for expiry at the HOST's wall clock (`clock.now`), through the
-
 #[test]
 fn a_login_id_token_s_expiry_is_judged_at_the_host_clock() {
     let _one = support::serial();
@@ -1517,8 +1489,6 @@ fn a_login_id_token_s_expiry_is_judged_at_the_host_clock() {
         }
     }
 }
-
-/// OIO1: a short login answer expires on the host's monotonic clock, with the existing inclusive
 
 #[test]
 fn a_short_login_answer_uses_the_host_monotonic_expiry_boundary() {
@@ -1649,8 +1619,6 @@ fn a_broken_successful_token_response_is_a_login_outage() {
     }
 }
 
-/// T3: an IdP destination the host's guard REFUSES is audited through the door: the verify fails,
-
 #[test]
 fn a_refused_idp_destination_raises_its_declared_diagnostic_once() {
     let _one = support::serial();
@@ -1677,8 +1645,6 @@ fn a_refused_idp_destination_raises_its_declared_diagnostic_once() {
     assert!(b.verify(Some(&token), None).starts_with("Failed"));
     assert_eq!(idp.diags().len(), 1, "raised once: {:?}", idp.diags());
 }
-
-/// L17: READY and tick keep connector state outside the generic parked operation. Cancelling
 
 #[test]
 fn ready_and_tick_release_held_connections_on_cancel_or_refresh() {

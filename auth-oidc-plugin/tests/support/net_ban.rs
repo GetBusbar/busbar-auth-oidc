@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! THE SOCKET/TLS BAN, held by this plugin's own tests (BUSBAR-1.6.0.md THE DESIGN §5, Connections:
+//! Checks the shipped dependency closure for socket and TLS implementations owned by the host.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -93,8 +93,6 @@ fn the_shipped_closure_holds_no_socket_or_tls_stack() {
     );
     assert_eq!(findings(&tree), Vec::<String>::new());
 }
-
-/// RED: a closure that carries a plugin-side TLS stack, a socket crate and tokio's `net` feature is
 
 #[test]
 fn red_the_net_ban_names_a_plugin_side_tls_or_socket_stack() {
@@ -191,8 +189,6 @@ impl Drop for Fixture {
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
-
-/// RED/GREEN over the real `cargo tree` invocation: `socket2` as a dev-dependency only is not
 
 #[test]
 fn a_dev_dependency_is_not_the_shipped_closure_and_a_normal_one_is() {

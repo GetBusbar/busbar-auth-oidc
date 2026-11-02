@@ -81,8 +81,6 @@ fn the_bound_holds_by_evicting_the_oldest_inserted() {
     assert!(c.get("one-more", t + 1).is_some());
 }
 
-/// L18: an identity whose TTL is zero is never inserted: it could never be served, and it would
-
 #[test]
 fn a_zero_ttl_identity_is_not_inserted() {
     let c = VerdictCache::default();
@@ -90,8 +88,6 @@ fn a_zero_ttl_identity_is_not_inserted() {
     c.put("cred-z", &principal(Some(0)), t, c.generation());
     assert_eq!(c.flush(), 0, "nothing was held");
 }
-
-/// L19: an identity larger than 8 KiB (its id, name and roles) is not cached — a token carrying
 
 #[test]
 fn an_identity_over_8_kib_is_not_cached() {

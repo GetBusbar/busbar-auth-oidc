@@ -181,8 +181,6 @@ fn a_failed_discovery_logs_one_warn_with_the_error() {
     );
 }
 
-/// L15: the discovery document is not held for the module's life: 24 h after it was fetched the
-
 #[test]
 fn the_document_is_rediscovered_after_a_day_serving_the_previous_one_meanwhile() {
     let (c, d) = (cfg(None), Discovery::new(Duration::from_secs(60)));

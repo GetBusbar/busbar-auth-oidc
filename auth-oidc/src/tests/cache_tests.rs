@@ -97,8 +97,6 @@ fn a_cold_kid_pends_one_fetch_and_every_waiter_takes_its_keys() {
     assert_eq!(idp.calls(), 1, "the waiters fetched nothing");
 }
 
-/// THE WAKE (THE DESIGN, auth: "one `exchange()` fetches, every waiter wakes"): the fetch that
-
 #[test]
 fn the_fetch_that_lands_wakes_every_waiter_once() {
     let c = JwksCache::new(Duration::from_secs(60), Duration::from_secs(3600));
@@ -621,8 +619,6 @@ fn a_waiter_whose_fetch_failed_fails_closed_inside_the_rate_limit() {
     );
     assert_eq!(idp.calls(), 1);
 }
-
-/// O6: a fetch that runs to its OWN timeout (`FETCH_TIMEOUT_MS`, connect + total) is not yet
 
 #[test]
 fn a_fetch_running_to_its_own_timeout_is_not_taken_over() {

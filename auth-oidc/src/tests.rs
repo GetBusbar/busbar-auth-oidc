@@ -494,8 +494,6 @@ fn malformed_but_dotted_bearers_pass() {
     }
 }
 
-/// L4: issuer routing reads the payload's `iss` BEFORE the header is decoded: a three-segment
-
 #[test]
 fn a_token_naming_this_issuer_with_a_malformed_header_is_rejected_not_passed() {
     let key = TestKey::generate(KID);
@@ -609,8 +607,6 @@ fn a_verified_identity_is_answered_from_the_verdict_cache_for_its_ttl() {
     ));
 }
 
-/// L8 (RFC 7517 §4.3, §4.4): a JWK whose `alg` is present and is not the token's, or whose
-
 #[test]
 fn a_jwk_whose_alg_or_key_ops_forbid_it_does_not_verify() {
     let key = TestKey::generate(KID);
@@ -647,8 +643,6 @@ fn a_jwk_whose_alg_or_key_ops_forbid_it_does_not_verify() {
         );
     }
 }
-
-/// L9: a token whose header names NO kid is verified by the key set's single usable signing key
 
 #[test]
 fn a_token_with_no_kid_uses_the_one_usable_key_for_its_alg() {
@@ -687,8 +681,6 @@ fn a_token_with_no_kid_uses_the_one_usable_key_for_its_alg() {
     );
 }
 
-/// L10: an identity answered from the verdict cache states the TTL it has LEFT, not the one it
-
 #[test]
 fn a_cache_hit_answers_the_remaining_ttl() {
     let key = TestKey::generate(KID);
@@ -706,8 +698,6 @@ fn a_cache_hit_answers_the_remaining_ttl() {
         Some(Some(1))
     );
 }
-
-/// L12 (S5): a rejected token is the caller's, not the operator's: logged ONCE at info with a
 
 #[test]
 fn a_rejected_token_is_logged_at_info_with_a_reason() {
@@ -744,8 +734,6 @@ fn a_rejected_token_is_logged_at_info_with_a_reason() {
         );
     }
 }
-
-/// L13: a host clock that cannot be read (the `i64::MAX` sentinel `clock_or_fail_closed` maps it
 
 #[test]
 fn an_unreadable_host_clock_is_a_failure_not_a_bad_credential() {
@@ -906,8 +894,6 @@ fn audience_array_form_accepted() {
     assert!(verifier("groups").validate_claims(&c, now).is_ok());
 }
 
-/// O2: a BEARER (an RFC 9068 access token) is accepted when its `aud` CONTAINS the configured
-
 #[test]
 fn a_bearer_aud_must_contain_the_audience_and_needs_no_azp() {
     let now = 1_700_000_000;
@@ -928,8 +914,6 @@ fn a_bearer_aud_must_contain_the_audience_and_needs_no_azp() {
         .expect_err("an aud not containing the audience");
     assert!(err.contains("audience"), "got: {err}");
 }
-
-/// O2: the browser-login `id_token` keeps OIDC Core 1.0 §3.1.3.7 against the `client_id`: a
 
 #[test]
 fn an_id_token_aud_follows_the_oidc_azp_rules_against_the_client_id() {
@@ -1931,8 +1915,6 @@ fn the_module_verifies_a_token_response_and_rejects_a_forged_one() {
     }
 }
 
-/// RED (ruling 2026-10-27): a token endpoint that answers 5xx or 429 is the IdP unable to answer,
-
 #[test]
 fn an_idp_5xx_or_429_at_the_token_endpoint_is_an_outage_not_a_decline() {
     let key = TestKey::generate(KID);
@@ -2031,8 +2013,6 @@ fn only_an_rfc_6749_credential_error_at_the_token_endpoint_is_a_decline() {
     }
 }
 
-/// L3: a `begin_login` the host lends NO nonce (absent or empty) is refused — FAILED, logged —
-
 #[test]
 fn a_begin_login_with_no_nonce_is_refused_and_logged() {
     let mut c = cfg("groups");
@@ -2102,8 +2082,6 @@ fn login_fails_closed_without_endpoints() {
         LoginOutcome::Reject
     ));
 }
-
-/// O7: every far-end string (a JWKS key's `kty`/`crv`, a discovery document's `issuer`) and every
 
 #[test]
 fn far_end_and_attacker_strings_are_escaped_and_capped_in_errors() {
@@ -2335,8 +2313,6 @@ fn an_id_token_binds_only_to_the_logins_nonce() {
     assert!(!nonce_binds(&body("garbage".to_string()), "n-1"));
 }
 
-/// O5: the token endpoint's answer is parsed into a typed struct whose tokens live in wiped
-
 #[test]
 fn the_token_response_holds_its_tokens_in_wiped_holders() {
     let r = TokenResponse::parse(
@@ -2350,8 +2326,6 @@ fn the_token_response_holds_its_tokens_in_wiped_holders() {
         .expect("refused");
     assert!(!err.contains("SECRET"), "{err}");
 }
-
-/// L11: every log line naming an IdP URL names it as `fetch::shown` does, its userinfo removed:
 
 #[test]
 fn a_logged_idp_url_drops_its_userinfo() {
@@ -2389,8 +2363,6 @@ fn a_logged_idp_url_drops_its_userinfo() {
         "a URL's userinfo is logged: {logged}"
     );
 }
-
-/// L14: the JWKS entries a fetch skips as unusable are not dropped silently: one warn per fetch
 
 #[test]
 fn skipped_jwks_entries_are_counted_in_one_warn() {
@@ -2722,8 +2694,6 @@ fn a_token_of_an_unknown_issuer_is_refused_at_the_chains_end() {
     );
 }
 
-/// S5: a browser login this provider cannot begin (no `authorization_endpoint` configured or
-
 #[test]
 fn a_begin_login_with_no_authorize_endpoint_is_logged() {
     let mut none = cfg("groups");
@@ -2762,8 +2732,6 @@ fn malformed_role_values_are_reported_without_changing_valid_roles_or_echoing_cl
     assert!(cap.contains("role claim"));
     assert!(!cap.contains("SecretRoleClaim"));
 }
-
-/// S1: a far-end document the decoder cannot read is refused without the decoder's text, which
 
 #[test]
 fn an_unreadable_idp_document_is_refused_without_echoing_it() {

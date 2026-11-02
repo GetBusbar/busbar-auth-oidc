@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! THE IMPORT BAN, held by the built image itself (THE DESIGN 5, Connections: "No plugin opens a
+//! Checks the built plugin's undefined symbols for socket, resolver and TLS entry points.
 
 use std::process::Command;
 
@@ -98,8 +98,6 @@ fn the_built_image_imports_no_socket_resolver_or_tls_entry_point() {
         lib.display()
     );
 }
-
-/// RED: a listing that imports socket, resolver and TLS entry points (ELF and Mach-O spellings) is
 
 #[test]
 fn red_the_import_ban_names_a_socket_resolver_or_tls_import() {

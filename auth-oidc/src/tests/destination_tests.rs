@@ -208,8 +208,6 @@ fn a_refused_idp_fetch_is_audited() {
     );
 }
 
-/// L7: a DISCOVERED `authorization_endpoint` is held to the same scheme rule as a discovered
-
 #[test]
 fn a_discovered_plain_http_authorization_endpoint_is_refused() {
     let idp = Idp::new(doc(
