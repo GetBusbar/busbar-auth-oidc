@@ -389,6 +389,9 @@ struct Response {
     timeout_body: bool,
 }
 
+/// One paused provider path and the actual instance/ticket reads waiting for its release.
+type HeldReads = (String, Vec<(InstanceId, u64)>);
+
 /// THE IdP: every need framed; an open is the whole request (kept in `sent`), answered by its path
 pub struct Idp {
     wake: Mutex<Option<Wake>>,
@@ -406,7 +409,7 @@ pub struct Idp {
     served: AtomicU64,
     delay: Mutex<Duration>,
     /// A test-controlled reply path and its wakes, released by `ReadHold` outside this lock.
-    read_hold: Mutex<Option<(String, Vec<(InstanceId, u64)>)>>,
+    read_hold: Mutex<Option<HeldReads>>,
     read_pause: Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
     /// Every declared diagnostic the door's envelopes raised, as `name severity text`.
     diags: Mutex<Vec<String>>,
