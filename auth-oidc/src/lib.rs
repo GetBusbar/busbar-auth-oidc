@@ -237,9 +237,14 @@ impl OidcVerifier {
         let aud_ok = match claims.get("aud") {
             Some(Value::String(s)) => s == trusted,
             Some(Value::Array(a)) => {
+                // JWT's array form is an array of strings. A matching audience (or an ID
+                // token's matching azp) cannot make a non-string member a valid audience.
+                let strings_only = a.iter().all(Value::is_string);
                 let trusted_present = a.iter().any(|v| v.as_str() == Some(trusted));
                 let has_untrusted_extra = a.iter().any(|v| v.as_str() != Some(trusted));
-                trusted_present && !(self.id_token && has_untrusted_extra && azp != Some(trusted))
+                strings_only
+                    && trusted_present
+                    && !(self.id_token && has_untrusted_extra && azp != Some(trusted))
             }
             _ => false,
         } && !(self.id_token && claims.get("azp").is_some() && azp != Some(trusted));
