@@ -366,27 +366,26 @@ impl Drop for ReleaseLogin {
         let Some(cursors) = self.cursors.upgrade() else {
             return;
         };
-        let removed = {
+        let retired = {
             let mut cursors = cursors.lock().unwrap_or_else(PoisonError::into_inner);
             if cursors
                 .get(&self.ticket)
                 .is_some_and(|c| Arc::ptr_eq(&c.marker, &self.marker))
             {
                 cursors.remove(&self.ticket);
-                true
+                // Keep this guard until the matching identity is detached, so a later cursor
+                // cannot publish its principal between the marker check and this removal.
+                self.reached.upgrade().and_then(|reached| {
+                    reached
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .remove(&self.ticket)
+                })
             } else {
-                false
+                None
             }
         };
-        if removed {
-            if let Some(reached) = self.reached.upgrade() {
-                let retired = reached
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .remove(&self.ticket);
-                drop(retired);
-            }
-        }
+        drop(retired);
     }
 }
 
@@ -659,15 +658,16 @@ fn resume<'h>(
     instance: &Instance<'_, Held<Oidc>>,
     h: &'h Held<Oidc>,
 ) -> (Arc<Opened>, HostIo<'h>, Parked) {
-    resume_after(instance, h, None)
+    resume_after(instance, h, None, instance.resume::<Parked>())
 }
 
 fn resume_after<'h>(
     instance: &Instance<'_, Held<Oidc>>,
     h: &'h Held<Oidc>,
     issued: Option<u32>,
+    resumed: Option<Box<Parked>>,
 ) -> (Arc<Opened>, HostIo<'h>, Parked) {
-    let mut parked = instance.resume::<Parked>().map_or_else(
+    let mut parked = resumed.map_or_else(
         || Parked {
             io: IoState::following(issued.unwrap_or(0)),
             answer: None,
@@ -1022,8 +1022,9 @@ impl SafeSlot for Complete {
             .unwrap_or_else(PoisonError::into_inner)
             .remove(&instance.ticket())
             .map(|c| c.issued);
+        let resumed = instance.resume::<Parked>();
         match short_reply::decode(input.field(|i| &i.head.extensions).bytes()) {
-            Ok(Some(_)) if cursor.is_none() => {
+            Ok(Some(_)) if cursor.is_none() && resumed.is_none() => {
                 return out.fail(Refusal::refused(
                     "oidc: short login continuation is no longer held",
                 ));
@@ -1043,7 +1044,7 @@ impl SafeSlot for Complete {
         let (principal, issued) = match kept {
             Some(r) => (r.principal, cursor.unwrap_or(0)),
             None => {
-                let (opened, mut io, mut parked) = resume_after(&instance, h, cursor);
+                let (opened, mut io, mut parked) = resume_after(&instance, h, cursor, resumed);
                 let login = opened.login(
                     code,
                     str_text(input.field(|i| &i.redirect_uri)),
