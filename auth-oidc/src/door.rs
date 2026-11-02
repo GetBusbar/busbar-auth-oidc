@@ -792,19 +792,31 @@ fn answer(
     Outcome::Ready
 }
 
+/// The immutable verdict fields passed together from judgment to SHORT retention.
+struct VerifyAnswer<'a> {
+    principal: Option<&'a Principal>,
+    ttl: Option<u64>,
+    credential: Option<&'a [u8]>,
+    decision: u32,
+    verdict: u32,
+}
+
 /// Retain only when the actual answer is SHORT. The existing lease mechanism owns cleanup;
 /// the marker prevents an old lease from discarding a later result that reused the ticket.
 fn verify_answer(
     h: &Held<Oidc>,
     ticket: Ticket,
-    principal: Option<&Principal>,
-    ttl: Option<u64>,
-    credential: Option<&[u8]>,
-    decision: u32,
-    verdict: u32,
+    reached: VerifyAnswer<'_>,
     input: Lent<'_, VerifyIn>,
     out: &mut Out<'_, IdentifyOut>,
 ) -> Outcome {
+    let VerifyAnswer {
+        principal,
+        ttl,
+        credential,
+        decision,
+        verdict,
+    } = reached;
     let answered = answer(
         principal,
         ttl,
@@ -979,11 +991,13 @@ impl SafeSlot for Verify {
                 return verify_answer(
                     h,
                     instance.ticket(),
-                    None,
-                    None,
-                    None,
-                    DECISION_CONTINUE,
-                    VERDICT_PASS,
+                    VerifyAnswer {
+                        principal: None,
+                        ttl: None,
+                        credential: None,
+                        decision: DECISION_CONTINUE,
+                        verdict: VERDICT_PASS,
+                    },
                     input,
                     &mut out,
                 );
@@ -1004,11 +1018,13 @@ impl SafeSlot for Verify {
             return verify_answer(
                 h,
                 instance.ticket(),
-                Some(&*hit.principal),
-                hit.ttl_secs,
-                token.map(str::as_bytes),
-                DECISION_CONTINUE,
-                VERDICT_IDENTITY,
+                VerifyAnswer {
+                    principal: Some(&*hit.principal),
+                    ttl: hit.ttl_secs,
+                    credential: token.map(str::as_bytes),
+                    decision: DECISION_CONTINUE,
+                    verdict: VERDICT_IDENTITY,
+                },
                 input,
                 &mut out,
             );
@@ -1038,11 +1054,13 @@ impl SafeSlot for Verify {
         verify_answer(
             h,
             instance.ticket(),
-            p,
-            p.and_then(|p| p.ttl_secs),
-            token.map(str::as_bytes),
-            decision,
-            verdict,
+            VerifyAnswer {
+                principal: p,
+                ttl: p.and_then(|p| p.ttl_secs),
+                credential: token.map(str::as_bytes),
+                decision,
+                verdict,
+            },
             input,
             &mut out,
         )
