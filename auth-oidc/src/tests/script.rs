@@ -97,7 +97,6 @@ impl Idp {
     }
 
     /// Swap the served body in place — the provider rotating its JWKS underneath an
-
     pub fn set_body(&self, body: String) {
         self.set_answer(Ok(body));
     }
@@ -147,7 +146,6 @@ pub struct Caller<'a> {
 
 impl Caller<'_> {
     /// Whether a request to `url` is answered now: a re-ask of the one in flight is; a new one is
-
     fn answered(&mut self, url: &str) -> bool {
         if self.in_flight.as_deref() == Some(url) {
             self.in_flight = None;

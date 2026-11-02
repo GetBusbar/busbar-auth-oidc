@@ -27,7 +27,6 @@ const BANNED_IMPORTS: &[&str] = &[
 ];
 
 /// Every banned import in `listing`, `nm`'s undefined-symbol output: one symbol per line, its last
-
 fn banned_imports(listing: &str) -> Vec<String> {
     let mut found: Vec<String> = listing
         .lines()

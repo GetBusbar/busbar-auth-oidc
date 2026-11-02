@@ -44,7 +44,6 @@ fn a_flush_drops_everything_and_counts_it() {
 }
 
 /// 1.5.5's flush-generation rule: a verify in flight across a flush cannot put back the identity
-
 #[test]
 fn an_identity_judged_before_a_flush_is_not_put_back_after_it() {
     let c = VerdictCache::default();

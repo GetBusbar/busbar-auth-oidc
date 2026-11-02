@@ -49,7 +49,6 @@ pub struct Issuer {
 
 impl Issuer {
     /// Start an issuer named `issuer` (the `iss` its tokens carry), signing under key id `kid`, with
-
     pub fn start(issuer: &str, kid: &str) -> Issuer {
         let rng = ring::rand::SystemRandom::new();
         let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng)

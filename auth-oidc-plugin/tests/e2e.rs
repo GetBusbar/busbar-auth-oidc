@@ -6,7 +6,6 @@
 use busbar_plugin_loader::plugin_library_filename;
 
 /// Locate the built `busbar_auth_oidc_plugin` cdylib in the target dir (mirrors the loader's own
-
 fn plugin_path() -> Option<std::path::PathBuf> {
     let candidate = (|| {
         let exe = std::env::current_exe().ok()?;
@@ -39,7 +38,6 @@ mod support;
 use support::{Arm, Idp, Issuer, UNUSED_ISSUER};
 
 /// End-to-end SUCCESS: dlopen the real auth-oidc-plugin cdylib, `open` it against a config naming
-
 #[test]
 fn load_and_exercise_auth_oidc_plugin_success() {
     let _one = support::serial();
@@ -116,7 +114,6 @@ fn load_and_exercise_auth_oidc_plugin_success() {
 }
 
 /// The busbar checkout the live e2e builds the REAL `busbar` and `busbar-plugin-pack` binaries from:
-
 fn busbar_root() -> std::path::PathBuf {
     let dir = std::env::var_os("BUSBAR_CHECKOUT").expect(
         "BUSBAR_CHECKOUT is unset: the live e2e builds the real busbar binaries from a checkout of \
@@ -128,7 +125,6 @@ fn busbar_root() -> std::path::PathBuf {
 }
 
 /// Build (once, cached by cargo) and return the real `busbar` and `busbar-plugin-pack` binaries from
-
 fn build_real_binaries() -> (std::path::PathBuf, std::path::PathBuf) {
     let root = busbar_root();
 
@@ -174,7 +170,6 @@ fn build_real_binaries() -> (std::path::PathBuf, std::path::PathBuf) {
 }
 
 /// A fresh first-party test keypair from the real `busbar-plugin-pack keygen`: (private seed hex,
-
 fn first_party_keypair(pack_bin: &std::path::Path) -> (String, String) {
     let out = std::process::Command::new(pack_bin)
         .arg("keygen")
@@ -193,7 +188,6 @@ fn first_party_keypair(pack_bin: &std::path::Path) -> (String, String) {
 }
 
 /// Pack the built auth-oidc-plugin cdylib into a real tarball via the real `busbar-plugin-pack`
-
 fn pack_oidc_tarball(
     pack_bin: &std::path::Path,
     sign_key: &str,
@@ -230,7 +224,6 @@ fn pack_oidc_tarball(
 }
 
 /// An ephemeral local TCP port (bind :0, read back the OS-assigned port, drop the listener before the
-
 fn free_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0")
         .unwrap()
@@ -240,7 +233,6 @@ fn free_port() -> u16 {
 }
 
 /// A spawned busbar, killed and reaped when it drops: a failing assertion between its spawn and
-
 struct KillOnDrop(std::process::Child);
 
 impl Drop for KillOnDrop {
@@ -286,7 +278,6 @@ fn wait_for_admin_ready(
 }
 
 /// The full install-path proof: not a direct ABI `load_auth_from_bytes` call (the tests above
-
 #[test]
 fn install_oidc_plugin_via_admin_api_and_authenticate() {
     let Some(so_path) = plugin_path() else {
@@ -537,7 +528,6 @@ fn install_oidc_plugin_via_admin_api_and_authenticate() {
 }
 
 /// End-to-end FAILURE: a plugin `open` refusal (malformed config) must surface back across the door
-
 #[test]
 fn load_and_exercise_auth_oidc_plugin_bad_config_fails_over_abi() {
     let _one = support::serial();

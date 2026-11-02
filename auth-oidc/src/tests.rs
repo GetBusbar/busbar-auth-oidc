@@ -67,11 +67,9 @@ impl TestKey {
 }
 
 /// The scripted IdP serving the JWKS (`crate::script`): a fixed body, swappable to simulate a key
-
 type FixtureFetcher = Idp;
 
 /// A module over a scripted IdP whose requests answer at once: the module's sans-IO answers, as
-
 struct Module {
     m: OidcModule,
     idp: Arc<Idp>,
@@ -104,7 +102,6 @@ impl Module {
     }
 
     /// 1.5.5's `complete_login`: a token response verified into an identity, else the callback's
-
     fn complete_login(&self, req: &CompleteLogin) -> LoginOutcome {
         let mut io = self.idp.at_once(Some(ME));
         if let Some(resp) = &req.token_response {
@@ -275,7 +272,6 @@ const RSA2_PKCS8_B64: &str = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQ
 const RSA2_N_B64URL: &str = "x7VeATJUinSTDpKmHEkz26-6GRoohX9UsyJPKK-xGdAdYwQEULdkns1upTK42vwER-REXAmuWIfTX86tAUsyuqzH6BCEMiKZGg6eioXdZ7MrOwkbkP-U8pqSCMK0OtyWHelIZl6jXVZGhcMzpnABkeP1CCz8aTTliwt-c7mjFQKNhClr0cbdAOnsmXlX51r_SXJictpFysksaPOHuDvtv5izi4oITLrkM4-NCXScPIkPu7Ar66DWlxDzYjT8kzZhreOfc38Yw0ATXR91FN97neOsVth07vdktLVdil6raFMfmz-UYQRylTn7k59EFSlMclJAcGotNqFOmIPbgY7f5Q";
 
 /// A ring RS256 signer wrapping one of the fixed keypairs, plus the JWKS fixture (`n`/`e`) that
-
 struct RsaTestKey {
     kp: RsaKeyPair,
     rng: SystemRandom,
@@ -385,7 +381,6 @@ fn tampered_rs256_payload_is_rejected() {
 }
 
 /// The RSA-keyed variant of the alg-confusion guard: against a real RSA JWKS key, both `alg: none`
-
 #[test]
 fn alg_confusion_against_an_rsa_key_is_rejected() {
     let key = RsaTestKey::generate(KID);
@@ -403,7 +398,6 @@ fn alg_confusion_against_an_rsa_key_is_rejected() {
 }
 
 /// Build a compact JWT with an arbitrary (attacker-controlled) `alg` header value and an arbitrary
-
 fn token_with_alg(kid: &str, alg: &str, claims: &Value, sig: &[u8]) -> String {
     let header = serde_json::json!({ "alg": alg, "typ": "JWT", "kid": kid });
     let h = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).unwrap());
@@ -413,7 +407,6 @@ fn token_with_alg(kid: &str, alg: &str, claims: &Value, sig: &[u8]) -> String {
 }
 
 /// RFC 7515 §4.1.11: a token whose header marks a critical extension the verifier does not implement
-
 #[test]
 fn a_token_naming_an_unimplemented_critical_extension_is_rejected() {
     let key = TestKey::generate(KID);
@@ -475,7 +468,6 @@ fn non_jwt_bearer_passes() {
 }
 
 /// Malformed-but-dotted bearers are not this module's credential shape either (OIDC-21): too few
-
 #[test]
 fn malformed_but_dotted_bearers_pass() {
     let key = TestKey::generate(KID);
@@ -569,7 +561,6 @@ fn kid_rotation_triggers_bounded_refetch() {
 }
 
 /// 1.5.5's CREDENTIAL CACHE, now the module's own (v1.5.5 `crates/busbar/src/auth_cache.rs`; OIDC
-
 #[test]
 fn a_verified_identity_is_answered_from_the_verdict_cache_for_its_ttl() {
     let key = TestKey::generate(KID);
@@ -770,7 +761,6 @@ fn an_unreadable_host_clock_is_a_failure_not_a_bad_credential() {
 }
 
 /// A kid absent from the key set is rejected, and the bounded rotation refetch it triggers is
-
 #[test]
 fn an_unknown_kid_is_rejected_with_its_refetch_rate_limited() {
     let key = TestKey::generate("real-kid");
@@ -803,7 +793,6 @@ fn wrong_issuer_denied() {
 }
 
 /// A token with NO `iss` claim at all must be rejected. Every fixture in this file carries an
-
 #[test]
 fn a_token_with_no_iss_claim_is_denied() {
     let now = 1_700_000_000;
@@ -816,7 +805,6 @@ fn a_token_with_no_iss_claim_is_denied() {
 }
 
 /// A token with NO `aud` claim, or an `aud` that is neither a string nor an array, must be
-
 #[test]
 fn a_token_with_no_aud_or_a_malformed_aud_is_denied() {
     let now = 1_700_000_000;
@@ -848,7 +836,6 @@ fn a_token_with_no_aud_or_a_malformed_aud_is_denied() {
 }
 
 /// An `nbf` that is PRESENT but not a NumericDate must be rejected rather than silently skipped.
-
 #[test]
 fn a_present_but_unreadable_nbf_is_denied_rather_than_ignored() {
     let now = 1_700_000_000;
@@ -989,7 +976,6 @@ fn not_yet_valid_denied() {
 }
 
 /// RFC 7519 §2: a NumericDate MAY be fractional. Under an `as_i64`-only read, a fractional `exp` is
-
 #[test]
 fn fractional_exp_is_accepted_not_treated_as_absent() {
     let now = 1_700_000_000;
@@ -1002,7 +988,6 @@ fn fractional_exp_is_accepted_not_treated_as_absent() {
 }
 
 /// A fractional `exp` in the PAST is still expired (floor keeps it conservative).
-
 #[test]
 fn fractional_exp_in_the_past_is_expired() {
     let now = 1_700_000_000;
@@ -1019,7 +1004,6 @@ fn fractional_exp_in_the_past_is_expired() {
 }
 
 /// A fractional `nbf` that sits BETWEEN its floor and its ceil, with `now` below both, must be treated
-
 #[test]
 fn fractional_nbf_between_floor_and_ceil_is_not_yet_valid() {
     let now = 1_700_000_000;
@@ -1076,7 +1060,6 @@ fn an_nbf_at_i64_min_does_not_panic() {
 }
 
 /// The `exp` clock-skew window at its exact boundary, and the ttl clamp at 0 (OIDC-15): an `exp`
-
 #[test]
 fn exp_at_the_skew_boundary_verifies_with_ttl_zero_and_one_past_is_expired() {
     let now = 1_700_000_000;
@@ -1175,7 +1158,6 @@ fn discovery_with_matching_issuer_resolves_jwks_uri() {
 }
 
 /// Without an issuer check, a discovery document resolves `jwks_uri` regardless of which host served
-
 #[test]
 fn discovery_with_mismatched_issuer_is_rejected() {
     let doc = serde_json::json!({
@@ -1221,7 +1203,6 @@ fn subject_falls_back_to_sub_when_oid_absent() {
 }
 
 /// Falling through to the MUTABLE preferred_username when neither immutable claim is present would
-
 #[test]
 fn missing_both_oid_and_sub_is_rejected_not_downgraded_to_a_mutable_claim() {
     let now = 1_700_000_000;
@@ -1239,7 +1220,6 @@ fn missing_both_oid_and_sub_is_rejected_not_downgraded_to_a_mutable_claim() {
 }
 
 /// Under a bare `.and_then(Value::as_str)`, an empty-string `sub` (with `oid` absent) is accepted
-
 #[test]
 fn empty_string_subject_is_rejected_not_accepted_as_a_blank_identity() {
     let now = 1_700_000_000;
@@ -1267,7 +1247,6 @@ fn whitespace_only_oid_is_not_a_usable_identity_anchor() {
 }
 
 /// A whitespace-only `oid` must FALL THROUGH to a valid `sub`, not abort identity derivation — the
-
 #[test]
 fn blank_oid_falls_through_to_a_valid_sub() {
     let now = 1_700_000_000;
@@ -1297,7 +1276,6 @@ fn display_name_falls_back_to_preferred_username_when_name_claim_absent() {
 }
 
 /// An un-ceilinged `ttl_secs` derived straight from a standard ~3600s-lived access token would WIDEN
-
 #[test]
 fn ttl_secs_is_ceilinged_even_for_a_long_lived_token() {
     let now = 1_700_000_000;
@@ -1321,7 +1299,6 @@ fn ttl_secs_still_shortens_for_a_token_expiring_sooner_than_the_ceiling() {
 }
 
 /// The fail-closed MAPPING `now_unix` applies (OIDC-13): below the floor the reading becomes
-
 #[test]
 fn clock_or_fail_closed_maps_an_insane_reading_to_i64_max() {
     assert_eq!(clock_or_fail_closed(CLOCK_SANITY_FLOOR_UNIX - 1), i64::MAX);
@@ -1411,7 +1388,6 @@ fn role_claim_as_a_single_scalar_string_is_accepted() {
 }
 
 /// The authorize URL is an OAuth authorization-code request carrying PKCE + state + nonce, and
-
 #[test]
 fn build_authorize_url_has_pkce_state_no_secret() {
     let mut c = cfg("groups");
@@ -1453,7 +1429,6 @@ fn build_authorize_url_has_pkce_state_no_secret() {
 }
 
 /// The authorize URL's query encoding (OIDC-16): query delimiters in a value are escaped (never
-
 #[test]
 fn build_authorize_url_escapes_delimiters_dedups_openid_and_omits_an_absent_nonce() {
     let mut c = cfg("groups");
@@ -1488,7 +1463,6 @@ fn build_authorize_url_keeps_an_existing_endpoint_query() {
 }
 
 /// The token request is an authorization-code grant: its pairs in order, and the lent client
-
 #[test]
 fn the_token_form_is_an_authorization_code_grant_with_the_secret_sealed() {
     let url = "https://idp.test/token";
@@ -1533,7 +1507,6 @@ fn the_token_form_is_an_authorization_code_grant_with_the_secret_sealed() {
 }
 
 /// A good token-endpoint response verifies its id_token to an `oidc:<sub>` identity with groups; a
-
 #[test]
 fn identity_from_token_response_verifies_id_token() {
     let key = TestKey::generate(KID);
@@ -1710,7 +1683,6 @@ fn login_id_token_audience_is_the_client_id_not_the_bearer_audience() {
 }
 
 /// Discovery resolves BOTH login endpoints from the issuer's openid-configuration (issuer-match
-
 #[test]
 fn discovery_populates_authorization_and_token_endpoints() {
     let doc = serde_json::json!({
@@ -1741,7 +1713,6 @@ fn discovery_populates_authorization_and_token_endpoints() {
 }
 
 /// Explicit login endpoints win over discovered ones, and when BOTH are explicit no discovery
-
 #[test]
 fn explicit_login_endpoints_win_and_both_explicit_skip_discovery() {
     let doc = serde_json::json!({
@@ -1770,7 +1741,6 @@ fn explicit_login_endpoints_win_and_both_explicit_skip_discovery() {
 }
 
 /// ADDITIVE-CONFIG regression: a verify-only config that predates the login fields still parses (all
-
 #[test]
 fn open_still_succeeds_with_and_without_login_fields() {
     let without: OidcConfig =
@@ -1801,7 +1771,6 @@ fn open_still_succeeds_with_and_without_login_fields() {
 }
 
 /// begin_login → Authorize URL, complete_login(code) → Exchange hop, complete_login(token_response)
-
 #[test]
 fn begin_and_complete_login_drive_the_full_flow() {
     let key = TestKey::generate(KID);
@@ -1858,7 +1827,6 @@ fn begin_and_complete_login_drive_the_full_flow() {
 }
 
 /// The module's token-response verification ([`OidcModule::identity_from_token_response`], which
-
 #[test]
 fn the_module_verifies_a_token_response_and_rejects_a_forged_one() {
     let key = TestKey::generate(KID);
@@ -2040,7 +2008,6 @@ fn a_begin_login_with_no_nonce_is_refused_and_logged() {
 }
 
 /// Fail-closed: a module with no login endpoints configured whose issuer's discovery document names
-
 #[test]
 fn login_fails_closed_without_endpoints() {
     let doc = serde_json::json!({ "issuer": ISSUER, "jwks_uri": "https://jwks.test/keys" });
@@ -2161,7 +2128,6 @@ fn far_end_and_attacker_strings_are_escaped_and_capped_in_errors() {
 }
 
 /// `kid` and `alg` come from the UNSIGNED header of an untrusted bearer, and the errors that carry
-
 #[test]
 fn untrusted_kid_and_alg_are_escaped_in_error_text() {
     let key = TestKey::generate(KID);
@@ -2196,7 +2162,6 @@ fn untrusted_kid_and_alg_are_escaped_in_error_text() {
 }
 
 /// The discovery document's `issuer` is untrusted remote input, and the mismatch error carrying it
-
 #[test]
 fn a_hostile_discovery_issuer_is_escaped_in_the_mismatch_error() {
     let doc = serde_json::json!({ "issuer": "x\n\u{1b}]0;pwn\u{7}", "jwks_uri": "https://x" });
@@ -2217,7 +2182,6 @@ fn a_hostile_discovery_issuer_is_escaped_in_the_mismatch_error() {
 }
 
 /// An explicit `jwks_url` that is neither https nor http is refused at resolve time, naming the
-
 #[test]
 fn an_explicit_non_http_jwks_url_is_refused_at_resolve_time() {
     let fetcher = FixtureFetcher::new(String::new());
@@ -2255,7 +2219,6 @@ fn an_explicit_non_http_jwks_url_is_refused_at_resolve_time() {
 }
 
 /// One malformed JWK entry (here: no `kty`; there: a numeric `kid`) must not fail the parse of the
-
 #[test]
 fn one_malformed_jwk_is_skipped_not_fatal_to_the_whole_set() {
     let key = TestKey::generate("a");
@@ -2280,7 +2243,6 @@ fn one_malformed_jwk_is_skipped_not_fatal_to_the_whole_set() {
 }
 
 /// THE NONCE BINDING (1.5.5's core check, now the plugin's): a token answer with no `id_token` binds
-
 #[test]
 fn an_id_token_binds_only_to_the_logins_nonce() {
     let token = |claims: serde_json::Value| {
@@ -2383,7 +2345,6 @@ fn skipped_jwks_entries_are_counted_in_one_warn() {
 }
 
 /// Every refusal of the browser login's token response is explained in the plugin's log, by status
-
 #[test]
 fn a_refused_token_response_is_logged_with_its_reason() {
     let m = OidcModule::new(&cfg("groups"));
@@ -2469,7 +2430,6 @@ fn a_refused_token_exchange_is_logged_with_its_reason() {
 }
 
 /// The host clock's sentinel is refused outright, even by a token whose `exp` saturates, and the
-
 #[test]
 fn the_clock_sentinel_is_refused_even_for_an_exp_at_i64_max() {
     let mut c = base_claims(0);
@@ -2481,7 +2441,6 @@ fn the_clock_sentinel_is_refused_even_for_an_exp_at_i64_max() {
 }
 
 /// The constant-time fold zips, so it truncates to the shorter side: only the length check stops a
-
 #[test]
 fn an_id_token_nonce_of_a_different_length_does_not_bind() {
     let token = |nonce: &str| {
@@ -2504,7 +2463,6 @@ fn an_id_token_nonce_of_a_different_length_does_not_bind() {
 }
 
 /// END-USER DECLINES LOG AT INFO, operator-actionable conditions at WARN (the fleet's levels, as
-
 #[test]
 fn an_end_user_decline_logs_at_info_and_an_idp_failure_at_warn() {
     let mut c = cfg("groups");
@@ -2585,7 +2543,6 @@ fn chain(modules: &[&Module], token: &str, now: i64) -> Walked {
 }
 
 /// Provider A (the Entra fixture issuer) and provider B (a second issuer, its own key and
-
 fn two_providers() -> (TestKey, Module, TestKey, Module) {
     let key_a = TestKey::generate("kid-a");
     let key_b = TestKey::generate("kid-b");
@@ -2606,7 +2563,6 @@ fn claims_of(issuer: &str, audience: &str, now: i64) -> Value {
 }
 
 /// A token provider B minted passes provider A (another issuer's: not A's credential, and A
-
 #[test]
 fn a_token_of_the_second_provider_passes_the_first_and_is_admitted_by_the_second() {
     let (key_a, a, key_b, b) = two_providers();
@@ -2633,7 +2589,6 @@ fn a_token_of_the_second_provider_passes_the_first_and_is_admitted_by_the_second
 }
 
 /// A token CLAIMING provider A's issuer but not signed by A's key is A's to judge: A refuses it
-
 #[test]
 fn a_token_claiming_the_first_providers_issuer_with_a_bad_signature_is_refused_by_it_and_never_reaches_the_second(
 ) {

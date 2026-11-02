@@ -69,7 +69,6 @@ fn a_document_over_one_mebibyte_is_refused() {
 }
 
 /// A non-2xx answer names its status as 1.5.5's client printed it: the code and its canonical
-
 #[test]
 fn a_non_2xx_answer_names_its_status_as_1_5_5_did() {
     assert_eq!(
@@ -148,7 +147,6 @@ fn a_document_get_names_the_path_and_query() {
 }
 
 /// HTTPS-ONLY, as 1.5.5's client was: a plaintext URL is refused before anything is asked of the
-
 #[test]
 fn every_request_is_https_only_and_needs_the_host_connector() {
     let mut io = HostIo::new(None, Ticket::NONE, IoState::default(), false);
@@ -173,7 +171,6 @@ fn every_request_is_https_only_and_needs_the_host_connector() {
 }
 
 /// THE NEEDS: three outbound needs — discovery and the JWKS in the `open-web` class (https only, a
-
 #[test]
 fn the_needs_are_outbound_in_their_class_anchored_then_public() {
     assert_eq!(NEEDS.len(), 2 * PUBLIC as usize);
@@ -209,7 +206,6 @@ fn the_needs_are_outbound_in_their_class_anchored_then_public() {
 }
 
 /// Whether the plugin hands this token endpoint to its host connector after its own scheme check.
-
 fn token_admitted(url: &str) -> bool {
     let mut io = HostIo::new(None, Ticket::NONE, IoState::default(), false);
     match io.post(url, &form()).map(|r| r.map(|_| ())) {
@@ -245,7 +241,6 @@ fn http_to_a_private_idp_token_endpoint_is_admitted() {
 }
 
 /// HTTP TO A PUBLIC HOST IS REFUSED (1.5.5 `vet_hop_url`: "public host must be https"), by the
-
 #[test]
 fn http_to_a_public_token_endpoint_is_refused_before_the_host_is_asked() {
     let mut io = HostIo::new(None, Ticket::NONE, IoState::default(), false);
@@ -278,7 +273,6 @@ fn https_to_a_public_token_endpoint_is_admitted() {
 }
 
 /// DISCOVERY AND THE JWKS STAY HTTPS ONLY, to a private host as to a public one (1.5.5's fetcher
-
 #[test]
 fn documents_stay_https_only_whatever_the_host() {
     let mut io = HostIo::new(None, Ticket::NONE, IoState::default(), false);
@@ -306,7 +300,6 @@ fn documents_stay_https_only_whatever_the_host() {
 fn wipes<T: zeroize::ZeroizeOnDrop>(_: &T) {}
 
 /// THE TOKEN REQUEST'S CREDENTIAL COPIES ARE WIPED (bank grade): the form the token exchange
-
 #[test]
 fn the_token_request_copies_wipe_on_drop() {
     let cfg: crate::OidcConfig = serde_json::from_str(
@@ -329,7 +322,6 @@ fn the_token_request_copies_wipe_on_drop() {
 }
 
 /// The SDK's form encoder writes byte for byte what the `url` crate's form serializer (the
-
 #[test]
 fn the_form_body_matches_the_url_form_serializer() {
     let cases: Vec<Vec<(&str, &str)>> = vec![

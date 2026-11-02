@@ -11,7 +11,6 @@ use std::sync::Barrier;
 const URL: &str = "https://idp.example/jwks";
 
 /// A minimal but real JWKS document. These tests exercise the CACHE's contract, not the crypto —
-
 fn jwks(kid: &str) -> String {
     format!(r#"{{"keys":[{{"kty":"EC","crv":"P-256","kid":"{kid}","x":"AAAA","y":"BBBB"}}]}}"#)
 }
@@ -23,7 +22,6 @@ fn serve(c: &JwksCache, idp: &Idp, now: Instant) -> Result<(), String> {
 }
 
 /// THE CLASS TEST: signature verification must not be serialised. `f` runs on a snapshot with no
-
 #[test]
 fn concurrent_verifications_are_not_serialised() {
     let c = JwksCache::new(Duration::from_secs(60), Duration::from_secs(3600));
@@ -62,7 +60,6 @@ fn concurrent_verifications_are_not_serialised() {
 }
 
 /// THE SPEC'S SINGLE FLIGHT: a cold kid pends verify, ONE exchange fetches, every waiter wakes and
-
 #[test]
 fn a_cold_kid_pends_one_fetch_and_every_waiter_takes_its_keys() {
     let c = JwksCache::new(Duration::from_secs(60), Duration::from_secs(3600));
@@ -147,7 +144,6 @@ fn the_fetch_that_lands_wakes_every_waiter_once() {
 }
 
 /// THE TICK'S REFRESH AHEAD OF THE TTL: not before the set is within `lead` of its TTL, then one
-
 #[test]
 fn a_due_key_set_is_refreshed_ahead_of_its_ttl_and_not_before() {
     let c = JwksCache::new(Duration::from_secs(60), Duration::from_secs(3600));
@@ -189,7 +185,6 @@ fn a_due_key_set_is_refreshed_ahead_of_its_ttl_and_not_before() {
 }
 
 /// THE LIVENESS RULE: a slow JWKS endpoint must not stall a caller that already has a usable key.
-
 #[test]
 fn a_fetch_in_flight_does_not_stall_a_caller_that_already_has_the_key() {
     for min_refetch in [Duration::from_secs(60), Duration::ZERO] {
@@ -221,7 +216,6 @@ fn a_fetch_in_flight_does_not_stall_a_caller_that_already_has_the_key() {
 }
 
 /// The TTL-stale path obeys the SAME rate limit as the kid-rotation path: an unreachable IdP is
-
 #[test]
 fn a_failing_provider_does_not_produce_a_fetch_storm() {
     let c = JwksCache::new(Duration::from_secs(60), Duration::from_millis(1));
@@ -425,7 +419,6 @@ fn with_key_reports_the_last_error_when_no_key_sharing_a_kid_verifies() {
 }
 
 /// KEY ROTATION: a kid absent from a fresh set refetches ONCE (rate-limited), pending on that
-
 #[test]
 fn an_unknown_kid_pends_one_rotation_refetch_and_carries_on_from_it() {
     let c = JwksCache::new(Duration::from_secs(60), Duration::from_secs(3600));
@@ -462,7 +455,6 @@ fn an_unknown_kid_pends_one_rotation_refetch_and_carries_on_from_it() {
 }
 
 /// The absolute staleness ceiling: once every refetch has failed for longer than `max_stale`
-
 #[test]
 fn a_permanently_unreachable_provider_stops_serving_keys_past_the_staleness_ceiling() {
     let c = JwksCache::new(Duration::from_millis(1), Duration::from_millis(1));
@@ -479,7 +471,6 @@ fn a_permanently_unreachable_provider_stops_serving_keys_past_the_staleness_ceil
 }
 
 /// The ceiling on the RATE-LIMITED EARLY RETURN: once a request past the ceiling has triggered (and
-
 #[test]
 fn the_rate_limited_early_return_also_enforces_the_staleness_ceiling() {
     let c = JwksCache::new(Duration::from_secs(60), Duration::from_millis(1));
@@ -548,7 +539,6 @@ fn a_caller_past_the_ceiling_waits_for_the_in_flight_recovery_fetch() {
 }
 
 /// A caller past the ceiling never serves keys past it: when the flight it would wait on is older
-
 #[test]
 fn a_caller_past_the_ceiling_never_serves_keys_past_the_ceiling() {
     let c = JwksCache::new(Duration::ZERO, Duration::from_millis(1));
@@ -587,7 +577,6 @@ fn a_caller_past_the_ceiling_never_serves_keys_past_the_ceiling() {
 }
 
 /// A cold caller that waited on a fetch which then FAILED re-checks the rate limit when it
-
 #[test]
 fn a_waiter_whose_fetch_failed_fails_closed_inside_the_rate_limit() {
     let c = JwksCache::new(Duration::from_secs(60), Duration::from_millis(1));
@@ -637,7 +626,6 @@ fn a_fetch_running_to_its_own_timeout_is_not_taken_over() {
 }
 
 /// A flight whose op never came back (cancelled, faulted) is abandoned after 1.5.5's fetch bound:
-
 #[test]
 fn an_abandoned_flight_is_taken_over_after_the_fetch_bound() {
     let c = JwksCache::new(Duration::from_millis(1), Duration::from_secs(3600));
@@ -668,7 +656,6 @@ fn an_abandoned_flight_is_taken_over_after_the_fetch_bound() {
 }
 
 /// A call on no ticket may not pend: it neither claims a fetch (which would hold the rate-limit
-
 #[test]
 fn a_ticketless_caller_never_claims_or_waits() {
     let c = JwksCache::new(Duration::from_secs(60), Duration::from_secs(3600));
@@ -702,7 +689,6 @@ fn a_ticketless_caller_never_claims_or_waits() {
 }
 
 /// An abandoned single flight (its owner pended and never re-entered) must not keep the rate-limit
-
 #[test]
 fn an_abandoned_flight_does_not_keep_the_rate_limit_window_shut_for_a_cold_caller() {
     let c = JwksCache::new(Duration::from_secs(60), Duration::from_secs(3600));

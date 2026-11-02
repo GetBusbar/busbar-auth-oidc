@@ -85,7 +85,6 @@ fn a_google_style_discovery_on_public_hosts_loads() {
 }
 
 /// The module passes a discovered HTTPS key URL to the host unchanged, including off-host
-
 #[test]
 fn a_discovered_jwks_uri_reaches_the_guard_with_a_path_free_refusal() {
     for jwks_uri in [
@@ -117,7 +116,6 @@ fn a_discovered_jwks_uri_reaches_the_guard_with_a_path_free_refusal() {
 }
 
 /// Discovered token endpoints retain their module scheme check and host-guard refusal text.
-
 #[test]
 fn a_discovered_token_endpoint_preserves_host_guard_and_scheme_boundaries() {
     let why = guard_refusal("https://192.168.1.10/token");
@@ -173,7 +171,6 @@ fn a_discovered_token_endpoint_preserves_host_guard_and_scheme_boundaries() {
 }
 
 /// A refused IdP fetch is AUDITED. The Statement declares `BUSBAR-4031` (a
-
 #[test]
 fn a_refused_idp_fetch_is_audited() {
     assert_eq!(STATEMENT.diag_ids_len(), DIAG_NAMES.len());

@@ -49,7 +49,6 @@ impl KeyError {
 }
 
 /// A JWKS cache. Holds the last-fetched key set, the timestamps that bound refresh and the fetch in
-
 pub struct JwksCache {
     /// Minimum gap between fetch ATTEMPTS — the bound on every refetch trigger (cold, TTL-stale,
     min_refetch_interval: Duration,
@@ -91,7 +90,6 @@ impl JwksCache {
     }
 
     /// Run `f` against the key matching `kid`, the JWKS fetched from `url` through `io`. If the
-
     pub fn with_key<T>(
         &self,
         url: &str,
@@ -104,7 +102,6 @@ impl JwksCache {
     }
 
     /// [`Self::with_key`] for a token signed with `alg`: a token naming NO kid (`kid` empty) is
-
     pub fn with_key_for<T>(
         &self,
         url: &str,
@@ -168,7 +165,6 @@ impl JwksCache {
     }
 
     /// THE WARM-UP (`ready`, at boot): fetch the key set once when the cache holds none, so the
-
     pub fn warm(&self, url: &str, now: Instant, io: &mut dyn Fetch) -> Step<Result<(), String>> {
         let mine = self.lock().flight.filter(|(fl, _)| fl.mine(io.caller()));
         if let Some((flight, _)) = mine {
@@ -184,7 +180,6 @@ impl JwksCache {
     }
 
     /// THE TICK'S REFRESH AHEAD OF THE TTL: when the set is due (none yet, or within `lead` of its
-
     pub fn refresh_ahead(
         &self,
         url: &str,
@@ -208,7 +203,6 @@ impl JwksCache {
     }
 
     /// Whether the set is due for its refresh at `now`: none fetched, or `lead` or less short of
-
     fn due(&self, now: Instant, lead: Duration) -> bool {
         self.lock()
             .fetched_at
@@ -216,7 +210,6 @@ impl JwksCache {
     }
 
     /// The lookup after the bounded rotation refetch: a match, or the unknown-`kid` error — a
-
     fn after_rotation<T>(
         &self,
         keys: Option<&JwkSet>,
@@ -252,7 +245,6 @@ impl JwksCache {
     }
 
     /// Try `f` against every key in `set` selected for `kid` and `alg` ([`JwkSet::select`]),
-
     fn try_all<T>(
         set: &JwkSet,
         kid: &str,
@@ -270,7 +262,6 @@ impl JwksCache {
     }
 
     /// Snapshot the cached set, whether it is past TTL, and whether it is past the absolute staleness
-
     fn snapshot(&self, now: Instant) -> (Option<Arc<JwkSet>>, bool, bool) {
         self.snapshot_of(&self.lock(), now)
     }
@@ -285,7 +276,6 @@ impl JwksCache {
     }
 
     /// Bring the cache up to date if the rate limit allows, and answer the current key set.
-
     fn refresh(
         &self,
         io: &mut dyn Fetch,
@@ -346,7 +336,6 @@ impl JwksCache {
     }
 
     /// The fetch claimed at `at` answered `fetched`: install a parsed set, or keep the previous keys
-
     fn settle(
         &self,
         io: &dyn Fetch,
@@ -414,7 +403,6 @@ impl JwksCache {
     }
 
     /// Whether a fetch ATTEMPT is allowed now. Anchored on the last attempt (not the last success),
-
     fn permits_attempt(&self, inner: &Inner, now: Instant) -> bool {
         match inner.last_attempt {
             None => true,
@@ -430,7 +418,6 @@ impl JwksCache {
     }
 
     /// Return the currently cached keys, but ONLY if they are within the absolute staleness ceiling
-
     fn serve_within_ceiling(
         &self,
         inner: &Inner,
@@ -451,7 +438,6 @@ impl JwksCache {
     }
 
     /// Take the data lock, recovering from poisoning rather than failing auth: the guarded data is a
-
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
         self.inner.lock().unwrap_or_else(|p| p.into_inner())
     }

@@ -23,14 +23,12 @@ use busbar_contract::abi::sdk::net::{
 use busbar_contract::auth::LoginHttpResponse;
 
 /// Upper bound on a JWKS / discovery document, and on a token endpoint's answer. A real JWKS is a
-
 pub const MAX_JWKS_BYTES: usize = 1024 * 1024;
 
 /// Upper bound on a token endpoint's answer: a token response is a few KiB of JSON.
 pub const MAX_TOKEN_BYTES: usize = 256 * 1024;
 
 /// The most bytes of an answer read on `need`: [`MAX_TOKEN_BYTES`] for the token exchange,
-
 pub const fn reply_cap(need: u32) -> usize {
     if need == NEED_TOKEN {
         MAX_TOKEN_BYTES
@@ -40,7 +38,6 @@ pub const fn reply_cap(need: u32) -> usize {
 }
 
 /// The bound on one request, milliseconds: 10s. Generous enough for a cold
-
 pub const FETCH_TIMEOUT_MS: u64 = 10_000;
 
 /// The need the discovery document is fetched on (its index in [`NEEDS`], anchored set).
@@ -50,7 +47,6 @@ pub const NEED_JWKS: u32 = 1;
 /// The need the login's token exchange is made on (anchored set).
 pub const NEED_TOKEN: u32 = 2;
 /// Where the PUBLIC set starts in [`NEEDS`]: its needs are the anchored set's, in the same order,
-
 pub const PUBLIC: u32 = 3;
 
 /// The setting the discovery need's target comes from (a config path the host reads).
@@ -59,15 +55,12 @@ const ISSUER_PATH: &str = "settings.issuer";
 const CA_CERT_PATH: &str = "settings.ca_cert_pem";
 
 /// The egress class of the discovery and JWKS needs: `open-web`, over TLS only, a private, loopback
-
 pub const DOCUMENT_CLASS: u32 = EGRESS_OPEN_WEB;
 
 /// The egress class of the token exchange's need: the connector's default class, a private,
-
 pub const TOKEN_CLASS: u32 = EGRESS_DEFAULT;
 
 /// One outbound need over the `http` transport (the scheme the http framer claims) in `class`,
-
 const fn need(class: u32, target_from: AbiStr, trust_from: AbiStr) -> Need {
     Need {
         direction: DIRECTION_OUTBOUND,
@@ -88,7 +81,6 @@ const fn need(class: u32, target_from: AbiStr, trust_from: AbiStr) -> Need {
 }
 
 /// THE NEEDS, in index order: the ANCHORED set (trusting `ca_cert_pem`), then the PUBLIC set
-
 pub const NEEDS: &[Need] = &[
     need(DOCUMENT_CLASS, abi_str(ISSUER_PATH), abi_str(CA_CERT_PATH)),
     need(DOCUMENT_CLASS, AbiStr::ABSENT, abi_str(CA_CERT_PATH)),
@@ -99,7 +91,6 @@ pub const NEEDS: &[Need] = &[
 ];
 
 /// The need index `need` (an anchored-set index) goes out on: itself for a module that trusts an
-
 pub const fn on(need: u32, anchored: bool) -> u32 {
     if anchored {
         need
@@ -127,41 +118,33 @@ impl Doc {
 }
 
 /// THE MODULE'S I/O SEAM: one request, answered `Pending` while it is in flight and asked again
-
 pub trait Fetch {
     /// The op making the requests: the owner of any fetch it claims. `None` when the call runs on
-
     fn caller(&self) -> Option<Ticket>;
 
     /// GET `doc` at `url`: the body of a 2xx answer, or the error text ([`document`],
-
     fn get(&mut self, doc: Doc, url: &str) -> Poll<Result<String, String>>;
 
     /// A request to `url` this op would have to make, or wait on, but cannot: it runs on no ticket
-
     fn cannot_pend(&mut self, url: &str) -> String {
         failed(url, ConnFailure::NoTicket)
     }
 
     /// Wake the ops `waiters` names: they answered PENDING waiting on a fetch this caller made,
-
     fn wake(&self, waiters: &[Ticket]) {
         let _ = waiters;
     }
 
     /// A request this op would make was REFUSED, `why` naming the host and the rule ([`refusal`]):
-
     fn refused(&mut self, why: &str) {
         let _ = why;
     }
 
     /// The login token exchange, made by the plugin itself (an IdP login holds its own client
-
     fn post(&mut self, url: &str, form: &FormBody) -> Poll<Result<LoginHttpResponse, String>>;
 }
 
 /// Whether a request on `need` may go to `url` in plaintext: never for discovery or the JWKS; for
-
 pub fn plaintext_allowed(need: u32, url: &str) -> bool {
     need == NEED_TOKEN
         && scheme_is(url, "http")
@@ -172,13 +155,11 @@ pub fn plaintext_allowed(need: u32, url: &str) -> bool {
 pub const REFUSED: &str = "oidc: IdP destination refused";
 
 /// THE REFUSAL'S WORDS: the fixed prefix, the URL's host and the rule. Never the URL's path or query
-
 pub fn refusal(host: &str, rule: &str) -> String {
     format!("{REFUSED}: host '{}' {rule}", crate::untrusted(host))
 }
 
 /// The host `url` names, as the URL client reads it (brackets kept on an IPv6 literal); `?` when it
-
 pub fn host_of(url: &str) -> String {
     url::Url::parse(url)
         .ok()
@@ -192,13 +173,11 @@ const GUARD_RULE: &str = "was refused by the destination guard: an identity prov
      advanced.allow_destinations names it, and cloud metadata is refused always";
 
 /// The words of the destination guard's refusal of a request to `url` (the connector answered
-
 pub fn guard_refusal(url: &str) -> String {
     refusal(&host_of(url), GUARD_RULE)
 }
 
 /// `url` as an error or a log line names it: userinfo removed, then the existing untrusted-string
-
 pub fn shown(url: &str) -> String {
     let scrubbed = match url::Url::parse(url) {
         Ok(mut u) if !u.username().is_empty() || u.password().is_some() => {
@@ -228,7 +207,6 @@ pub fn failed(url: &str, why: impl Display) -> String {
 }
 
 /// A GET's answer as the document it carries: a non-2xx status is refused naming the status as
-
 pub fn document(url: &str, status: u16, body: Vec<u8>) -> Result<String, String> {
     document_for(NEED_JWKS, url, status, body)
 }
@@ -265,7 +243,6 @@ fn body_name(need: u32) -> &'static str {
 }
 
 /// `body` as text, refusing anything over `cap` bytes or not UTF-8.
-
 pub fn capped(url: &str, body: Vec<u8>, cap: usize) -> Result<String, String> {
     capped_for(NEED_JWKS, url, body, cap)
 }
@@ -308,7 +285,6 @@ pub fn get_request(url: &url::Url) -> Request {
 }
 
 /// The token exchange to `url`: a POST of `form`, which the SDK encodes into the body (the
-
 pub fn post_exchange(url: &url::Url, form: &FormBody) -> Result<Exchange, ConnFailure> {
     let body = form
         .encoded()
@@ -358,7 +334,6 @@ impl std::fmt::Debug for IoState {
 }
 
 /// [`Fetch`] over the host's connector, for ONE entry of one op on `ticket`. Its `Debug` names
-
 pub struct HostIo<'h> {
     host: Option<&'h Host>,
     ticket: Ticket,
@@ -376,7 +351,6 @@ impl std::fmt::Debug for HostIo<'_> {
 
 impl<'h> HostIo<'h> {
     /// The op's requests on `ticket` through `host`'s connector, resumed from `state`, on the
-
     pub fn new(host: Option<&'h Host>, ticket: Ticket, state: IoState, anchored: bool) -> Self {
         Self {
             host,
@@ -389,13 +363,11 @@ impl<'h> HostIo<'h> {
     }
 
     /// The refusals this op met ([`Fetch::refused`]), taken: the door raises each it has not yet
-
     pub fn take_refusals(&mut self) -> Vec<String> {
         std::mem::take(&mut self.refusals)
     }
 
     /// The host's wall clock, unix seconds (`clock.now`), the time a
-
     #[must_use]
     pub fn wall_now(&self) -> i64 {
         let read = self.host.map(|h| h.connector(self.ticket).clock_now());
@@ -409,19 +381,16 @@ impl<'h> HostIo<'h> {
     }
 
     /// Whether the op asked for a request it could not wait on (it runs on no ticket): whatever it
-
     pub fn wanted_io(&self) -> bool {
         self.wanted
     }
 
     /// Whether the op resumed with an exchange of its own still in flight: it must carry that
-
     pub fn in_flight(&self) -> bool {
         self.state.current.is_some()
     }
 
     /// The provider's last retry hint. A new request clears it, so one endpoint's hint cannot
-
     pub(crate) fn retry_after_secs(&self) -> Option<u64> {
         self.state.retry_after_secs
     }
@@ -437,7 +406,6 @@ impl<'h> HostIo<'h> {
     }
 
     /// The https-only exchange `request` builds for `url`, on `need`: resumed when it is the one in
-
     fn run(
         &mut self,
         need: u32,

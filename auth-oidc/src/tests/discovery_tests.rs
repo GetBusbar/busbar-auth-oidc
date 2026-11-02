@@ -99,7 +99,6 @@ fn ready_resolves_the_jwks_url_at_boot_and_an_explicit_one_skips_it() {
 }
 
 /// An op whose fetch answers `Err`, but only after another op has taken over its abandoned flight:
-
 struct TakenOver<'a> {
     a: crate::script::Caller<'a>,
     b: crate::script::Caller<'a>,

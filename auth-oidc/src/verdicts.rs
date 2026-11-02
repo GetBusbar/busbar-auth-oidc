@@ -15,11 +15,9 @@ const MAX_TTL_SECS: u64 = 3600;
 /// The most entries held.
 pub const MAX_ENTRIES: usize = 4096;
 /// The largest serialized identity held. A bigger one is judged afresh. The 4096 × 8 KiB bound
-
 pub const MAX_PRINCIPAL_BYTES: usize = 8 * 1024;
 
 /// Count the serialized identity without allocating a second copy of its strings. Stop at the
-
 fn size_of(p: &Principal) -> usize {
     #[derive(serde::Serialize)]
     struct View<'a> {
@@ -113,7 +111,6 @@ impl VerdictCache {
     }
 
     /// The identity cached for `credential` at UNIX second `now`, with the TTL it has left; an
-
     pub fn get(&self, credential: &str, now: i64) -> Option<Hit> {
         let k = key(credential);
         match self.read().entries.get(&k) {
@@ -135,7 +132,6 @@ impl VerdictCache {
     }
 
     /// Hold `principal`, the identity `credential` verified as at UNIX second `now`, unless a flush
-
     pub fn put(&self, credential: &str, principal: &Principal, now: i64, generation: Generation) {
         let ttl = principal
             .ttl_secs

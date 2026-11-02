@@ -8,11 +8,9 @@ use std::time::{Duration, Instant};
 use busbar_contract::abi::mechanism::ticket::Ticket;
 
 /// How long past its own deadline a fetch's owner may take to re-enter with the answer (the
-
 const FLIGHT_MARGIN_MS: u64 = 5_000;
 
 /// How long one fetch may hold its flight before another caller takes it over: STRICTLY past the
-
 pub const FLIGHT_MAX: Duration =
     Duration::from_millis(crate::fetch::FETCH_TIMEOUT_MS + FLIGHT_MARGIN_MS);
 
@@ -65,7 +63,6 @@ impl Flight {
     }
 
     /// Whether another caller's fetch still holds the flight at `now` (one past [`FLIGHT_MAX`] was
-
     pub fn held_against(&self, me: Option<Ticket>, now: Instant) -> bool {
         !self.mine(me) && now.saturating_duration_since(self.at) < FLIGHT_MAX
     }

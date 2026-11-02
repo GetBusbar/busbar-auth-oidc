@@ -34,7 +34,6 @@ fn module(cfg: &str) -> Result<OidcModule, String> {
 }
 
 /// `module` answers `Result<OidcModule, String>`, and `OidcModule` is not `Debug`, so the standard
-
 fn expect_err(result: Result<OidcModule, String>) -> String {
     match result {
         Ok(_) => panic!("expected open to fail, but it succeeded"),
@@ -116,7 +115,6 @@ fn an_explicit_jwks_url_opens_and_resolves_without_a_request() {
 }
 
 /// A loopback `jwks_url` over plain http OPENS, as 1.5.5 booted it (the oracle's login-hop rig
-
 #[test]
 fn a_loopback_http_jwks_url_opens_with_a_warning() {
     for url in [
@@ -191,7 +189,6 @@ fn a_non_loopback_http_jwks_url_is_refused() {
 }
 
 /// THE SEAM, as implemented: `open` runs on no ticket with no connector, so it fetches nothing; a
-
 #[test]
 fn discovery_runs_on_the_first_op_and_its_failure_fails_that_op() {
     let m =
@@ -277,7 +274,6 @@ fn a_failed_login_discovery_fails_begin_login_with_its_cause() {
 }
 
 /// A mistyped settings value is refused WITHOUT echoing the value: serde's own text quotes it
-
 #[test]
 fn a_mistyped_settings_value_is_refused_without_echoing_it() {
     let err = expect_err(module(

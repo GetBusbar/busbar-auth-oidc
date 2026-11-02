@@ -33,7 +33,6 @@ pub enum KeyMaterial {
 
 impl KeyMaterial {
     /// Decode a key's material from its base64url fields, selected by `kty`. Never fails — a decode
-
     fn from_jwk(jwk: &Jwk) -> Self {
         match jwk.kty.as_str() {
             "RSA" => {
@@ -126,7 +125,6 @@ pub struct Jwk {
 
 impl Jwk {
     /// Whether this key may verify a token signed with `alg`: the key type `alg` needs (`RS256`:
-
     pub fn signs(&self, alg: &str) -> bool {
         let kty = match alg {
             "RS256" => "RSA",
@@ -143,7 +141,6 @@ impl Jwk {
     }
 
     /// The decoded, verify-ready key material for this key — decoded once, then memoised, so the hot
-
     pub fn material(&self) -> &KeyMaterial {
         self.decoded.get_or_init(|| KeyMaterial::from_jwk(self))
     }
@@ -169,7 +166,6 @@ struct RawSet {
 
 impl JwkSet {
     /// Parse a JWKS document (the body of a `jwks_uri` GET). Entries that are not usable JWKs are
-
     pub fn parse(body: &str) -> Result<Self, String> {
         let raw: RawSet = serde_json::from_str(body).map_err(
             busbar_contract::abi::sdk::auth_kit::json_error("invalid JWKS document"),
@@ -201,7 +197,6 @@ impl JwkSet {
     }
 
     /// The keys a token naming `kid`, signed with `alg`, is tried against: every key whose `kid`
-
     pub fn select<'a>(&'a self, kid: &'a str, alg: Option<&str>) -> Vec<&'a Jwk> {
         match alg {
             Some(alg) if kid.is_empty() => {
@@ -217,7 +212,6 @@ impl JwkSet {
     }
 
     /// Find ALL keys whose `kid` matches `kid`. A JWT header names the `kid` that signed it; selecting
-
     pub fn find_all<'a>(&'a self, kid: &'a str) -> impl Iterator<Item = &'a Jwk> {
         self.keys
             .iter()
@@ -234,7 +228,6 @@ mod tests {
     }
 
     /// A well-formed JWKS carrying zero keys must be an ERROR. It parses cleanly, so without this
-
     #[test]
     fn an_empty_key_set_is_an_error_not_an_empty_success() {
         let err = JwkSet::parse(r#"{"keys":[]}"#)
@@ -264,7 +257,6 @@ mod tests {
     }
 
     /// A non-empty queried `kid` that matches NO key must never fall through to a keyless
-
     #[test]
     fn find_all_does_not_fall_back_to_a_keyless_key_for_a_nonempty_unmatched_kid() {
         let s = set(r#"{"keys":[

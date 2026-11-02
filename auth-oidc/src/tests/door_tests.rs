@@ -34,7 +34,6 @@ fn verify(oidc: &Oidc, idp: &Idp, token: &str) -> AuthVerdict {
 }
 
 /// The host lends one entry per secret reference, a missing one as EMPTY bytes (plugin-loader
-
 #[test]
 fn an_empty_lent_secret_refresh_keeps_the_module_and_its_key_set() {
     let key = TestKey::generate("k1");
@@ -68,7 +67,6 @@ fn an_empty_lent_secret_refresh_keeps_the_module_and_its_key_set() {
 }
 
 /// `abi::auth`: "an auth plugin DROPS its inbound cache on every `refresh`" and reports how many
-
 #[test]
 fn refresh_drops_the_verdict_cache_and_reports_its_count() {
     let key = TestKey::generate("k1");
@@ -149,7 +147,6 @@ fn validate_answers_a_jwks_url_as_open_does() {
 }
 
 /// `validate` accepts a loopback http `jwks_url` as `open` does: a config `--validate` passes is
-
 #[test]
 fn validate_accepts_a_loopback_http_jwks_url_as_open_does() {
     let loopback = serde_json::json!({
@@ -163,7 +160,6 @@ fn validate_accepts_a_loopback_http_jwks_url_as_open_does() {
 }
 
 /// A nonce mismatch answers the security-check verdict AND says so in the plugin's log, with no
-
 #[test]
 fn a_nonce_mismatch_is_logged() {
     use base64::Engine as _;
@@ -229,7 +225,6 @@ fn a_kept_identity_serves_only_its_own_state_and_code() {
 }
 
 /// A full short-answer map makes room by dropping its OLDEST entry only: every other identity a
-
 #[test]
 fn a_full_reached_map_evicts_only_the_oldest() {
     let at = |n: u32| u64::from(n) * 1_000_000;
@@ -287,7 +282,6 @@ fn a_kept_identity_older_than_ten_minutes_goes() {
 }
 
 /// A blank `issuer` or `audience` is REFUSED at `validate` and at `open`, FAILED and naming the
-
 #[test]
 fn a_blank_issuer_or_audience_is_refused_naming_the_key() {
     for (key, blank) in [
@@ -315,7 +309,6 @@ fn a_blank_issuer_or_audience_is_refused_naming_the_key() {
 }
 
 /// BIND-AUDIT: a plain http `jwks_url` raises the diagnostic the Statement declares,
-
 #[test]
 fn a_plain_http_jwks_url_raises_its_declared_diagnostic() {
     let plain = serde_json::json!({
@@ -533,7 +526,6 @@ fn a_refresh_rediscovers_the_issuer_s_document() {
 }
 
 /// A short-answer lease owns its cursor and callback identity. Lifecycle cleanup cannot leave
-
 #[test]
 fn short_login_cursor_cleanup_owns_only_its_continuation() {
     for cleanup in ["release", "cancel", "retire"] {

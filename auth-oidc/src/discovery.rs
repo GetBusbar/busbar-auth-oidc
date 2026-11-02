@@ -23,7 +23,6 @@ pub fn discovery_url(cfg: &OidcConfig) -> String {
 }
 
 /// The discovery document `fetched` from `url`, validated against `cfg`'s issuer.
-
 pub fn check_document(
     cfg: &OidcConfig,
     url: &str,
@@ -53,7 +52,6 @@ pub fn check_document(
 }
 
 /// How long a fetched document is held before the issuer is asked again: an IdP that moves its
-
 pub const REDISCOVER: Duration = Duration::from_secs(24 * 3600);
 
 /// Where the document stands.
@@ -93,7 +91,6 @@ impl Discovery {
     }
 
     /// Have the document asked for again at its next use (a `refresh`), the one held serving
-
     pub fn expire(&self) {
         if let State::Done { due, .. } = &mut self.lock().0 {
             *due = None;
@@ -101,7 +98,6 @@ impl Discovery {
     }
 
     /// The validated document of `cfg`'s issuer, fetched through `io` when nobody has yet, or
-
     pub fn document(
         &self,
         cfg: &OidcConfig,

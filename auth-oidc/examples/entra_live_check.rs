@@ -10,7 +10,6 @@ use std::task::Poll;
 use std::time::Instant;
 
 /// The module's requests, made at once by a blocking client (the plugin's host makes them through
-
 struct Blocking(reqwest::blocking::Client);
 
 impl Fetch for Blocking {

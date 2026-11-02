@@ -9,7 +9,6 @@ use serde::Deserialize;
 use serde_json::Value;
 
 /// The two JWS algorithms this verifier accepts — the ones OIDC IdPs actually sign ID/access tokens
-
 const ALG_RS256: &str = "RS256";
 const ALG_ES256: &str = "ES256";
 
@@ -32,7 +31,6 @@ pub struct Header {
 }
 
 /// The three base64url segments of a compact JWS, plus the signing input (`header.payload`) the
-
 pub struct Parts<'a> {
     /// The decoded JOSE header.
     pub header: Header,
@@ -45,7 +43,6 @@ pub struct Parts<'a> {
 }
 
 /// The decoded PAYLOAD of what reads as a compact JWS (exactly three dot-separated segments, the
-
 pub fn payload(token: &str) -> Option<Vec<u8>> {
     let mut it = token.split('.');
     match (it.next(), it.next(), it.next(), it.next()) {
@@ -55,7 +52,6 @@ pub fn payload(token: &str) -> Option<Vec<u8>> {
 }
 
 /// Split and base64url-decode a compact JWT (`header.payload.signature`), decoding the header enough
-
 pub fn split(token: &str) -> Result<Parts<'_>, String> {
     let mut it = token.split('.');
     let (h, p, s) = match (it.next(), it.next(), it.next(), it.next()) {
@@ -86,7 +82,6 @@ pub fn split(token: &str) -> Result<Parts<'_>, String> {
 }
 
 /// Verify the JWS signature of `parts` against the JWKS key `key`, enforcing that the token's `alg`
-
 pub fn verify_signature(parts: &Parts, key: &Jwk) -> Result<(), String> {
     if let Some(crit) = &parts.header.crit {
         if !crit.is_empty() {
@@ -204,7 +199,6 @@ mod tests {
     use super::*;
 
     /// A JWT header field of the wrong type is refused WITHOUT echoing its value: the header comes
-
     #[test]
     fn a_mistyped_header_field_is_refused_without_echoing_it() {
         let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"ES256","kid":12345678}"#);
@@ -217,7 +211,6 @@ mod tests {
     }
 
     /// RFC 7517 §4.2: a JWK explicitly marked `"use": "enc"` (encryption-only — e.g. published
-
     #[test]
     fn verify_signature_rejects_an_encryption_only_key() {
         let key = Jwk {
@@ -256,7 +249,6 @@ mod tests {
     }
 
     /// The RS256/RSA-kty guard, mirroring `verify_signature_permits_a_signing_key_to_reach_key_material_checks`
-
     #[test]
     fn verify_signature_permits_a_matching_rsa_key_to_reach_key_material_checks() {
         let key = Jwk {
@@ -296,7 +288,6 @@ mod tests {
     }
 
     /// A `"use": "sig"` key (the ordinary case) passes the use-policy check — it reaches (and fails
-
     #[test]
     fn verify_signature_permits_a_signing_key_to_reach_key_material_checks() {
         let key = Jwk {

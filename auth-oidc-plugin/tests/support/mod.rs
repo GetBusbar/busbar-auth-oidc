@@ -53,7 +53,6 @@ pub fn z<T>() -> T {
 }
 
 /// ONE DISPATCHER AT A TIME in a test process. The loader keeps a ticketed service's answer for
-
 pub fn serial() -> std::sync::MutexGuard<'static, ()> {
     static ONE: Mutex<()> = Mutex::new(());
     ONE.lock()
@@ -61,11 +60,9 @@ pub fn serial() -> std::sync::MutexGuard<'static, ()> {
 }
 
 /// The host services a test host serves: the kernel's one clock (what an op waiting on another's
-
 pub struct Clock;
 
 /// How many times an op read the host's clock: once per PENDING answer that waits on another op's
-
 static CLOCK_READS: AtomicU32 = AtomicU32::new(0);
 
 static CLOCK_MONO: Mutex<Option<u64>> = Mutex::new(None);
@@ -122,7 +119,6 @@ pub struct Sent {
 }
 
 /// THE DECLARED NEEDS AND THEIR TARGETS: `(need index, the URL the operator's config names for
-
 pub fn declared_targets(base: u32) -> Vec<(u32, String)> {
     vec![
         (
@@ -135,7 +131,6 @@ pub fn declared_targets(base: u32) -> Vec<(u32, String)> {
 }
 
 /// Every request in `sent` that is NOT on a declared need index (`< needs`) or whose target is not
-
 pub fn strays(sent: &[Sent], needs: u32, allowed: &[(u32, String)]) -> Vec<String> {
     sent.iter()
         .filter_map(|s| {
@@ -168,7 +163,6 @@ struct Response {
 }
 
 /// THE IdP: every need framed; an open is the whole request (kept in `sent`), answered by its path
-
 pub struct Idp {
     wake: Mutex<Option<Wake>>,
     /// `(connection, the waking ticket)` of every first read: which op made each request.
@@ -192,7 +186,6 @@ pub struct Idp {
 }
 
 /// The envelope sink a bound door reports into: its declared diagnostics, kept on the IdP the
-
 struct Recorder(Arc<Idp>);
 
 impl EnvelopeSink for Recorder {
@@ -212,7 +205,6 @@ impl EnvelopeSink for Recorder {
 
 impl Idp {
     /// The IdP of `ISSUER`, signing with `key`: its discovery document (naming its JWKS, authorize
-
     pub fn new(key: &Issuer) -> Arc<Self> {
         let idp = Arc::new(Self {
             wake: Mutex::new(None),
@@ -619,7 +611,6 @@ pub enum Arm<'a> {
 }
 
 /// One door bound to a dispatcher serving the host's clock and to the IdP `idp` as its connection
-
 pub struct Bound {
     pub dispatcher: Arc<Dispatcher>,
     pub idp: Arc<Idp>,
@@ -731,7 +722,6 @@ fn identity(out: &IdentifyOut, bytes: &[u8], groups: &[Span]) -> String {
 }
 
 /// `open` `p` over `settings`, lending `secret` as its one secret; the operator's text for a
-
 pub fn open(p: &Plugin<Auth>, settings: &str, secret: Option<&str>) -> Result<(), String> {
     let secrets: Vec<Blob> = secret
         .iter()
@@ -778,7 +768,6 @@ impl Bound {
     }
 
     /// One identity op (`verify`, `complete_login`) on a fresh ticket, with host buffers of `cap`
-
     fn identify<I: InFrame>(
         &self,
         op: u32,
@@ -853,7 +842,6 @@ impl Bound {
     }
 
     /// `begin_login` for the core's `state`, `challenge` and `nonce`: the authorize URL, or the
-
     pub fn begin(&self, redirect: &str, state: &str, challenge: &str, nonce: &str) -> String {
         let mut i: BeginLoginIn = z();
         i.head = in_head();
@@ -929,7 +917,6 @@ pub fn verify_in(credential: Option<&str>, out_buf: IdentityBuf) -> VerifyIn {
 }
 
 /// [`verify_in`] with the request's facts stating `timestamp` (unix seconds): the host's clock as
-
 pub fn verify_in_at(credential: Option<&str>, out_buf: IdentityBuf, timestamp: u64) -> VerifyIn {
     let mut i: VerifyIn = z();
     i.request.timestamp = timestamp;
@@ -975,7 +962,6 @@ pub fn verify_ticketless(p: &Plugin<Auth>, credential: Option<&str>) -> String {
 }
 
 /// A `verify` of the raw `credential` bytes made with NO ticket: `(verdict, decision, strip_len)`,
-
 pub fn verify_ticketless_raw(
     p: &Plugin<Auth>,
     credential: &[u8],

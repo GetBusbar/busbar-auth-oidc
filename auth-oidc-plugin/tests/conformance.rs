@@ -64,7 +64,6 @@ fn cdylib() -> Vec<u8> {
 }
 
 /// The manifest the packer signs for the module as `kind`, stating the Statement rendering
-
 fn manifest(kind: &str, statement: &[u8]) -> Manifest {
     Manifest {
         name: NAME.into(),
@@ -92,7 +91,6 @@ fn manifest(kind: &str, statement: &[u8]) -> Manifest {
 }
 
 /// `lib` signed first-party under `manifest` into a fresh `plugins/` directory, scanned under a
-
 fn scanned(tag: &str, manifest: Manifest, lib: &[u8]) -> PluginRegistry {
     let dir = std::env::temp_dir().join(format!("auth-oidc-conf-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -134,7 +132,6 @@ fn admitted(registry: &PluginRegistry) -> (Vec<u8>, Vec<u8>) {
 }
 
 /// The operator config: only the issuer and the audience (the JWKS url and both login endpoints
-
 fn config(audience: &str) -> String {
     serde_json::json!({
         "issuer": ISSUER,
@@ -146,7 +143,6 @@ fn config(audience: &str) -> String {
 }
 
 /// The same config with NO extra trusted root (`ca_cert_pem` is optional, as in 1.5.5): the
-
 fn config_public(audience: &str) -> String {
     let mut cfg: serde_json::Value = serde_json::from_str(&config(audience)).unwrap();
     cfg.as_object_mut().unwrap().remove("ca_cert_pem");
@@ -163,7 +159,6 @@ struct Tokens {
 }
 
 /// The nonce the core minted at `begin` (in the login cookie), handed to `complete_login`; every
-
 const NONCE: &str = "conformance-nonce";
 
 fn claims(aud: &str) -> serde_json::Value {
@@ -197,7 +192,6 @@ fn tokens(key: &Issuer) -> Tokens {
 }
 
 /// A signed audience must still have the JWT string-or-array-of-strings shape. Exercise the
-
 #[test]
 fn signed_mixed_type_audiences_are_refused_by_both_doors_and_login_modes() {
     let _one = support::serial();
@@ -281,7 +275,6 @@ fn signed_mixed_type_audiences_are_refused_by_both_doors_and_login_modes() {
 }
 
 /// What one door does with the module opened under `cfg`, against its own IdP, as one comparable
-
 fn transcript(b: &Bound, cfg: &str, t: &Tokens) -> Vec<String> {
     let id_token = |token: &str| serde_json::json!({ "id_token": token }).to_string();
     let callback = |code: &str, cap| b.complete(code, ("st", NONCE), REDIRECT, "the-verifier", cap);
@@ -333,7 +326,6 @@ fn transcript(b: &Bound, cfg: &str, t: &Tokens) -> Vec<String> {
 }
 
 /// The OIDC module behaves as ONE module through either door, every request through the host's
-
 #[test]
 fn the_linked_and_the_dropped_in_oidc_module_are_one_module() {
     let _one = support::serial();
@@ -631,7 +623,6 @@ fn simultaneous_cold_verifies_make_one_discovery_and_one_jwks_request() {
 }
 
 /// Two cold verifies on one instance; the second submitted once the first pended (`staggered`) or
-
 fn cold_verifies(staggered: bool) {
     let _one = support::serial();
     let key = Issuer::start(UNUSED_ISSUER, KID);
@@ -694,7 +685,6 @@ fn cold_verifies(staggered: bool) {
 }
 
 /// A discovery reply far past the 1 MiB cap names the document and stops reading at the cap,
-
 #[test]
 fn red_an_oversized_reply_is_cut_off_at_the_cap_not_buffered_whole() {
     let _one = support::serial();
@@ -741,7 +731,6 @@ fn a_non_utf8_discovery_reply_names_the_document_without_echoing_the_body() {
 }
 
 /// THE STATUS IS JUDGED BEFORE THE BODY, as 1.5.5 judged it: a non-2xx discovery reply with a body
-
 #[test]
 fn red_an_oversized_error_reply_names_its_status_and_is_cut_off_at_the_cap() {
     let _one = support::serial();
@@ -1087,7 +1076,6 @@ fn a_token_s_expiry_is_judged_at_the_request_s_timestamp() {
 }
 
 /// A `verify` of `token` submitted on its own ticket and left in flight; the closure waits for
-
 fn verify_in_flight<'b>(b: &'b Bound, token: &str) -> impl FnOnce() -> String + 'b {
     let bytes: &'static mut [u8] = Box::leak(vec![0_u8; IDENTITY_BUF_BYTES].into_boxed_slice());
     let groups: &'static mut [Span] =
@@ -1129,7 +1117,6 @@ fn until_pended(idp: &Idp, n: u32) {
 }
 
 /// Replace the settings and secret through the existing lifecycle Door while another op is
-
 fn refresh_pending(b: &Bound, settings: &str) {
     use busbar_contract::abi::mechanism::call::{Blob, BLOB_JSON, BLOB_OCTETS};
     use busbar_contract::abi::mechanism::lifecycle::{slot as life, RefreshIn};
@@ -1170,7 +1157,6 @@ fn until_read_held(idp: &Idp) {
 }
 
 /// Change issuer, audience, client, endpoints, secret and CA selection together. Old operations
-
 fn replacement_config() -> String {
     serde_json::json!({
         "issuer": "https://replacement.conformance.example",
@@ -1745,7 +1731,6 @@ fn ready_and_tick_release_held_connections_on_cancel_or_refresh() {
 }
 
 /// A refresh can finish while a driver is inside a host call. The old exchange must not be
-
 #[test]
 fn executing_driver_does_not_repark_an_exchange_after_successful_refresh() {
     use busbar_contract::abi::mechanism::call::{Blob, BLOB_JSON};

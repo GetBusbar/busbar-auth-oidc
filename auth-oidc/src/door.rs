@@ -46,7 +46,6 @@ use crate::{OidcModule, Step};
 pub const NAME: &str = "busbar-auth-oidc";
 
 /// The auth tail: it verifies and it logs in through a redirect to the IdP; its verdicts may be
-
 const TAIL: AuthTail = AuthTail {
     caps: CAP_INBOUND | CAP_LOGIN,
     login_kind: LOGIN_KIND_REDIRECT,
@@ -54,14 +53,12 @@ const TAIL: AuthTail = AuthTail {
 };
 
 /// The settings key whose value is the confidential-client secret's reference: the kernel
-
 const SECRET_REFS: &[AbiStr] = &[abi_str("client_secret")];
 
 /// The name an operator's config calls the module by.
 const REWRITES: &[Rewrite] = &[alias("oidc")];
 
 /// The metric families `refresh`'s envelope indexes into: the verdict cache's flush count
-
 const FAMILIES: &[MetricFamily] = &[MetricFamily {
     name: abi_str(METRIC_CACHE_FLUSHED),
     help: abi_str("inbound verdict cache entries dropped by refresh"),
@@ -76,15 +73,12 @@ const FAMILIES: &[MetricFamily] = &[MetricFamily {
 pub const CACHE_FAMILY: u32 = 0;
 
 /// The diagnostics this plugin declares, in index order: the ids its envelopes report and the host
-
 pub const DIAG_NAMES: &[&str] = &["BUSBAR-4031", "BUSBAR-4032"];
 
 /// The declared diagnostic a refused IdP destination raises ([`raise_refusals`]): the module's own
-
 pub const DIAG_DESTINATION_REFUSED: u32 = 0;
 
 /// The declared diagnostic a plain http `jwks_url` raises at warn on the `open` or `refresh` that
-
 pub const DIAG_JWKS_PLAIN_HTTP: u32 = 1;
 
 /// [`DIAG_NAMES`] as the Statement carries them.
@@ -98,7 +92,6 @@ const DECLARES_EXTENSION: [u8; extensions::entry_len(EXT_DECLARES, DECLARES)] =
     extensions::entry(EXT_DECLARES, DECLARES);
 
 /// This plugin's Statement: its name and alias, its version, the most calls one instance holds in
-
 pub const STATEMENT: Statement = Statement {
     extensions: Blob {
         ptr: DECLARES_EXTENSION.as_ptr(),
@@ -122,7 +115,6 @@ pub const STATEMENT: Statement = Statement {
 };
 
 /// EVERY REFUSED IdP DESTINATION IS AUDITED: each refusal the op met (`io`'s, [`HostIo::take_refusals`])
-
 fn raise_refusals<O: AbiOut>(module: &OidcModule, io: &mut HostIo<'_>, out: &mut Out<'_, O>) {
     for why in io.take_refusals() {
         if module.first_report(&why) {
@@ -136,7 +128,6 @@ fn raise_refusals<O: AbiOut>(module: &OidcModule, io: &mut HostIo<'_>, out: &mut
 const REACHED_MAX: usize = 1024;
 
 /// How long a short answer is kept for its re-call: an older one (its host never came back for
-
 const REACHED_TTL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
 /// Drop every kept answer older than [`REACHED_TTL`] at `now`.
@@ -145,7 +136,6 @@ fn expire(map: &mut HashMap<Ticket, Reached>, now: u64) {
 }
 
 /// The short-answer cache uses the host's monotonic clock. An unreadable clock permits neither
-
 fn reached_now(host: Option<&Host>, ticket: Ticket) -> Option<u64> {
     match host?.connector(ticket).clock_now() {
         Poll::Ready(Ok(reading)) => Some(reading.mono_ns),
@@ -154,11 +144,9 @@ fn reached_now(host: Option<&Host>, ticket: Ticket) -> Option<u64> {
 }
 
 /// The BACKSTOP of an op waiting on another op's fetch, nanoseconds on the host's monotonic clock:
-
 const WAIT_NS: u64 = FLIGHT_MAX.as_nanos() as u64;
 
 /// The client secret `secrets` lends: its first entry, an empty one being none (the host lends an
-
 fn lent_secret(secrets: &[&[u8]]) -> Option<Cred> {
     secrets
         .first()
@@ -194,7 +182,6 @@ impl Opened {
     }
 
     /// The callback's code exchanged at the token endpoint (once: the answer is kept in `answer`
-
     fn login(
         &self,
         code: Option<&str>,
@@ -266,7 +253,6 @@ enum Login {
 }
 
 /// An identity `complete_login` reached but could not fit into the host's buffer, kept for the
-
 struct Reached {
     /// When it was kept on the host's monotonic clock: at the cap the oldest goes ([`keep`]).
     at: u64,
@@ -277,7 +263,6 @@ struct Reached {
 
 impl Reached {
     /// Whether it was kept for the callback naming `state` and `code`: both compared in constant
-
     fn serves(&self, state: &[u8], code: &[u8]) -> bool {
         let state = self.state == cred::Held::new(state.to_vec());
         let code = self.code == cred::Held::new(code.to_vec());
@@ -286,7 +271,6 @@ impl Reached {
 }
 
 /// Keep `r` for `ticket`'s re-call, at most `max` at once: entries past [`REACHED_TTL`] go, and at
-
 fn keep(map: &mut HashMap<Ticket, Reached>, max: usize, ticket: Ticket, r: Reached) {
     expire(map, r.at);
     if map.len() >= max && !map.contains_key(&ticket) {
@@ -308,7 +292,6 @@ type LoginCursors = Mutex<HashMap<Ticket, LoginCursor>>;
 type ReachedMap = Mutex<HashMap<Ticket, Reached>>;
 
 /// RELEASE, cancellation and instance teardown must not leave a callback's cursor or identity.
-
 struct ReleaseLogin {
     ticket: Ticket,
     marker: Arc<()>,
@@ -344,7 +327,6 @@ impl Drop for ReleaseLogin {
 }
 
 /// THE INSTANCE: the opened module (replaced whole by a `refresh` with new settings) and the
-
 pub struct Oidc {
     now: RwLock<Arc<Opened>>,
     reached: Arc<ReachedMap>,
@@ -410,7 +392,6 @@ impl Oidc {
     }
 
     /// The tick's refresh ahead of the TTL on `opened`, over `host`'s connector on the driver
-
     fn refresh_ahead<O: AbiOut>(
         &self,
         host: Option<&Host>,
@@ -457,7 +438,6 @@ fn text(settings: &[u8]) -> Result<&str, Refusal> {
 impl Life for Oidc {
     const CANCEL: u32 = CANCEL_ABANDONED;
     /// The generic drive slot is not this plugin's: its `Drive` slot replaces it and carries the
-
     const DRIVE: Outcome = Outcome::Refused;
 
     fn validate(settings: &[u8]) -> Result<(), Refusal> {
@@ -477,13 +457,11 @@ impl Life for Oidc {
     }
 
     /// READY (after `open`, before any listener binds): discovery, a failure refusing the boot in
-
     fn ready(&self, host: &Host, ticket: Ticket) -> Poll<Result<(), Refusal>> {
         self.ready_with(host, ticket, None)
     }
 
     /// The same settings and secret keep the opened module and its key cache (the admin cache
-
     fn refresh(
         &self,
         settings: &[u8],
@@ -520,7 +498,6 @@ impl Life for Oidc {
     }
 
     /// A plain http `jwks_url` raises [`DIAG_JWKS_PLAIN_HTTP`] at warn on the `open` or `refresh`
-
     fn flagged(&self) -> Option<Flagged> {
         self.now().flagged.clone().map(|text| Flagged {
             id_idx: DIAG_JWKS_PLAIN_HTTP,
@@ -576,7 +553,6 @@ impl Life for Oidc {
 }
 
 /// What an op parks on its ticket across PENDING: its requests' state, the exact module it began
-
 struct Parked {
     io: IoState,
     answer: Option<LoginHttpResponse>,
@@ -625,7 +601,6 @@ fn resume_after<'h>(
 }
 
 /// Answer PENDING with `parked` (the requests' state from `io`) on the op's ticket: on its own
-
 fn pend<O: AbiOut>(
     instance: &Instance<'_, Held<Oidc>>,
     host: Option<&Host>,
@@ -679,7 +654,6 @@ const AUTHORIZATION: &str = "authorization";
 const CARRIERS: &[MarkWord] = &[carrier(AUTHORIZATION)];
 
 /// Write the answer into the host's buffers and answer READY with `verdict`: for `verify` the strip
-
 fn answer(
     p: Option<&Principal>,
     ttl: Option<u64>,

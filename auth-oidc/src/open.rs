@@ -72,7 +72,6 @@ pub fn config(cfg: &str) -> Result<OidcConfig, String> {
 }
 
 /// Keep the existing plaintext exceptions: local issuer/browser URLs, and private or loopback
-
 fn configured_url(key: &str, value: &str, token: bool) -> Result<(), String> {
     let parsed =
         url::Url::parse(value).map_err(|_| format!("settings.{key}: must be a valid URL"))?;
@@ -105,7 +104,6 @@ fn configured_url(key: &str, value: &str, token: bool) -> Result<(), String> {
 }
 
 /// The module `open` builds from the settings: parsed, its explicit `jwks_url` https, or plain
-
 pub(crate) fn module(cfg: &str) -> Result<(OidcModule, Option<String>), String> {
     let cfg = config(cfg)?;
     let warning = check_jwks_url(&cfg)?;
