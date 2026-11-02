@@ -354,7 +354,7 @@ fn a_failed_refresh_that_keeps_the_previous_keys_logs_a_warn_with_the_error() {
     let idp = Idp::new(jwks("k1"));
     let t0 = Instant::now();
     let cap = crate::tests::diagnostics::WarnCapture::default();
-    tracing::subscriber::with_default(cap.clone(), || {
+    tracing::subscriber::with_default(cap.subscriber(), || {
         serve(&c, &idp, t0).expect("prime");
         idp.set_answer(Err("provider unreachable".into()));
         serve(&c, &idp, t0 + Duration::from_secs(10)).expect("the previous keys still serve");
@@ -718,7 +718,7 @@ fn a_cold_fetch_failure_logs_a_warn_with_the_error() {
     let c = JwksCache::new(Duration::from_secs(60), Duration::from_secs(3600));
     let idp = Idp::answering(Err("provider unreachable".into()));
     let cap = crate::tests::diagnostics::WarnCapture::default();
-    tracing::subscriber::with_default(cap.clone(), || {
+    tracing::subscriber::with_default(cap.subscriber(), || {
         serve(&c, &idp, Instant::now()).unwrap_err();
     });
     assert_eq!(

@@ -162,7 +162,7 @@ fn a_failed_discovery_logs_one_warn_with_the_error() {
     let (c, d) = (cfg(None), Discovery::new(Duration::from_secs(60)));
     let idp = Idp::answering(Err("connection refused".into()));
     let cap = crate::tests::diagnostics::WarnCapture::default();
-    tracing::subscriber::with_default(cap.clone(), || {
+    tracing::subscriber::with_default(cap.subscriber(), || {
         let now = Instant::now();
         assert!(ready(d.document(&c, now, &mut idp.at_once(Some(ME)))).is_err());
         assert!(ready(d.document(&c, now, &mut idp.at_once(Some(ME)))).is_err());
@@ -311,7 +311,7 @@ fn a_discovered_jwks_failure_scrubs_userinfo_without_changing_the_fetch_url() {
             asked: Vec::new(),
         };
         let capture = crate::tests::diagnostics::WarnCapture::default();
-        tracing::subscriber::with_default(capture.clone(), || {
+        tracing::subscriber::with_default(capture.subscriber(), || {
             assert_eq!(ready(module.ready(Instant::now(), &mut io)), Ok(()));
         });
         assert_eq!(io.asked.len(), 2, "discovery then the discovered JWKS");

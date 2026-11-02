@@ -132,7 +132,7 @@ fn a_loopback_http_jwks_url_opens_with_a_warning() {
         })
         .to_string();
         let cap = crate::tests::diagnostics::WarnCapture::default();
-        let opened = tracing::subscriber::with_default(cap.clone(), || module(&settings));
+        let opened = tracing::subscriber::with_default(cap.subscriber(), || module(&settings));
         assert!(opened.is_ok(), "a loopback http jwks_url must open: {url}");
         let logged = cap.messages().join("\n");
         assert!(logged.contains("jwks_url"), "{url}: {logged:?}");
@@ -141,7 +141,7 @@ fn a_loopback_http_jwks_url_opens_with_a_warning() {
     }
 
     let cap = crate::tests::diagnostics::WarnCapture::default();
-    let opened = tracing::subscriber::with_default(cap.clone(), || {
+    let opened = tracing::subscriber::with_default(cap.subscriber(), || {
         module(
             r#"{"issuer":"https://issuer.invalid.example","audience":"api://busbar-client",
                 "jwks_url":"https://127.0.0.1/keys"}"#,

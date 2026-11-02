@@ -174,7 +174,7 @@ fn a_nonce_mismatch_is_logged() {
     });
     let mut io = HostIo::new(None, Ticket::NONE, IoState::default(), false);
     let cap = crate::tests::diagnostics::WarnCapture::default();
-    let login = tracing::subscriber::with_default(cap.clone(), || {
+    let login = tracing::subscriber::with_default(cap.subscriber(), || {
         oidc.now()
             .login(None, None, None, "MINE-SECRET", &mut answer, &mut io)
     });

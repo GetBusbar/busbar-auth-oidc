@@ -1,205 +1,65 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! OIDC diagnostic assertions: a thread-local tracing subscriber and reentrant capture gate.
+//! OIDC diagnostic assertions use tracing-subscriber's standard formatter and a local byte buffer.
+use std::io::{self, Write};
+use std::sync::{Arc, Mutex};
 
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
-use std::thread::ThreadId;
-use tracing::span::{Attributes, Id, Record};
-use tracing::subscriber::Interest;
-use tracing::{Event, Level, Metadata, Subscriber};
-
-/// The in-memory capture. Clones share one record and one gate hold.
-#[derive(Clone, Debug)]
-pub struct WarnCapture {
-    messages: Arc<Mutex<Vec<String>>>,
-    /// The least-severe level admitted: `WARN` (the default) or `DEBUG`.
-    max_level: Level,
-    _gate: Arc<GateHold>,
+#[derive(Clone)]
+struct Buffer(Arc<Mutex<Vec<u8>>>);
+impl Write for Buffer {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
+pub struct WarnCapture {
+    bytes: Arc<Mutex<Vec<u8>>>,
+    level: tracing::Level,
+}
 impl Default for WarnCapture {
     fn default() -> Self {
-        Self::at(Level::WARN)
-    }
-}
-
-impl WarnCapture {
-    /// A capture that admits DEBUG-and-above (DEBUG, INFO, WARN, ERROR).
-    pub fn capturing_debug() -> Self {
-        Self::at(Level::DEBUG)
-    }
-
-    fn at(max_level: Level) -> Self {
-        ensure_capture_interest();
         Self {
-            messages: Arc::default(),
-            max_level,
-            _gate: GateHold::acquire(),
+            bytes: Arc::default(),
+            level: tracing::Level::WARN,
         }
     }
-
-    /// Every captured event so far, each as `"{message} {field}={value} ..."`.
-    pub fn messages(&self) -> Vec<String> {
-        self.messages.lock().map(|m| m.clone()).unwrap_or_default()
+}
+impl WarnCapture {
+    pub fn capturing_debug() -> Self {
+        Self {
+            level: tracing::Level::DEBUG,
+            ..Self::default()
+        }
     }
-
-    /// True when some captured event contains `needle`.
+    pub fn subscriber(&self) -> impl tracing::Subscriber + Send + Sync + 'static {
+        let buffer = Buffer(self.bytes.clone());
+        tracing_subscriber::fmt()
+            .with_max_level(self.level)
+            .without_time()
+            .with_ansi(false)
+            .with_target(false)
+            .with_level(false)
+            .with_writer(move || buffer.clone())
+            .finish()
+    }
+    pub fn messages(&self) -> Vec<String> {
+        String::from_utf8_lossy(&self.bytes.lock().unwrap())
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
     pub fn contains(&self, needle: &str) -> bool {
         self.messages().iter().any(|m| m.contains(needle))
     }
-
-    /// How many captured events contain `needle` (a warn-once latch asserts this stays at 1).
     pub fn count(&self, needle: &str) -> usize {
         self.messages()
             .iter()
             .filter(|m| m.contains(needle))
             .count()
-    }
-}
-
-/// Renders one event's `message` and every other field, flattened into `key=value` pairs.
-#[derive(Default)]
-struct Rendered {
-    message: String,
-    fields: String,
-}
-
-impl Rendered {
-    fn record(&mut self, field: &tracing::field::Field, rendered: String) {
-        if field.name() == "message" {
-            self.message = rendered;
-        } else {
-            if !self.fields.is_empty() {
-                self.fields.push(' ');
-            }
-            self.fields
-                .push_str(&format!("{}={}", field.name(), rendered));
-        }
-    }
-}
-
-impl tracing::field::Visit for Rendered {
-    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-        self.record(field, format!("{value:?}"));
-    }
-    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-        self.record(field, value.to_string());
-    }
-}
-
-impl Subscriber for WarnCapture {
-    fn register_callsite(&self, _: &'static Metadata<'static>) -> Interest {
-        // Never let a thread-local capture cache a callsite as disabled for the whole process.
-        Interest::sometimes()
-    }
-    fn enabled(&self, metadata: &Metadata<'_>) -> bool {
-        // `Level` orders ERROR < WARN < INFO < DEBUG < TRACE (lower = more severe).
-        *metadata.level() <= self.max_level
-    }
-    fn new_span(&self, _: &Attributes<'_>) -> Id {
-        Id::from_u64(1)
-    }
-    fn record(&self, _: &Id, _: &Record<'_>) {}
-    fn record_follows_from(&self, _: &Id, _: &Id) {}
-    fn event(&self, event: &Event<'_>) {
-        if *event.metadata().level() > self.max_level {
-            return;
-        }
-        let mut rendered = Rendered::default();
-        event.record(&mut rendered);
-        if let Ok(mut messages) = self.messages.lock() {
-            messages.push(format!("{} {}", rendered.message, rendered.fields));
-        }
-    }
-    fn enter(&self, _: &Id) {}
-    fn exit(&self, _: &Id) {}
-}
-
-/// The global default the first capture installs: interested in every callsite, records nothing.
-struct Interested;
-
-impl Subscriber for Interested {
-    fn register_callsite(&self, _: &'static Metadata<'static>) -> Interest {
-        Interest::always()
-    }
-    fn enabled(&self, _: &Metadata<'_>) -> bool {
-        true
-    }
-    fn new_span(&self, _: &Attributes<'_>) -> Id {
-        Id::from_u64(1)
-    }
-    fn record(&self, _: &Id, _: &Record<'_>) {}
-    fn record_follows_from(&self, _: &Id, _: &Id) {}
-    fn event(&self, _: &Event<'_>) {}
-    fn enter(&self, _: &Id) {}
-    fn exit(&self, _: &Id) {}
-}
-
-/// Make every callsite's interest permanently "yes", once per process (see the module note). A
-/// binary that already set a global default is past the failure mode this closes, so its error is
-/// ignored.
-fn ensure_capture_interest() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        let _ = tracing::subscriber::set_global_default(Interested);
-        tracing::callsite::rebuild_interest_cache();
-    });
-}
-
-/// The gate's state: the owner thread and its reentrancy count, or `None` when free. Its mutex is
-/// held only for the bookkeeping, never across the code under test.
-struct CaptureGate {
-    state: Mutex<Option<(ThreadId, usize)>>,
-    cv: Condvar,
-}
-
-fn capture_gate() -> &'static CaptureGate {
-    static GATE: OnceLock<CaptureGate> = OnceLock::new();
-    GATE.get_or_init(|| CaptureGate {
-        state: Mutex::new(None),
-        cv: Condvar::new(),
-    })
-}
-
-/// One reentrant level of the gate, released when the capture and all its clones drop.
-#[derive(Debug)]
-struct GateHold;
-
-impl GateHold {
-    /// Acquire a level, blocking while a DIFFERENT thread holds the gate.
-    fn acquire() -> Arc<Self> {
-        let gate = capture_gate();
-        let me = std::thread::current().id();
-        let mut st = gate.state.lock().unwrap_or_else(|e| e.into_inner());
-        loop {
-            match *st {
-                None => {
-                    *st = Some((me, 1));
-                    break;
-                }
-                Some((owner, n)) if owner == me => {
-                    *st = Some((owner, n + 1));
-                    break;
-                }
-                _ => st = gate.cv.wait(st).unwrap_or_else(|e| e.into_inner()),
-            }
-        }
-        Arc::new(GateHold)
-    }
-}
-
-impl Drop for GateHold {
-    fn drop(&mut self) {
-        let gate = capture_gate();
-        let mut st = gate.state.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((owner, n)) = *st {
-            if n <= 1 {
-                *st = None;
-                gate.cv.notify_all();
-            } else {
-                *st = Some((owner, n - 1));
-            }
-        }
     }
 }

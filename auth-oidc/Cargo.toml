@@ -36,6 +36,7 @@ zeroize = { workspace = true }
 
 
 [dev-dependencies]
+tracing-subscriber = { workspace = true }
 # Diagnostic assertions use a local test subscriber; test-seal is for sealed values.
 busbar-contract = { workspace = true, features = ["test-seal"] }
 # ring's ECDSA keygen/signing lets the tests mint real ES256 tokens + a matching JWKS fixture with no

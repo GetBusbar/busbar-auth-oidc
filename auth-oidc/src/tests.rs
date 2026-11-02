@@ -707,7 +707,7 @@ fn a_rejected_token_is_logged_at_info_with_a_reason() {
             crate::tests::diagnostics::WarnCapture::capturing_debug(),
         );
         for cap in [&warn, &all] {
-            let verdict = tracing::subscriber::with_default(cap.clone(), || {
+            let verdict = tracing::subscriber::with_default(cap.subscriber(), || {
                 m.verify(&token, now, Instant::now())
             });
             assert!(matches!(verdict, AuthVerdict::Reject), "{what}");
@@ -732,7 +732,7 @@ fn an_unreadable_host_clock_is_a_failure_not_a_bad_credential() {
     let m = module_with(&key, "groups");
     let token = key.mint(&base_claims(now_unix()));
     let cap = crate::tests::diagnostics::WarnCapture::default();
-    let (bearer, login) = tracing::subscriber::with_default(cap.clone(), || {
+    let (bearer, login) = tracing::subscriber::with_default(cap.subscriber(), || {
         let bearer = ready(m.m.verify(
             Some(&token),
             i64::MAX,
@@ -1574,7 +1574,7 @@ fn a_key_set_that_cannot_be_had_at_login_is_an_outage_not_a_decline() {
         let m = OidcModule::new(&c);
         let down = Idp::answering(Err(cause.to_string()));
         let cap = crate::tests::diagnostics::WarnCapture::default();
-        let outcome = tracing::subscriber::with_default(cap.clone(), || {
+        let outcome = tracing::subscriber::with_default(cap.subscriber(), || {
             ready(m.identity_from_token_response(
                 &response,
                 now,
@@ -1918,7 +1918,7 @@ fn only_an_rfc_6749_credential_error_at_the_token_endpoint_is_a_decline() {
         );
         let mut outcome = None;
         for cap in [&warn, &all] {
-            outcome = Some(tracing::subscriber::with_default(cap.clone(), || {
+            outcome = Some(tracing::subscriber::with_default(cap.subscriber(), || {
                 ready(m.identity_from_token_response(
                     &response,
                     1_700_000_000,
@@ -1992,7 +1992,7 @@ fn a_begin_login_with_no_nonce_is_refused_and_logged() {
             scopes: Vec::new(),
         };
         let cap = crate::tests::diagnostics::WarnCapture::default();
-        let begun = tracing::subscriber::with_default(cap.clone(), || {
+        let begun = tracing::subscriber::with_default(cap.subscriber(), || {
             ready(m.begin_login(&begin, Instant::now(), &mut idp.at_once(Some(ME))))
         });
         match begun {
@@ -2289,7 +2289,7 @@ fn the_token_response_holds_its_tokens_in_wiped_holders() {
 fn a_logged_idp_url_drops_its_userinfo() {
     let key = TestKey::generate(KID);
     let cap = crate::tests::diagnostics::WarnCapture::default();
-    tracing::subscriber::with_default(cap.clone(), || {
+    tracing::subscriber::with_default(cap.subscriber(), || {
         let c = crate::cache::JwksCache::new(Duration::from_secs(1), Duration::from_secs(1));
         let url = "https://jwks-user:SECRETPW@jwks.test/keys";
         let idp = Idp::answering(Err("down".to_string()));
@@ -2331,7 +2331,7 @@ fn skipped_jwks_entries_are_counted_in_one_warn() {
     })
     .to_string();
     let cap = crate::tests::diagnostics::WarnCapture::default();
-    let set = tracing::subscriber::with_default(cap.clone(), || jwks::JwkSet::parse(&body))
+    let set = tracing::subscriber::with_default(cap.subscriber(), || jwks::JwkSet::parse(&body))
         .expect("the usable key parses");
     assert_eq!(set.keys.len(), 1);
     assert_eq!(cap.messages().len(), 1, "one warn: {:?}", cap.messages());
@@ -2339,7 +2339,7 @@ fn skipped_jwks_entries_are_counted_in_one_warn() {
     assert!(!cap.contains("SECRET"), "{:?}", cap.messages());
 
     let quiet = crate::tests::diagnostics::WarnCapture::default();
-    tracing::subscriber::with_default(quiet.clone(), || jwks::JwkSet::parse(&key.jwks()))
+    tracing::subscriber::with_default(quiet.subscriber(), || jwks::JwkSet::parse(&key.jwks()))
         .expect("parses");
     assert!(quiet.messages().is_empty(), "{:?}", quiet.messages());
 }
@@ -2360,7 +2360,7 @@ fn a_refused_token_response_is_logged_with_its_reason() {
             body: body.to_string(),
         };
         let cap = crate::tests::diagnostics::WarnCapture::capturing_debug();
-        let outcome = tracing::subscriber::with_default(cap.clone(), || {
+        let outcome = tracing::subscriber::with_default(cap.subscriber(), || {
             ready(m.identity_from_token_response(
                 &response,
                 now,
@@ -2387,7 +2387,7 @@ fn a_refused_token_exchange_is_logged_with_its_reason() {
     let idp = Idp::new(String::new());
     let run = |m: &OidcModule, code: Option<&str>| {
         let cap = crate::tests::diagnostics::WarnCapture::capturing_debug();
-        let out = tracing::subscriber::with_default(cap.clone(), || {
+        let out = tracing::subscriber::with_default(cap.subscriber(), || {
             ready(m.token_exchange(
                 code,
                 Some("https://busbar.test/cb"),
@@ -2411,7 +2411,7 @@ fn a_refused_token_exchange_is_logged_with_its_reason() {
     idp.set_body(serde_json::json!({ "issuer": ISSUER }).to_string());
     let mut io = idp.at_once(Some(ME));
     let cap = crate::tests::diagnostics::WarnCapture::default();
-    let out = tracing::subscriber::with_default(cap.clone(), || {
+    let out = tracing::subscriber::with_default(cap.subscriber(), || {
         ready(OidcModule::new(&none).token_exchange(
             Some("c"),
             Some("r"),
@@ -2479,7 +2479,7 @@ fn an_end_user_decline_logs_at_info_and_an_idp_failure_at_warn() {
             crate::tests::diagnostics::WarnCapture::capturing_debug(),
         );
         for cap in [&warn, &all] {
-            let _ = tracing::subscriber::with_default(cap.clone(), || {
+            let _ = tracing::subscriber::with_default(cap.subscriber(), || {
                 ready(m.identity_from_token_response(
                     &response,
                     1_700_000_000,
@@ -2499,7 +2499,7 @@ fn an_end_user_decline_logs_at_info_and_an_idp_failure_at_warn() {
         crate::tests::diagnostics::WarnCapture::capturing_debug(),
     );
     for cap in [&warn, &all] {
-        tracing::subscriber::with_default(cap.clone(), || {
+        tracing::subscriber::with_default(cap.subscriber(), || {
             ready(m.token_exchange(
                 None,
                 Some("https://busbar.test/cb"),
@@ -2569,7 +2569,8 @@ fn a_token_of_the_second_provider_passes_the_first_and_is_admitted_by_the_second
     let now = 1_700_000_000;
     let token = key_b.mint(&claims_of(ISSUER_B, AUDIENCE_B, now));
     let cap = crate::tests::diagnostics::WarnCapture::capturing_debug();
-    let walked = tracing::subscriber::with_default(cap.clone(), || chain(&[&a, &b], &token, now));
+    let walked =
+        tracing::subscriber::with_default(cap.subscriber(), || chain(&[&a, &b], &token, now));
     assert_eq!(walked, Walked::Admitted(1, "oidc:object-guid".to_string()));
     assert_eq!(
         a.idp.calls(),
@@ -2604,7 +2605,8 @@ fn a_token_claiming_the_first_providers_issuer_with_a_bad_signature_is_refused_b
         format!("{input}.{}", URL_SAFE_NO_PAD.encode(sig.as_ref()))
     };
     let cap = crate::tests::diagnostics::WarnCapture::capturing_debug();
-    let walked = tracing::subscriber::with_default(cap.clone(), || chain(&[&a, &b], &forged, now));
+    let walked =
+        tracing::subscriber::with_default(cap.subscriber(), || chain(&[&a, &b], &forged, now));
     assert_eq!(walked, Walked::Refused(0));
     assert_eq!(b.idp.calls(), 0, "B never judged it");
     assert!(
@@ -2658,7 +2660,7 @@ fn a_begin_login_with_no_authorize_endpoint_is_logged() {
         scopes: Vec::new(),
     };
     let cap = crate::tests::diagnostics::WarnCapture::default();
-    let out = tracing::subscriber::with_default(cap.clone(), || {
+    let out = tracing::subscriber::with_default(cap.subscriber(), || {
         ready(OidcModule::new(&none).begin_login(
             &begin,
             Instant::now(),
@@ -2678,7 +2680,7 @@ fn malformed_role_values_are_reported_without_changing_valid_roles_or_echoing_cl
     let cap = crate::tests::diagnostics::WarnCapture::default();
     let value = serde_json::json!(["admin", {"SecretRoleClaim":true}, 7]);
     let roles =
-        tracing::subscriber::with_default(cap.clone(), || extract_string_list(Some(&value)));
+        tracing::subscriber::with_default(cap.subscriber(), || extract_string_list(Some(&value)));
     assert_eq!(roles, vec!["admin"]);
     assert!(cap.contains("role claim"));
     assert!(!cap.contains("SecretRoleClaim"));
