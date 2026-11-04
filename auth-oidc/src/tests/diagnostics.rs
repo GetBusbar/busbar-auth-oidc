@@ -4,6 +4,7 @@
 //! OIDC diagnostic assertions use tracing-subscriber's standard formatter and a local byte buffer.
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
+use tracing_subscriber::{layer::SubscriberExt, Layer};
 
 #[derive(Clone)]
 struct Buffer(Arc<Mutex<Vec<u8>>>);
@@ -38,14 +39,21 @@ impl WarnCapture {
     }
     pub fn subscriber(&self) -> impl tracing::Subscriber + Send + Sync + 'static {
         let buffer = Buffer(self.bytes.clone());
-        tracing_subscriber::fmt()
-            .with_max_level(self.level)
-            .without_time()
-            .with_ansi(false)
-            .with_target(false)
-            .with_level(false)
-            .with_writer(move || buffer.clone())
-            .finish()
+        let level = self.level;
+        // Captures coexist on parallel test threads. Evaluate the level against
+        // this dispatch instead of caching a static per-callsite decision.
+        let filter = tracing_subscriber::filter::dynamic_filter_fn(move |metadata, _| {
+            *metadata.level() <= level
+        });
+        tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .without_time()
+                .with_ansi(false)
+                .with_target(false)
+                .with_level(false)
+                .with_writer(move || buffer.clone())
+                .with_filter(filter),
+        )
     }
     pub fn messages(&self) -> Vec<String> {
         String::from_utf8_lossy(&self.bytes.lock().unwrap())
