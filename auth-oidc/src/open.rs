@@ -110,6 +110,14 @@ pub(crate) fn module(cfg: &str) -> Result<(OidcModule, Option<String>), String> 
     if let Some(warning) = &warning {
         tracing::warn!(module = "oidc", "{warning}");
     }
+    if cfg.scopes.iter().any(|s| s.trim().is_empty()) {
+        // Loads as in 1.5.5 (the entry is still sent); said so the operator can drop it.
+        tracing::warn!(
+            module = "oidc",
+            "settings.scopes: an entry is blank; it is sent as an empty scope-token, which a \
+             strict identity provider refuses (invalid_scope); omit it"
+        );
+    }
     Ok((OidcModule::new(&cfg), warning))
 }
 

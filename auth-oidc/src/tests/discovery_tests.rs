@@ -157,6 +157,71 @@ fn a_late_failure_from_an_abandoned_flight_does_not_overwrite_the_live_one() {
     );
 }
 
+/// A `ready` meeting another op's key-set warm-up in flight waits for it (that fetch's settle wakes
+/// it) rather than declaring the boot ready with no key set held.
+#[test]
+fn ready_meeting_another_op_s_key_set_fetch_waits_for_it() {
+    let idp = Idp::new(
+        r#"{"keys":[{"kty":"EC","kid":"a","crv":"P-256","x":"AAAA","y":"BBBB"}]}"#.to_string(),
+    );
+    let now = Instant::now();
+    let m = OidcModule::new(&cfg(Some("https://idp.example/explicit")));
+    let mut first = idp.pending(ticket(1));
+    assert_eq!(m.ready(now, &mut first), Step::Pending);
+    assert_eq!(
+        m.ready(now, &mut idp.pending(ticket(2))),
+        Step::Wait,
+        "the second ready waits on the warm-up in flight"
+    );
+    assert_eq!(ready(m.ready(now, &mut first)), Ok(()));
+    assert_eq!(idp.woken(), vec![ticket(2)], "its settle wakes the waiter");
+    assert_eq!(idp.calls(), 1, "one key-set fetch");
+}
+
+/// A late failure of an op whose flight was taken over still serves the document held: the
+/// previous one stays available whichever op's re-discovery fails.
+#[test]
+fn a_late_failure_after_a_takeover_serves_the_held_document() {
+    let (c, d) = (cfg(None), Discovery::new(Duration::from_secs(60)));
+    let idp = Idp::new(doc());
+    let t0 = Instant::now();
+    let previous = ready(d.document(&c, t0, &mut idp.at_once(Some(ME)))).expect("discovered");
+    d.expire();
+    let late = t0 + crate::flight::FLIGHT_MAX + Duration::from_secs(1);
+    let mut a = idp.pending(ticket(1));
+    assert_eq!(d.document(&c, t0, &mut a), Step::Pending, "re-discovery");
+    let mut a = TakenOver {
+        a,
+        b: idp.pending(ticket(2)),
+        d: &d,
+        c: &c,
+        at: late,
+        taken: false,
+    };
+    let served = ready(d.document(&c, late, &mut a)).expect("the held document serves");
+    assert!(Arc::ptr_eq(&previous, &served));
+}
+
+/// A `refresh` asks again after a failed FIRST discovery too: the failure is not held over it for
+/// the rest of its retry interval.
+#[test]
+fn a_refresh_drops_a_held_discovery_failure() {
+    let (c, d) = (cfg(None), Discovery::new(Duration::from_secs(3600)));
+    let idp = Idp::answering(Err("connection refused".into()));
+    let t0 = Instant::now();
+    assert!(ready(d.document(&c, t0, &mut idp.at_once(Some(ME)))).is_err());
+    idp.set_body(doc());
+    let later = t0 + Duration::from_secs(1);
+    assert!(
+        ready(d.document(&c, later, &mut idp.at_once(Some(ME)))).is_err(),
+        "within the retry interval the failure is answered"
+    );
+    assert_eq!(idp.calls(), 1);
+    d.expire();
+    assert!(ready(d.document(&c, later, &mut idp.at_once(Some(ME)))).is_ok());
+    assert_eq!(idp.calls(), 2, "the refresh had the issuer asked again");
+}
+
 #[test]
 fn a_failed_discovery_logs_one_warn_with_the_error() {
     let (c, d) = (cfg(None), Discovery::new(Duration::from_secs(60)));

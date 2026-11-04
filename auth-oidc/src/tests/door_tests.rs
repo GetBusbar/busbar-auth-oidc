@@ -24,7 +24,7 @@ fn lent(secret: &[u8]) -> [&[u8]; 1] {
 
 /// A verify of `token` on the instance's current module.
 fn verify(oidc: &Oidc, idp: &Idp, token: &str) -> AuthVerdict {
-    let now = crate::now_unix();
+    let now = crate::tests::now_unix();
     ready(
         oidc.now()
             .module
@@ -40,7 +40,7 @@ fn an_empty_lent_secret_refresh_keeps_the_module_and_its_key_set() {
     let idp = Idp::new(key.jwks());
     let oidc = Oidc::open(&settings(), &lent(b""), 1).expect("opens");
     let before = oidc.now();
-    let now = crate::now_unix();
+    let now = crate::tests::now_unix();
     let token = key.mint(&base_claims(now));
     assert!(matches!(
         verify(&oidc, &idp, &token),
@@ -72,7 +72,7 @@ fn refresh_drops_the_verdict_cache_and_reports_its_count() {
     let key = TestKey::generate("k1");
     let idp = Idp::new(key.jwks());
     let oidc = Oidc::open(&settings(), &lent(b""), 1).expect("opens");
-    let token = key.mint(&base_claims(crate::now_unix()));
+    let token = key.mint(&base_claims(crate::tests::now_unix()));
     assert!(matches!(
         verify(&oidc, &idp, &token),
         AuthVerdict::Identify(_)
@@ -107,7 +107,7 @@ fn a_refused_refresh_keeps_the_module_and_cached_verdict() {
     ] {
         let oidc = Oidc::open(&settings(), &lent(b""), 1).expect("opens");
         let before = oidc.now();
-        let token = key.mint(&base_claims(crate::now_unix()));
+        let token = key.mint(&base_claims(crate::tests::now_unix()));
         assert!(matches!(
             verify(&oidc, &idp, &token),
             AuthVerdict::Identify(_)
@@ -523,6 +523,55 @@ fn a_refresh_rediscovers_the_issuer_s_document() {
         2,
         "the refresh has the document asked for again"
     );
+}
+
+/// IdentifyOut's SHORT BUFFER rule: the re-call is served from the identity reached, never by
+/// redeeming the single-use code again. A short login answer whose host clock cannot be read holds
+/// NEITHER its cursor nor its identity (a cursor alone would have the re-call exchange the code a
+/// second time): the answer is a real failure instead. With the clock read, it holds both.
+#[test]
+fn a_short_login_answer_without_a_host_clock_holds_nothing() {
+    let oidc = Oidc::open(&settings(), &lent(b""), 1).expect("opens");
+    let short = || ShortLogin {
+        issued: 3,
+        state: b"s1",
+        code: b"c1",
+        principal: Principal::from_id("u1"),
+    };
+    let refused = hold_short_login(&oidc, ticket(1), None, short()).expect_err("no clock");
+    assert!(refused.contains("clock"), "{refused}");
+    assert!(oidc.login_cursors.lock().unwrap().is_empty(), "no cursor");
+    assert!(oidc.reached.lock().unwrap().is_empty(), "no identity");
+
+    let marker = hold_short_login(&oidc, ticket(1), Some(5), short()).expect("held");
+    let cursors = oidc.login_cursors.lock().unwrap();
+    assert!(Arc::ptr_eq(&cursors[&ticket(1)].marker, &marker));
+    assert_eq!(cursors[&ticket(1)].issued, 3);
+    drop(cursors);
+    let reached = oidc.reached.lock().unwrap();
+    assert!(reached[&ticket(1)].serves(b"s1", b"c1"));
+    assert_eq!(reached[&ticket(1)].at, 5);
+}
+
+/// The re-call of a short login answer: a held identity serves only its own callback, and with
+/// the host clock unreadable a held identity fails the re-call rather than letting it redeem the
+/// code again. With nothing held, the re-call goes on to its own exchange, as before.
+#[test]
+fn a_short_login_re_call_without_a_host_clock_fails_rather_than_redeeming_again() {
+    let Err(refused) = recall(Some(kept_for(1, 0)), None, b"s1", b"c1") else {
+        panic!("a held identity with no clock is a failure");
+    };
+    assert!(refused.contains("clock"), "{refused}");
+    let served = recall(Some(kept_for(1, 0)), Some(0), b"s1", b"c1").expect("clock read");
+    assert_eq!(served.map(|r| r.principal.id), Some("u1".to_string()));
+    assert!(recall(Some(kept_for(1, 0)), Some(0), b"s2", b"c1")
+        .expect("clock read")
+        .is_none());
+    for now in [None, Some(0)] {
+        assert!(recall(None, now, b"s1", b"c1")
+            .expect("nothing held")
+            .is_none());
+    }
 }
 
 /// A short-answer lease owns its cursor and callback identity. Lifecycle cleanup cannot leave

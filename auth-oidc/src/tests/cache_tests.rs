@@ -454,6 +454,28 @@ fn an_unknown_kid_pends_one_rotation_refetch_and_carries_on_from_it() {
     assert_eq!(idp.calls(), 2, "the rate limit held off a second refetch");
 }
 
+/// 1.5.5 PARITY: a kid miss never waits on another op's fetch in flight ("a caller in this branch
+/// is about to reject the token anyway"); it is judged against the key set the IdP last answered,
+/// and the fetch in flight is not repeated for it.
+#[test]
+fn a_kid_miss_during_another_op_s_rotation_fetch_is_judged_against_the_set_in_hand() {
+    let c = JwksCache::new(Duration::from_secs(60), Duration::from_secs(3600));
+    let idp = Idp::new(jwks("old"));
+    let t0 = Instant::now();
+    ready(c.with_key(URL, "old", t0, &mut idp.at_once(Some(ME)), |_| Ok(()))).expect("prime");
+    idp.set_body(jwks("new"));
+
+    let now = t0 + Duration::from_secs(61);
+    let mut first = idp.pending(ticket(2));
+    assert_eq!(
+        c.with_key(URL, "new", now, &mut first, |_| Ok(())),
+        Step::Pending
+    );
+    let second = ready(c.with_key(URL, "new", now, &mut idp.pending(ticket(3)), |_| Ok(())));
+    assert!(matches!(second, Err(KeyError::Mismatch(_))), "{second:?}");
+    assert_eq!(idp.calls(), 2, "no second rotation refetch");
+}
+
 /// The absolute staleness ceiling: once every refetch has failed for longer than `max_stale`
 #[test]
 fn a_permanently_unreachable_provider_stops_serving_keys_past_the_staleness_ceiling() {

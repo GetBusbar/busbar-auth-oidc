@@ -91,9 +91,13 @@ impl Discovery {
     }
 
     /// Have the document asked for again at its next use (a `refresh`), the one held serving
+    /// meanwhile; a failure held for its retry interval is dropped, so the next use asks again.
     pub fn expire(&self) {
-        if let State::Done { due, .. } = &mut self.lock().0 {
-            *due = None;
+        let mut guard = self.lock();
+        match &mut guard.0 {
+            State::Done { due, .. } => *due = None,
+            state @ State::Failed { .. } => *state = State::Idle,
+            State::Idle | State::Flight(..) => {}
         }
     }
 
@@ -195,6 +199,9 @@ impl Discovery {
                     }
                 };
                 (answer, std::mem::take(waiters))
+            }
+            (Err(_), State::Done { doc, .. } | State::Flight(_, Some(doc))) => {
+                (Ok(Arc::clone(doc)), Vec::new())
             }
             (Err(error), _) => (Err(error), Vec::new()),
         };

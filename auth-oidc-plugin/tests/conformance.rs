@@ -973,6 +973,15 @@ fn red_the_statement_declares_six_outbound_http_needs_in_their_classes() {
         ],
         "{read:?}"
     );
+    // A provider's Retry-After crosses to the plugin (the login outage's hint): under KEEP_NAMED
+    // the kernel copies only the named fields, so every need names it, and nothing else.
+    for n in &read.needs {
+        assert_eq!(
+            n.keep_mode,
+            busbar_contract::abi::host::conn::connector::KEEP_NAMED
+        );
+        assert_eq!(n.keep_response_headers, ["retry-after"], "{n:?}");
+    }
     let packed = busbar_plugin_loader::dispatch::rendering_of_library(
         &support::cdylib_path().expect("the cdylib is built"),
     )
@@ -1056,16 +1065,22 @@ fn a_token_s_expiry_is_judged_at_the_request_s_timestamp() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    for (at, identified) in [(now + 7200, false), (0, false), (now, true)] {
+    for (at, expected) in [
+        (now + 7200, "verdict 2 "),
+        (0, "Failed "),
+        (now, "verdict 1 "),
+    ] {
         let idp = Idp::new(&key);
         let b = bind(&Arm::Linked, &idp);
         open(&b.plugin, &config(AUDIENCE), None).expect("opens");
         let verdict = b.verify_at(Some(&token), at);
-        assert_eq!(
-            verdict.contains("verdict 1 "),
-            identified,
-            "at {at}: {verdict}"
-        );
+        assert!(verdict.starts_with(expected), "at {at}: {verdict}");
+        if at == 0 {
+            assert!(
+                verdict.contains("clock"),
+                "a zero timestamp fails closed naming the clock: {verdict}"
+            );
+        }
     }
 }
 
@@ -1447,11 +1462,29 @@ fn a_login_id_token_s_expiry_is_judged_at_the_host_clock() {
     expired["exp"] = serde_json::json!(now - 7200);
     let mut early = claims(AUDIENCE);
     early["nbf"] = serde_json::json!(now + 7200);
-    for (what, c, identified) in [
-        ("expired", expired, false),
-        ("not yet valid", early, false),
-        ("fresh", claims(AUDIENCE), true),
+    let mut past = claims(AUDIENCE);
+    past["exp"] = serde_json::json!(now - 1800);
+    past["nbf"] = serde_json::json!(now - 7200);
+    let hour = 3600 * 1_000_000_000_u64;
+    let process_wall = u64::try_from(now).unwrap() * 1_000_000_000;
+    for (what, c, host_wall, identified) in [
+        ("expired", expired, None, false),
+        ("not yet valid", early, None, false),
+        ("fresh", claims(AUDIENCE), None, true),
+        (
+            "fresh at the process clock, expired at the host's",
+            claims(AUDIENCE),
+            Some(process_wall + 2 * hour),
+            false,
+        ),
+        (
+            "expired at the process clock, fresh at the host's",
+            past,
+            Some(process_wall - hour),
+            true,
+        ),
     ] {
+        let _wall = host_wall.map(support::HeldClock::wall_at);
         let idp = Idp::new(&key);
         let body = serde_json::json!({ "id_token": key.sign(&c) }).to_string();
         idp.answer("/token", 200, &body);
@@ -1596,6 +1629,12 @@ fn a_broken_successful_token_response_is_a_login_outage() {
         let answer = b.complete("code", ("state", NONCE), REDIRECT, "verifier", None);
         assert_eq!(answer.trim_end(), format!("verdict {LOGIN_OUTAGE}"));
         assert_eq!(idp.sent_to("/token").len(), 1);
+        assert!(!answer.contains("TokenCanary"), "{answer}");
+        assert!(
+            !idp.diags().join("\n").contains("TokenCanary"),
+            "the token answer is never echoed: {:?}",
+            idp.diags()
+        );
     }
 }
 
@@ -2448,10 +2487,6 @@ fn configured_oidc_cases_validate_refresh_close_and_never_echo_credentials_both_
             1, 1,
         ];
         assert_eq!(counts, pinned);
-        let mut moved = counts.clone();
-        moved[1] += 1;
-        assert_ne!(moved, pinned);
-        assert_ne!(counts.iter().map(|n| n * 2).collect::<Vec<_>>(), pinned);
         results.push(answers);
     }
     assert_eq!(results[0], results[1]);

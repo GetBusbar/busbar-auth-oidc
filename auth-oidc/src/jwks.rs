@@ -126,12 +126,12 @@ pub struct Jwk {
 impl Jwk {
     /// Whether this key may verify a token signed with `alg`: the key type `alg` needs (`RS256`:
     pub fn signs(&self, alg: &str) -> bool {
-        let kty = match alg {
-            "RS256" => "RSA",
-            "ES256" => "EC",
-            _ => return false,
+        let shape_fits = match alg {
+            crate::jwt::ALG_RS256 => self.kty == "RSA",
+            crate::jwt::ALG_ES256 => self.kty == "EC" && self.crv.as_deref() == Some("P-256"),
+            _ => false,
         };
-        self.kty == kty
+        shape_fits
             && self.alg.as_deref().is_none_or(|a| a == alg)
             && self.key_use.as_deref() != Some("enc")
             && self
@@ -186,6 +186,12 @@ impl JwkSet {
                 "JWKS document carries entries that are not usable keys; they are skipped"
             );
         }
+        if set.keys.is_empty() && entries > 0 {
+            return Err(format!(
+                "JWKS document contains no keys this verifier can use (all {entries} entries were \
+                 skipped); refusing to replace the cached key set with an empty one"
+            ));
+        }
         if set.keys.is_empty() {
             return Err(
                 "JWKS document contains no keys; refusing to replace the cached key set with an \
@@ -220,66 +226,5 @@ impl JwkSet {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn set(body: &str) -> JwkSet {
-        JwkSet::parse(body).unwrap()
-    }
-
-    /// A well-formed JWKS carrying zero keys must be an ERROR. It parses cleanly, so without this
-    #[test]
-    fn an_empty_key_set_is_an_error_not_an_empty_success() {
-        let err = JwkSet::parse(r#"{"keys":[]}"#)
-            .expect_err("a JWKS with no keys must not parse as a successful empty set");
-        assert!(
-            err.contains("no keys"),
-            "the error should say the document carried no keys: {err}"
-        );
-
-        assert!(JwkSet::parse(r#"{}"#).is_err());
-
-        assert!(JwkSet::parse(
-            r#"{"keys":[{"kty":"EC","kid":"a","crv":"P-256","x":"AAAA","y":"BBBB"}]}"#
-        )
-        .is_ok());
-    }
-
-    #[test]
-    fn find_all_matches_by_kid() {
-        let s = set(r#"{"keys":[
-                {"kty":"EC","kid":"a","crv":"P-256","x":"AAAA","y":"BBBB"},
-                {"kty":"EC","kid":"b","crv":"P-256","x":"CCCC","y":"DDDD"}
-            ]}"#);
-        let found: Vec<_> = s.find_all("a").collect();
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].kid.as_deref(), Some("a"));
-    }
-
-    /// A non-empty queried `kid` that matches NO key must never fall through to a keyless
-    #[test]
-    fn find_all_does_not_fall_back_to_a_keyless_key_for_a_nonempty_unmatched_kid() {
-        let s = set(r#"{"keys":[
-                {"kty":"EC","kid":"real-kid","crv":"P-256","x":"AAAA","y":"BBBB"},
-                {"kty":"EC","crv":"P-256","x":"CCCC","y":"DDDD"}
-            ]}"#);
-        let found: Vec<_> = s.find_all("no-such-kid").collect();
-        assert!(
-            found.is_empty(),
-            "a nonempty unmatched kid must not match the keyless key in the set, got {} matches",
-            found.len()
-        );
-    }
-
-    /// The mirror case: an EMPTY queried kid (a keyless JWT header) DOES match a keyless key.
-    #[test]
-    fn find_all_matches_a_keyless_key_for_an_empty_queried_kid() {
-        let s = set(r#"{"keys":[
-                {"kty":"EC","kid":"real-kid","crv":"P-256","x":"AAAA","y":"BBBB"},
-                {"kty":"EC","crv":"P-256","x":"CCCC","y":"DDDD"}
-            ]}"#);
-        let found: Vec<_> = s.find_all("").collect();
-        assert_eq!(found.len(), 1);
-        assert!(found[0].kid.is_none());
-    }
-}
+#[path = "tests/jwks_tests.rs"]
+mod tests;

@@ -22,7 +22,7 @@ use busbar_contract::abi::sdk::net::{
 };
 use busbar_contract::auth::LoginHttpResponse;
 
-/// Upper bound on a JWKS / discovery document, and on a token endpoint's answer. A real JWKS is a
+/// Upper bound on a JWKS or discovery document ([`MAX_TOKEN_BYTES`] bounds a token answer).
 pub const MAX_JWKS_BYTES: usize = 1024 * 1024;
 
 /// Upper bound on a token endpoint's answer: a token response is a few KiB of JSON.
@@ -60,6 +60,10 @@ pub const DOCUMENT_CLASS: u32 = EGRESS_OPEN_WEB;
 /// The egress class of the token exchange's need: the connector's default class, a private,
 pub const TOKEN_CLASS: u32 = EGRESS_DEFAULT;
 
+/// The response head fields every need keeps (KEEP_NAMED): a provider's `Retry-After`, the hint a
+/// login outage carries ([`HostIo::retry_after_secs`]). No other response header is read.
+const KEEP_RESPONSE: &[AbiStr] = &[abi_str("retry-after")];
+
 /// One outbound need over the `http` transport (the scheme the http framer claims) in `class`,
 const fn need(class: u32, target_from: AbiStr, trust_from: AbiStr) -> Need {
     Need {
@@ -70,8 +74,8 @@ const fn need(class: u32, target_from: AbiStr, trust_from: AbiStr) -> Need {
         target_from,
         trust_from,
         details: Blob::ABSENT,
-        keep_response_headers: std::ptr::null(),
-        keep_response_headers_len: 0,
+        keep_response_headers: KEEP_RESPONSE.as_ptr(),
+        keep_response_headers_len: KEEP_RESPONSE.len(),
         timeout_ms: FETCH_TIMEOUT_MS,
         keep_mode: KEEP_NAMED,
         _reserved: 0,
@@ -215,7 +219,7 @@ fn document_for(need: u32, url: &str, status: u16, body: Vec<u8>) -> Result<Stri
     if !(200..300).contains(&status) {
         return Err(refused_status(url, status));
     }
-    capped_for(need, url, body, MAX_JWKS_BYTES)
+    capped_for(need, url, body, reply_cap(need))
 }
 
 /// The text for a non-2xx `status` from `url`.
@@ -405,7 +409,8 @@ impl<'h> HostIo<'h> {
         self.state
     }
 
-    /// The https-only exchange `request` builds for `url`, on `need`: resumed when it is the one in
+    /// The exchange `request` builds for `url`, on `need` (https; plain http only where
+    /// [`plaintext_allowed`] admits it): resumed when it is the one in
     fn run(
         &mut self,
         need: u32,
@@ -518,7 +523,7 @@ impl Fetch for HostIo<'_> {
                 r.and_then(|reply| {
                     Ok(LoginHttpResponse {
                         status: reply.status,
-                        body: capped_for(NEED_TOKEN, url, reply.body, MAX_TOKEN_BYTES)?,
+                        body: capped_for(NEED_TOKEN, url, reply.body, reply_cap(NEED_TOKEN))?,
                     })
                 })
             })

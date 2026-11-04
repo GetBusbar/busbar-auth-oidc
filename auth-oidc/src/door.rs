@@ -130,9 +130,15 @@ const REACHED_MAX: usize = 1024;
 /// How long a short answer is kept for its re-call: an older one (its host never came back for
 const REACHED_TTL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
+/// Whether an answer kept at `at` is still held at `now` (host monotonic nanoseconds): kept for
+/// [`REACHED_TTL`], the one rule every held short answer (login or verify) lives by.
+fn fresh(at: u64, now: u64) -> bool {
+    std::time::Duration::from_nanos(now.saturating_sub(at)) <= REACHED_TTL
+}
+
 /// Drop every kept answer older than [`REACHED_TTL`] at `now`.
 fn expire(map: &mut HashMap<Ticket, Reached>, now: u64) {
-    map.retain(|_, r| std::time::Duration::from_nanos(now.saturating_sub(r.at)) <= REACHED_TTL);
+    map.retain(|_, r| fresh(r.at, now));
 }
 
 /// The short-answer cache uses the host's monotonic clock. An unreadable clock permits neither
@@ -145,6 +151,24 @@ fn reached_now(host: Option<&Host>, ticket: Ticket) -> Option<u64> {
 
 /// The BACKSTOP of an op waiting on another op's fetch, nanoseconds on the host's monotonic clock:
 const WAIT_NS: u64 = FLIGHT_MAX.as_nanos() as u64;
+
+/// When an op waiting on another op's fetch is woken at the latest: [`WAIT_NS`] past the host's
+/// monotonic clock, or why that clock cannot be read.
+fn wait_until(host: Option<&Host>, ticket: Ticket) -> Result<u64, ConnFailure> {
+    let host = host.ok_or(ConnFailure::Unarmed)?;
+    match host.connector(ticket).clock_now() {
+        Poll::Ready(Ok(r)) => Ok(r.mono_ns.saturating_add(WAIT_NS)),
+        Poll::Ready(Err(e)) => Err(e),
+        Poll::Pending => Err(ConnFailure::Fault),
+    }
+}
+
+/// The words of an op that cannot arm its backstop wake ([`wait_until`]).
+fn cannot_wait(e: &ConnFailure) -> Refusal {
+    Refusal::failed(format!(
+        "oidc: cannot wait for the fetch another call is making: {e}"
+    ))
+}
 
 /// The client secret `secrets` lends: its first entry, an empty one being none (the host lends an
 fn lent_secret(secrets: &[&[u8]]) -> Option<Cred> {
@@ -230,12 +254,15 @@ impl Opened {
                 Ok(LoginOutcome::Identify(p)) => Login::Identity(p),
 
                 Ok(LoginOutcome::Reject) => Login::Bad,
+                Ok(LoginOutcome::Outage { retry_after_secs }) => Login::Outage(
+                    "the identity provider is unavailable".to_string(),
+                    retry_after_secs.or_else(|| io.retry_after_secs()),
+                ),
+                Ok(LoginOutcome::SecurityCheckFailed) => Login::SecurityCheck,
                 Ok(
                     LoginOutcome::Authorize(_)
                     | LoginOutcome::Prompt(_)
-                    | LoginOutcome::Exchange(_)
-                    | LoginOutcome::Outage { .. }
-                    | LoginOutcome::SecurityCheckFailed,
+                    | LoginOutcome::Exchange(_),
                 ) => Login::Bad,
                 Err(e) => Login::Outage(e, io.retry_after_secs()),
             },
@@ -280,6 +307,77 @@ fn keep(map: &mut HashMap<Ticket, Reached>, max: usize, ticket: Ticket, r: Reach
         }
     }
     map.insert(ticket, r);
+}
+
+/// The identity a short login answer kept for this same-ticket re-call (`held`), when it serves
+/// the callback's `state` and `code`. With the host clock unreadable (`now` absent) a held
+/// identity's age cannot be told, and the re-call must not redeem the single-use code again
+/// either: a real failure.
+fn recall(
+    held: Option<Reached>,
+    now: Option<u64>,
+    state: &[u8],
+    code: &[u8],
+) -> Result<Option<Reached>, &'static str> {
+    match (held, now) {
+        (Some(_), None) => Err("oidc: host clock unavailable for short login continuation"),
+        (held, _) => Ok(held.filter(|r| r.serves(state, code))),
+    }
+}
+
+/// What a short login answer holds for its re-call: the completion handles its exchange used,
+/// the callback it answered, and the identity it reached.
+struct ShortLogin<'a> {
+    issued: u32,
+    state: &'a [u8],
+    code: &'a [u8],
+    principal: Principal,
+}
+
+/// Hold a SHORT login answer for its same-ticket re-call ([`IdentifyOut`]'s short-buffer rule: the
+/// re-call is served from the identity reached, never by redeeming the code again): its cursor and
+/// its identity, both or neither. `now` is the host's monotonic reading; without one nothing is
+/// held, since a cursor kept without its identity would have the re-call exchange the code a
+/// second time. Answers the marker the answer's lease guard ([`ReleaseLogin`]) is made with.
+fn hold_short_login(
+    oidc: &Oidc,
+    ticket: Ticket,
+    now: Option<u64>,
+    short: ShortLogin<'_>,
+) -> Result<Arc<()>, &'static str> {
+    let Some(now) = now else {
+        return Err("oidc: host clock unavailable for short login answer");
+    };
+    let marker = Arc::new(());
+    {
+        let mut cursors = oidc
+            .login_cursors
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if cursors.len() >= REACHED_MAX && !cursors.contains_key(&ticket) {
+            return Err("oidc: too many held short login answers");
+        }
+        cursors.insert(
+            ticket,
+            LoginCursor {
+                marker: Arc::clone(&marker),
+                issued: short.issued,
+            },
+        );
+    }
+    let mut reached = oidc.reached.lock().unwrap_or_else(PoisonError::into_inner);
+    keep(
+        &mut reached,
+        REACHED_MAX,
+        ticket,
+        Reached {
+            at: now,
+            state: cred::Held::new(short.state.to_vec()),
+            code: cred::Held::new(short.code.to_vec()),
+            principal: short.principal,
+        },
+    );
+    Ok(marker)
 }
 
 /// A short callback's service cursor survives identity expiry, but not its answer's lease.
@@ -416,6 +514,14 @@ impl Oidc {
         let readied = opened.module.ready(Instant::now(), &mut io);
         if let Some(out) = out {
             raise_refusals(&opened.module, &mut io, out);
+            // Waiting on another op's fetch: its settle wakes this ticket, and the backstop
+            // re-enters it should that op never come back ([`WAIT_NS`]).
+            if matches!(readied, Step::Wait) {
+                match wait_until(Some(host), ticket) {
+                    Ok(at) => out.wake_at(at),
+                    Err(e) => return Poll::Ready(Err(cannot_wait(&e))),
+                }
+            }
         }
         match readied {
             Step::Pending | Step::Wait => {
@@ -452,23 +558,16 @@ impl Oidc {
         raise_refusals(&opened.module, &mut io, out);
         match refreshed {
             Step::Pending => {
-                let mut state = Some((ticket, opened, io.into_state()));
-                let previous = {
-                    let mut driver = self.driving.lock().unwrap_or_else(PoisonError::into_inner);
-                    if Arc::ptr_eq(&driver.epoch, &epoch) {
-                        std::mem::replace(&mut driver.pending, state.take())
-                    } else {
-                        None
-                    }
-                };
-
-                drop(previous);
-                if state.is_none() {
-                    Outcome::Pending
-                } else {
-                    drop(state);
-                    Outcome::Ready
+                // Published only while its refresh epoch is current; what it replaces, or the
+                // state of a fetch a refresh has since discarded, drops after the lock.
+                let mut driver = self.driving.lock().unwrap_or_else(PoisonError::into_inner);
+                if !Arc::ptr_eq(&driver.epoch, &epoch) {
+                    return Outcome::Ready;
                 }
+                let previous = driver.pending.replace((ticket, opened, io.into_state()));
+                drop(driver);
+                drop(previous);
+                Outcome::Pending
             }
 
             Step::Ready(_) | Step::Wait => Outcome::Ready,
@@ -664,19 +763,9 @@ fn pend<O: AbiOut>(
     wait: bool,
 ) -> Outcome {
     if wait {
-        let clock = host.map_or(Err(ConnFailure::Unarmed), |h| {
-            match h.connector(instance.ticket()).clock_now() {
-                Poll::Ready(r) => r,
-                Poll::Pending => Err(ConnFailure::Fault),
-            }
-        });
-        match clock {
-            Ok(r) => out.wake_at(r.mono_ns.saturating_add(WAIT_NS)),
-            Err(e) => {
-                return out.fail(Refusal::failed(format!(
-                    "oidc: cannot wait for the fetch another call is making: {e}"
-                )))
-            }
+        match wait_until(host, instance.ticket()) {
+            Ok(at) => out.wake_at(at),
+            Err(e) => return out.fail(cannot_wait(&e)),
         }
     }
     parked.io = io.into_state();
@@ -806,7 +895,7 @@ struct VerifyAnswer<'a> {
 fn verify_answer(
     h: &Held<Oidc>,
     ticket: Ticket,
-    reached: VerifyAnswer<'_>,
+    fields: VerifyAnswer<'_>,
     input: Lent<'_, VerifyIn>,
     out: &mut Out<'_, IdentifyOut>,
 ) -> Outcome {
@@ -816,7 +905,7 @@ fn verify_answer(
         credential,
         decision,
         verdict,
-    } = reached;
+    } = fields;
     let answered = answer(
         principal,
         ttl,
@@ -848,8 +937,7 @@ fn verify_answer(
         .verified
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
-    verified
-        .retain(|_, v| std::time::Duration::from_nanos(now.saturating_sub(v.at)) <= REACHED_TTL);
+    verified.retain(|_, v| fresh(v.at, now));
     if verified.len() >= REACHED_MAX || verified.contains_key(&key) {
         out.set(|o| &o.needed_bytes, 0);
         out.set(|o| &o.needed_groups, 0);
@@ -944,9 +1032,7 @@ impl SafeSlot for Verify {
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner);
                 if let Some(now) = now {
-                    verified.retain(|_, v| {
-                        std::time::Duration::from_nanos(now.saturating_sub(v.at)) <= REACHED_TTL
-                    });
+                    verified.retain(|_, v| fresh(v.at, now));
                 }
                 let key = if instance.ticket().is_none() {
                     verified.iter().find_map(|(key, v)| {
@@ -965,6 +1051,11 @@ impl SafeSlot for Verify {
                 .and_then(|key| verified.remove(&key))
             };
             let Some(kept) = kept else {
+                if now.is_none() {
+                    return out.fail(Refusal::failed(
+                        "oidc: host clock unavailable for short verify continuation",
+                    ));
+                }
                 return out.fail(Refusal::refused(
                     "oidc: short verify continuation is no longer held",
                 ));
@@ -1037,9 +1128,8 @@ impl SafeSlot for Verify {
             Step::Ready(_) | Step::Pending | Step::Wait if ticketless && io.wanted_io() => {
                 return Outcome::Refused
             }
-            Step::Ready(Err(_)) | Step::Pending | Step::Wait if ticketless => {
-                return Outcome::Refused
-            }
+            Step::Ready(Err(e)) if ticketless => return out.fail(Refusal::refused(e)),
+            Step::Pending | Step::Wait if ticketless => return Outcome::Refused,
             Step::Ready(Ok(v)) => v,
             Step::Ready(Err(e)) => return out.fail(Refusal::failed(e)),
             Step::Pending => return pend(&instance, h.host(), io, parked, &mut out, false),
@@ -1166,10 +1256,12 @@ impl SafeSlot for Complete {
         if let Some(now) = now {
             expire(&mut reached, now);
         }
-        let kept = reached
-            .remove(&instance.ticket())
-            .filter(|r| now.is_some() && r.serves(state, code_bytes));
+        let held = reached.remove(&instance.ticket());
         drop(reached);
+        let kept = match recall(held, now, state, code_bytes) {
+            Ok(kept) => kept,
+            Err(why) => return out.fail(Refusal::failed(why)),
+        };
         let (principal, issued) = match kept {
             Some(r) => (r.principal, cursor.unwrap_or(0)),
             None => {
@@ -1208,25 +1300,21 @@ impl SafeSlot for Complete {
         };
         let answered = login_identity(&principal, input.field(|i| &i.out_buf), &mut out);
         if answered == Outcome::Failed {
-            let marker = Arc::new(());
-            {
-                let mut cursors = oidc
-                    .login_cursors
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner);
-                if cursors.len() >= REACHED_MAX && !cursors.contains_key(&instance.ticket()) {
+            let now = reached_now(h.host(), instance.ticket());
+            let short = ShortLogin {
+                issued,
+                state,
+                code: code_bytes,
+                principal,
+            };
+            let marker = match hold_short_login(oidc, instance.ticket(), now, short) {
+                Ok(marker) => marker,
+                Err(why) => {
                     out.set(|o| &o.needed_bytes, 0);
                     out.set(|o| &o.needed_groups, 0);
-                    return out.fail(Refusal::failed("oidc: too many held short login answers"));
+                    return out.fail(Refusal::failed(why));
                 }
-                cursors.insert(
-                    instance.ticket(),
-                    LoginCursor {
-                        marker: Arc::clone(&marker),
-                        issued,
-                    },
-                );
-            }
+            };
             out.keep(
                 h.leases(),
                 ReleaseLogin {
@@ -1242,21 +1330,6 @@ impl SafeSlot for Complete {
                 h.leases(),
                 short_reply::encode(lease),
                 BLOB_OCTETS,
-            );
-            let Some(now) = reached_now(h.host(), instance.ticket()) else {
-                return answered;
-            };
-            let mut reached = oidc.reached.lock().unwrap_or_else(PoisonError::into_inner);
-            keep(
-                &mut reached,
-                REACHED_MAX,
-                instance.ticket(),
-                Reached {
-                    at: now,
-                    state: cred::Held::new(state.to_vec()),
-                    code: cred::Held::new(code_bytes.to_vec()),
-                    principal,
-                },
             );
         }
         answered

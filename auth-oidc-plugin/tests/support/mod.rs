@@ -70,7 +70,10 @@ static CLOCK_READS: AtomicU32 = AtomicU32::new(0);
 
 static CLOCK_MONO: Mutex<Option<u64>> = Mutex::new(None);
 
-/// A fixed host monotonic reading for a test holding [`serial`]; restored even on panic.
+/// A fixed host wall reading (unix nanoseconds), set apart from the process clock.
+static CLOCK_WALL: Mutex<Option<u64>> = Mutex::new(None);
+
+/// A fixed host monotonic (or wall) reading for a test holding [`serial`]; restored even on panic.
 pub struct HeldClock;
 
 impl HeldClock {
@@ -82,11 +85,19 @@ impl HeldClock {
     pub fn set(mono_ns: u64) {
         *CLOCK_MONO.lock().unwrap() = Some(mono_ns);
     }
+
+    /// The host's wall clock held at `wall_ns`, whatever the process clock reads: what proves the
+    /// plugin judges at the HOST clock.
+    pub fn wall_at(wall_ns: u64) -> Self {
+        *CLOCK_WALL.lock().unwrap() = Some(wall_ns);
+        Self
+    }
 }
 
 impl Drop for HeldClock {
     fn drop(&mut self) {
         *CLOCK_MONO.lock().unwrap() = None;
+        *CLOCK_WALL.lock().unwrap() = None;
     }
 }
 
@@ -98,10 +109,13 @@ pub fn clock_reads() -> u32 {
 impl busbar_contract::services::HostServices for Clock {
     fn now(&self) -> Reading {
         CLOCK_READS.fetch_add(1, Ordering::SeqCst);
-        Reading {
-            wall_ns: std::time::SystemTime::now()
+        let process_wall = || {
+            std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| d.as_nanos() as u64),
+                .map_or(0, |d| d.as_nanos() as u64)
+        };
+        Reading {
+            wall_ns: CLOCK_WALL.lock().unwrap().unwrap_or_else(process_wall),
             mono_ns: CLOCK_MONO.lock().unwrap().unwrap_or_else(now_ns),
         }
     }

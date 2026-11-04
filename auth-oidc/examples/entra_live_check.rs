@@ -42,13 +42,19 @@ impl Fetch for Blocking {
     }
 }
 
-/// The verdict on `token`: this example's requests answer at once, so the module answers READY.
-fn verify(module: &OidcModule, token: &str) -> AuthVerdict {
-    let client = reqwest::blocking::Client::builder()
+/// The example's HTTPS client: https only, every request bounded at 10 s, so a stalled Entra
+/// endpoint fails the live check instead of hanging it.
+fn client() -> reqwest::blocking::Client {
+    reqwest::blocking::Client::builder()
         .https_only(true)
         .timeout(std::time::Duration::from_secs(10))
         .build()
-        .expect("an HTTPS client");
+        .expect("an HTTPS client")
+}
+
+/// The verdict on `token`: this example's requests answer at once, so the module answers READY.
+fn verify(module: &OidcModule, token: &str) -> AuthVerdict {
+    let client = client();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("a clock after the epoch")
@@ -85,8 +91,7 @@ fn main() {
     };
 
     let token_endpoint = format!("https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token");
-    let http = reqwest::blocking::Client::new();
-    let resp = http
+    let resp = client()
         .post(&token_endpoint)
         .form(&[
             ("grant_type", "password"),
@@ -102,14 +107,23 @@ fn main() {
     let text = resp
         .text()
         .expect("Entra's token response body is readable");
-    let body: serde_json::Value =
-        serde_json::from_str(&text).expect("Entra's token response is JSON");
-    assert!(
-        status.is_success(),
-        "Entra rejected the real password grant ({status}). If this is \
-         AADSTS50055 (password expired), sign in interactively once as the test user to set a \
-         permanent password, then re-provision the ENTRA_TEST_PASSWORD secret."
-    );
+    let body: Option<serde_json::Value> = serde_json::from_str(&text).ok();
+    if !status.is_success() {
+        let said = |member: &str| {
+            body.as_ref()
+                .and_then(|b| b[member].as_str())
+                .unwrap_or("(none)")
+                .to_string()
+        };
+        panic!(
+            "Entra rejected the real password grant ({status}): error {}, {}. If this is \
+             AADSTS50055 (password expired), sign in interactively once as the test user to set a \
+             permanent password, then re-provision the ENTRA_TEST_PASSWORD secret.",
+            said("error"),
+            said("error_description")
+        );
+    }
+    let body = body.expect("Entra's token response is JSON");
     let id_token = body["id_token"]
         .as_str()
         .expect("a successful grant includes id_token")

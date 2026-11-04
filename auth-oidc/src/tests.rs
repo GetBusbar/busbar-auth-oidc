@@ -16,6 +16,18 @@ use ring::signature::{
 };
 use std::sync::Arc;
 
+/// The tests' current UNIX time in seconds, through the production mapping every clock reading
+/// takes ([`clock_or_fail_closed`]): a reading before the epoch, or below the sanity floor, is
+/// `i64::MAX`, which no token is judged against. Production reads the request's timestamp and the
+/// host's `clock.now` instead.
+pub(crate) fn now_unix() -> i64 {
+    let t = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(i64::MAX);
+    clock_or_fail_closed(t)
+}
+
 pub(crate) const ISSUER: &str = "https://login.microsoftonline.com/tenant-guid/v2.0";
 pub(crate) const AUDIENCE: &str = "api://busbar-client-id";
 const KID: &str = "test-key-1";
@@ -1450,6 +1462,33 @@ fn build_authorize_url_escapes_delimiters_dedups_openid_and_omits_an_absent_nonc
     assert!(url.ends_with("&code_challenge_method=S256"), "{url}");
 }
 
+/// The login's own scopes are requested beside the configured ones, deduped against them, and every
+/// entry goes out as given (a blank one too, as 1.5.5 sent it: `open` only warns about it).
+#[test]
+fn the_authorize_url_dedups_the_login_s_own_scopes_and_keeps_1_5_5_s_entries() {
+    let mut c = cfg("groups");
+    c.scopes = vec!["email".to_string(), " ".to_string()];
+    let extra = [
+        "email".to_string(),
+        "profile".to_string(),
+        "openid".to_string(),
+    ];
+    let url = authorize_url(
+        &c,
+        "https://idp.test/authorize",
+        &extra,
+        "https://busbar.test/cb",
+        "st",
+        "ch",
+        Some("n"),
+    );
+    assert!(
+        url.contains("&scope=openid%20email%20%20%20profile&"),
+        "openid first, each scope once, entries as given: {url}"
+    );
+    assert!(url.starts_with("https://idp.test/authorize?response_type=code&"));
+}
+
 #[test]
 fn build_authorize_url_keeps_an_existing_endpoint_query() {
     let mut c = cfg("groups");
@@ -1948,13 +1987,18 @@ fn only_an_rfc_6749_credential_error_at_the_token_endpoint_is_a_decline() {
             warn.messages()
         );
     }
-    let (outcome, _, all) = answered(400, r#"{"error":"SECRET-made-up"}"#);
-    assert!(matches!(outcome, Ok(LoginOutcome::Reject)), "{outcome:?}");
-    assert!(
-        !all.contains("SECRET"),
-        "an unlisted code is not echoed: {:?}",
-        all.messages()
-    );
+    for code in ["SECRET-made-up", "temporarily_unavailable", "server_error"] {
+        let (outcome, _, all) = answered(400, &format!(r#"{{"error":"{code}"}}"#));
+        assert!(
+            matches!(&outcome, Err(cause) if cause.contains("400")),
+            "{code}: not an RFC 6749 §5.2 credential error, so an outage: {outcome:?}"
+        );
+        assert!(
+            !all.contains("SECRET"),
+            "an unlisted code is not echoed: {:?}",
+            all.messages()
+        );
+    }
     for (status, body) in [
         (302, ""),
         (403, r#"{"error":"invalid_grant"}"#),

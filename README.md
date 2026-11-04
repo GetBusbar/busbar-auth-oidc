@@ -63,8 +63,8 @@ spawned as a separate process. A build can also link the same door in.
   discovery fetch fails, or the rate limit is holding the retry off after a
   failure, or the host clock is unreadable) a bearer verify FAILS with the
   reason and a browser login answers the outage; at the token endpoint only
-  an RFC 6749 §5.2 credential error (a 400/401 carrying `error`) declines a
-  login, any other non-2xx is an outage. A readable provider `Retry-After`
+  an RFC 6749 §5.2 credential error (a 400/401 whose `error` is one of
+  §5.2's codes) declines a login, any other non-2xx is an outage. A readable provider `Retry-After`
   accompanies a login outage through the host's identity buffer. The host
   applies its existing delay bounds; a missing or invalid hint, or a buffer
   too small for its metadata, keeps the host's default delay without
@@ -124,8 +124,9 @@ every `refresh`. The previous document serves during rediscovery and remains ava
 A discovered `jwks_uri`, `token_endpoint` or `authorization_endpoint` that
 is not https (plain http only to loopback), or one the host's destination
 guard refuses, is refused naming its host and the rule, and raised once
-per instance as the declared diagnostic `BUSBAR-4031`,
-which the host audits.
+per opened module as the declared diagnostic `BUSBAR-4031` (a `refresh`
+that re-opens the module with new settings or a new secret may raise it
+again), which the host audits.
 
 Unknown config fields are rejected (`deny_unknown_fields`) — a typo'd or
 stray key fails loudly at boot instead of being silently ignored.
@@ -245,8 +246,9 @@ entirely offline (no external IdP, no Docker service):
 - genuine ES256 signature verification (a token signed by the fixture's
   key is accepted and its claims mapped to a `Principal`; a token signed
   by a *different* key with the same `kid` is rejected);
-- the full claim → `Principal` mapping (`sub`/`preferred_username`/
-  `name`/the configured role claim) survives the round trip across the
+- the full claim → `Principal` mapping (the subject from `oid`, else
+  `sub`, as 1.5.5 took it; `name`/`preferred_username`; the configured
+  role claim) survives the round trip across the
   real C ABI, not just in-process Rust calls;
 - a load-time config error (empty config, or config missing a required
   field) surfaces back across the ABI as a clean `Err`, never a panic or

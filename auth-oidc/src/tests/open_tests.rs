@@ -1,3 +1,9 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2026 Busbar Inc and contributors
+
+//! The module `open` builds from its settings: what is refused at load, naming the key and never
+//! the value, and what loads and resolves its endpoints.
+
 use crate::script::{ready, Idp, ME};
 use crate::OidcModule;
 use busbar_contract::auth::{BeginLogin, LoginOutcome};
@@ -26,6 +32,37 @@ fn malformed_endpoint_settings_are_refused_without_echoing_values() {
         assert!(error.contains(field));
         assert!(!error.contains("Secret"));
     }
+}
+
+/// A blank `scopes` entry loads as it did in 1.5.5 (it is no optional string setting the blank
+/// rule refuses), and `open` warns that a strict IdP refuses the empty scope-token it sends.
+#[test]
+fn a_blank_scope_entry_loads_with_a_warning() {
+    for blank in ["", "  \t"] {
+        let config = serde_json::json!({
+            "issuer": "https://idp.example",
+            "audience": "aud",
+            "scopes": ["profile", blank],
+        })
+        .to_string();
+        assert!(crate::open::config(&config).is_ok(), "{blank:?} loads");
+        let cap = crate::tests::diagnostics::WarnCapture::default();
+        tracing::subscriber::with_default(cap.subscriber(), || {
+            super::module(&config).expect("opens");
+        });
+        assert!(cap.contains("settings.scopes"), "{:?}", cap.messages());
+    }
+    let config = serde_json::json!({
+        "issuer": "https://idp.example",
+        "audience": "aud",
+        "scopes": ["profile", "email offline_access"],
+    })
+    .to_string();
+    let cap = crate::tests::diagnostics::WarnCapture::default();
+    tracing::subscriber::with_default(cap.subscriber(), || {
+        super::module(&config).expect("opens");
+    });
+    assert!(!cap.contains("settings.scopes"), "{:?}", cap.messages());
 }
 
 /// The module `open` builds, its warning (checked by `door_tests`) set aside.

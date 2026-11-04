@@ -55,7 +55,8 @@ pub struct OidcConfig {
     /// The token `iss` to require, EXACT match. For Entra:
     /// `https://login.microsoftonline.com/<tenant-id>/v2.0`.
     pub issuer: String,
-    /// The token `aud` to require, EXACT match. For Entra this is the application (client) id.
+    /// The audience a bearer's `aud` must CONTAIN (other audiences beside it are allowed, RFC 7519
+    /// §4.1.3, RFC 9068 §4). For Entra this is the application (client) id.
     pub audience: String,
     /// The JWKS endpoint. Optional: when absent it is derived from the issuer's OIDC discovery
     /// document (`<issuer>/.well-known/openid-configuration` → `jwks_uri`), fetched by the first
@@ -123,7 +124,6 @@ pub struct OidcVerifier {
     id_token: bool,
 }
 
-/// The result of validating a token's CLAIMS (post-signature): the resolved principal, or a denial
 impl OidcVerifier {
     /// The BEARER verifier: `issuer` exactly, an `aud` containing `audience` (RFC 7519 §4.1.3,
     pub fn new(
@@ -183,11 +183,13 @@ impl OidcVerifier {
             _ => false,
         } && !(self.id_token && claims.get("azp").is_some() && azp != Some(trusted));
         if !aud_ok {
-            return Err(
-                "token audience does not match the configured audience (or lists an untrusted \
+            return Err(if self.id_token {
+                "token audience does not match the configured client (or lists an untrusted \
                  additional audience without an azp naming the trusted client)"
-                    .to_string(),
-            );
+            } else {
+                "token audience does not contain the configured audience"
+            }
+            .to_string());
         }
 
         let exp = match as_numeric_date_floor(claims.get("exp")) {
@@ -435,7 +437,8 @@ impl OidcModule {
 
         match self.jwks.warm(&url, now, io) {
             Step::Pending => Step::Pending,
-            Step::Ready(_) | Step::Wait => Step::Ready(Ok(())),
+            Step::Wait => Step::Wait,
+            Step::Ready(_) => Step::Ready(Ok(())),
         }
     }
 
@@ -614,7 +617,7 @@ impl OidcModule {
         now_mono: Instant,
         io: &mut dyn Fetch,
     ) -> Step<Result<AuthVerdict, String>> {
-        let Some(payload) = jwt::payload(token) else {
+        let Some(payload) = jwt::payload(token).map(zeroize::Zeroizing::new) else {
             tracing::debug!(
                 module = "oidc",
                 "bearer is not a JWT: not this provider's credential; passed to the next auth"
@@ -717,11 +720,10 @@ impl OidcModule {
             return Step::Ready(Ok(LoginOutcome::Reject));
         };
 
-        let mut cfg = self.cfg.clone();
-        cfg.authorization_endpoint = Some(endpoint);
-        cfg.scopes.extend(req.scopes.iter().cloned());
-        Step::Ready(Ok(LoginOutcome::Authorize(build_authorize_url(
-            &cfg,
+        Step::Ready(Ok(LoginOutcome::Authorize(authorize_url(
+            &self.cfg,
+            &endpoint,
+            &req.scopes,
             &req.redirect_uri,
             &req.state,
             &req.code_challenge,
@@ -827,6 +829,7 @@ pub(crate) fn nonce_binds(body: &str, nonce: &str) -> bool {
             base64::engine::general_purpose::URL_SAFE_NO_PAD
                 .decode(p)
                 .ok()
+                .map(zeroize::Zeroizing::new)
         })
         .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
         .and_then(|c| c.get("nonce").and_then(Value::as_str).map(str::to_string));
@@ -850,13 +853,7 @@ fn oauth_error(body: &str) -> Option<&'static str> {
         error: String,
     }
     let code = serde_json::from_str::<ErrorBody>(body).ok()?.error;
-    Some(
-        OAUTH_ERRORS
-            .iter()
-            .find(|c| **c == code)
-            .copied()
-            .unwrap_or("(unlisted)"),
-    )
+    OAUTH_ERRORS.iter().find(|c| **c == code).copied()
 }
 
 /// The OAuth `client_id` to present: the explicit `client_id`, else the `audience` (the common
@@ -866,12 +863,13 @@ fn resolved_client_id(cfg: &OidcConfig) -> String {
         .unwrap_or_else(|| cfg.audience.clone())
 }
 
-/// The space-delimited `scope` value: always `openid` first, then the configured scopes, deduped.
-fn scope_value(cfg: &OidcConfig) -> String {
-    let mut scopes = vec!["openid".to_string()];
-    for s in &cfg.scopes {
-        if !scopes.iter().any(|x| x == s) {
-            scopes.push(s.clone());
+/// The space-delimited `scope` value: always `openid` first, then the configured scopes and the
+/// login's `extra` ones, deduped (each entry as given, as 1.5.5 sent it).
+fn scope_value(cfg: &OidcConfig, extra: &[String]) -> String {
+    let mut scopes = vec!["openid"];
+    for s in cfg.scopes.iter().chain(extra) {
+        if !scopes.contains(&s.as_str()) {
+            scopes.push(s);
         }
     }
     scopes.join(" ")
@@ -900,8 +898,29 @@ pub fn build_authorize_url(
     nonce: Option<&str>,
 ) -> String {
     let endpoint = cfg.authorization_endpoint.as_deref().unwrap_or_default();
+    authorize_url(
+        cfg,
+        endpoint,
+        &[],
+        redirect_uri,
+        state,
+        code_challenge,
+        nonce,
+    )
+}
+
+/// [`build_authorize_url`] at `endpoint`, the login's `extra` scopes requested beside `cfg`'s.
+fn authorize_url(
+    cfg: &OidcConfig,
+    endpoint: &str,
+    extra: &[String],
+    redirect_uri: &str,
+    state: &str,
+    code_challenge: &str,
+    nonce: Option<&str>,
+) -> String {
     let client_id = resolved_client_id(cfg);
-    let scope = scope_value(cfg);
+    let scope = scope_value(cfg, extra);
 
     let sep = if endpoint.contains('?') { '&' } else { '?' };
     let mut url = format!(
@@ -937,24 +956,6 @@ pub fn token_form(
         Some(secret) => form.sealed("client_secret", &secret.clone().secure_for(url)),
         None => form,
     }
-}
-
-/// TESTS' current UNIX time in seconds (production reads the request's timestamp and the host's
-/// `clock.now`, through [`clock_or_fail_closed`]). Fails CLOSED on a clock it cannot trust: `validate_claims`'s
-/// `exp` check is `exp + skew >= now_unix`, so a `now_unix` that reads too LOW makes every token
-/// appear unexpired (fail OPEN) — the exact failure this guards against. Two cases, both mapped to
-/// `i64::MAX` (which `validate_claims` refuses outright, naming the clock):
-///   - `SystemTime::now()` returns `Err` (host clock strictly before the UNIX epoch) — rare.
-///   - The clock IS readable but below [`CLOCK_SANITY_FLOOR_UNIX`] — the realistic broken-clock case
-///     (a dead RTC booting a host at the epoch, or an NTP/RTC fault landing in 1970-2000), which
-///     `duration_since` reports as `Ok(small_value)` and would otherwise sail straight through.
-#[cfg(test)]
-pub(crate) fn now_unix() -> i64 {
-    let t = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(i64::MAX);
-    clock_or_fail_closed(t)
 }
 
 /// The fail-closed mapping every clock reading takes (the request's timestamp, the host's

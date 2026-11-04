@@ -48,6 +48,12 @@ impl KeyError {
     }
 }
 
+/// THE STALENESS CEILING (how long a key set keeps serving while every refetch fails): this many
+/// TTLs, and never less than [`MAX_STALE_FLOOR`].
+const MAX_STALE_TTLS: u32 = 24;
+/// The staleness ceiling's floor: a day.
+const MAX_STALE_FLOOR: Duration = Duration::from_secs(24 * 3600);
+
 /// A JWKS cache. Holds the last-fetched key set, the timestamps that bound refresh and the fetch in
 pub struct JwksCache {
     /// Minimum gap between fetch ATTEMPTS — the bound on every refetch trigger (cold, TTL-stale,
@@ -80,7 +86,7 @@ struct Inner {
 impl JwksCache {
     /// A cache with the given rate limit and TTL.
     pub fn new(min_refetch_interval: Duration, ttl: Duration) -> Self {
-        let max_stale = std::cmp::max(ttl.saturating_mul(24), Duration::from_secs(24 * 3600));
+        let max_stale = std::cmp::max(ttl.saturating_mul(MAX_STALE_TTLS), MAX_STALE_FLOOR);
         Self {
             min_refetch_interval,
             ttl,

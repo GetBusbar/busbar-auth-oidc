@@ -18,7 +18,7 @@ pub const MAX_ENTRIES: usize = 4096;
 pub const MAX_PRINCIPAL_BYTES: usize = 8 * 1024;
 
 /// Count the serialized identity without allocating a second copy of its strings. Stop at the
-fn size_of(p: &Principal) -> usize {
+fn serialized_len(p: &Principal) -> usize {
     #[derive(serde::Serialize)]
     struct View<'a> {
         id: &'a str,
@@ -138,7 +138,7 @@ impl VerdictCache {
             .unwrap_or(DEFAULT_TTL_SECS)
             .min(MAX_TTL_SECS);
 
-        if ttl == 0 || size_of(principal) > MAX_PRINCIPAL_BYTES {
+        if ttl == 0 || serialized_len(principal) > MAX_PRINCIPAL_BYTES {
             return;
         }
         let k = key(credential);
