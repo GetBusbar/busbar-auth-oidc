@@ -2,6 +2,8 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! JWKS (JSON Web Key Set) model + verifying-key extraction. Pure data + `ring` key material; no I/O
+//! (the fetch/cache lives in [`crate::cache`]). A JWKS is the provider's set of PUBLIC signing
+//! keys, each tagged by `kid`; a JWT's header `kid` selects which one verified it.
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde::Deserialize;
@@ -33,6 +35,8 @@ pub enum KeyMaterial {
 
 impl KeyMaterial {
     /// Decode a key's material from its base64url fields, selected by `kty`. Never fails — a decode
+    /// problem becomes [`KeyMaterial::Unusable`] so it surfaces at verify time with an exact
+    /// message.
     fn from_jwk(jwk: &Jwk) -> Self {
         match jwk.kty.as_str() {
             "RSA" => {
@@ -125,6 +129,8 @@ pub struct Jwk {
 
 impl Jwk {
     /// Whether this key may verify a token signed with `alg`: the key type `alg` needs (`RS256`:
+    /// RSA, `ES256`: EC), an `alg` absent or equal to it, not encryption-only, and `key_ops` absent
+    /// or naming `verify`.
     pub fn signs(&self, alg: &str) -> bool {
         let shape_fits = match alg {
             crate::jwt::ALG_RS256 => self.kty == "RSA",
@@ -141,6 +147,7 @@ impl Jwk {
     }
 
     /// The decoded, verify-ready key material for this key — decoded once, then memoised, so the hot
+    /// per-request verify path never re-decodes the base64url fields.
     pub fn material(&self) -> &KeyMaterial {
         self.decoded.get_or_init(|| KeyMaterial::from_jwk(self))
     }
@@ -166,6 +173,9 @@ struct RawSet {
 
 impl JwkSet {
     /// Parse a JWKS document (the body of a `jwks_uri` GET). Entries that are not usable JWKs are
+    /// skipped (see [`JwkSet::keys`]), one warn naming how many. A document that parses but carries
+    /// ZERO usable keys is an error, not an empty success, so a provider blip cannot replace a
+    /// working key set.
     pub fn parse(body: &str) -> Result<Self, String> {
         let raw: RawSet = serde_json::from_str(body).map_err(
             busbar_contract::abi::sdk::auth_kit::json_error("invalid JWKS document"),
@@ -203,6 +213,9 @@ impl JwkSet {
     }
 
     /// The keys a token naming `kid`, signed with `alg`, is tried against: every key whose `kid`
+    /// matches ([`Self::find_all`]); for a token naming no kid with its `alg` known, the set's
+    /// single usable signing key for that alg if there is exactly one, else none. `alg` `None`
+    /// selects by `kid` alone.
     pub fn select<'a>(&'a self, kid: &'a str, alg: Option<&str>) -> Vec<&'a Jwk> {
         match alg {
             Some(alg) if kid.is_empty() => {
@@ -218,6 +231,8 @@ impl JwkSet {
     }
 
     /// Find ALL keys whose `kid` matches `kid`. A JWT header names the `kid` that signed it; selecting
+    /// by `kid` (not "try every key in the set") is what makes a key-rotation refetch meaningful.
+    /// More than one key can share a `kid` (RFC 7517 §4.5), so the caller must try every match.
     pub fn find_all<'a>(&'a self, kid: &'a str) -> impl Iterator<Item = &'a Jwk> {
         self.keys
             .iter()

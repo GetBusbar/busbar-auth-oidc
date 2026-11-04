@@ -2,6 +2,13 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! **OIDC auth module** for busbar — the first identity-provider auth PLUGIN. Validates an OpenID
+//! Connect JWT (ID or access token) a caller presents as its bearer credential and maps it to a
+//! [`busbar_contract::auth::Principal`]: verify the signature against the provider's JWKS, check
+//! `iss`/`aud`/`exp`/`nbf`, and read the configured role claim (`groups` by default, or `roles` for
+//! Entra app-roles) into the principal's ROLES. busbar's own `auth.role_bindings:` config then
+//! resolves those roles to governance grants and admin scope; the module asserts identity only,
+//! never policy. Signature verification runs on `ring`. A browser login is served through the
+//! module's door ([`door::door`]).
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -31,15 +38,23 @@ pub use flight::Step;
 pub use open::config;
 
 /// The default role/group claim name — the token claim read into the principal's ROLES when the
+/// operator does not set `role_claim`, and the value the Entra >200-groups overage guard keys on.
 const DEFAULT_ROLE_CLAIM: &str = "groups";
 /// Default JWKS refetch bound (the kid-rotation rate limit) and JWKS TTL (not the verdict
+/// cache's: [`verdicts`]).
 const DEFAULT_MIN_REFETCH_SECS: u64 = 60;
 const DEFAULT_JWKS_TTL_SECS: u64 = 3600;
 /// Small clock-skew tolerance applied to `exp`/`nbf` (seconds) — standard practice so a few seconds of
+/// clock drift between busbar and the IdP does not spuriously reject a just-issued or near-expiry
+/// token.
 const CLOCK_SKEW_SECS: i64 = 60;
 /// Ceiling on the credential-cache TTL this module suggests via `Principal::ttl_secs`, the TTL its
+/// own verdict cache ([`verdicts`]) holds an identity for. It equals that cache's default TTL and
+/// must only ever shorten it, never lengthen it, bounding the stale-revocation window.
 const MAX_CACHE_TTL_SECS: i64 = 300;
 /// A host clock reading before this instant means the clock cannot be trusted at all — used to make
+/// [`clock_or_fail_closed`] fail CLOSED on a broken-clock state such as a dead RTC booting a host
+/// at the epoch, which would otherwise make `exp` checks pass for virtually any real token.
 const CLOCK_SANITY_FLOOR_UNIX: i64 = 1_767_225_600;
 
 /// Why no token can be judged while the host clock reads `i64::MAX` ([`clock_or_fail_closed`]).
@@ -116,16 +131,21 @@ fn default_ttl_secs() -> u64 {
 }
 
 /// The pure token VERIFIER: config-derived policy (issuer/audience/role_claim) plus the current time
+/// source. Separated from the module and JWKS cache so the whole verify path, signature aside, is
+/// unit testable with plain claim maps. Signature verification is [`jwt::verify_signature`].
 pub struct OidcVerifier {
     issuer: String,
     audience: String,
     role_claim: String,
     /// Whether this verifier judges a browser-login `id_token` (OIDC Core 1.0 §3.1.3.7's
+    /// authorized-party rules against `audience`, the client_id) rather than a bearer access token
+    /// (RFC 9068 §4: `aud` contains the resource audience, no `azp` rule).
     id_token: bool,
 }
 
 impl OidcVerifier {
     /// The BEARER verifier: `issuer` exactly, an `aud` containing `audience` (RFC 7519 §4.1.3,
+    /// RFC 9068 §4), roles from `role_claim`.
     pub fn new(
         issuer: impl Into<String>,
         audience: impl Into<String>,
@@ -140,6 +160,7 @@ impl OidcVerifier {
     }
 
     /// The browser-login `id_token` verifier: as [`Self::new`] with the OAuth `client_id` as the
+    /// audience, plus OIDC Core 1.0 §3.1.3.7's authorized-party rules against it.
     pub fn for_id_token(
         issuer: impl Into<String>,
         client_id: impl Into<String>,
@@ -261,6 +282,8 @@ impl OidcVerifier {
 const UNTRUSTED_MAX: usize = 64;
 
 /// A FAR-END string (a JWKS key's `kty`/`crv`, a discovery document's `issuer`) or an ATTACKER one
+/// (a token's `alg`, `kid`, `crit`, `iss`) as an error or log line repeats it: escaped and capped
+/// at [`UNTRUSTED_MAX`] characters, then `…`.
 pub fn untrusted(s: &str) -> String {
     let mut shown: String = s
         .chars()
@@ -274,6 +297,9 @@ pub fn untrusted(s: &str) -> String {
 }
 
 /// Issuer routing: `None` when the (UNVERIFIED) claims `payload` names exactly `issuer` as its
+/// `iss`, so the token is this provider's to verify; otherwise the issuer it names instead, as a
+/// log may print it, or `<none>` for a payload with no string `iss`. The signature is not checked
+/// here.
 fn foreign_issuer(payload: &[u8], issuer: &str) -> Option<String> {
     let claims = serde_json::from_slice::<Value>(payload).ok();
     match claims
@@ -300,27 +326,37 @@ fn is_groups_overage(claims: &Value) -> bool {
 }
 
 /// Read a claim as a string ONLY if it is present and not empty/whitespace-only. Used for the
+/// identity anchor (`oid`/`sub`), where a blank value is no identity at all and must be treated
+/// like an absent claim.
 fn non_empty_claim(v: Option<&Value>) -> Option<&str> {
     v.and_then(Value::as_str).filter(|s| !s.trim().is_empty())
 }
 
 /// Read an `exp` claim as a JWT NumericDate (RFC 7519 §2), FLOORING any fractional part. `as_i64`
+/// alone treats a spec-legal fractional value (e.g. `exp: 1700000000.5`) as ABSENT, so this falls
+/// back to `as_f64`. Flooring never rounds an expiry later, so a token never outlives its stated
+/// `exp`.
 fn as_numeric_date_floor(v: Option<&Value>) -> Option<i64> {
     as_numeric_date(v, f64::floor)
 }
 
 /// Read an `nbf` claim as a JWT NumericDate (RFC 7519 §2), CEILING any fractional part. Same
+/// `as_i64`→`as_f64` fallback as [`as_numeric_date_floor`], but the opposite rounding direction, so
+/// a token never becomes valid before its stated `nbf`.
 fn as_numeric_date_ceil(v: Option<&Value>) -> Option<i64> {
     as_numeric_date(v, f64::ceil)
 }
 
 /// Shared NumericDate reader: integer fast path, else `as_f64` rounded via `round` (floor for `exp`,
+/// ceil for `nbf`), so a spec-legal fractional NumericDate is honored in the conservative direction
+/// for its bound rather than silently dropped as absent.
 fn as_numeric_date(v: Option<&Value>, round: impl Fn(f64) -> f64) -> Option<i64> {
     let v = v?;
     v.as_i64().or_else(|| v.as_f64().map(|f| round(f) as i64))
 }
 
 /// Read a claim as a list of strings. Accepts a JSON array of strings OR a single string (one
+/// role, taken whole). Anything else yields an empty list.
 fn extract_string_list(v: Option<&Value>) -> Vec<String> {
     if v.is_some_and(|value| match value {
         Value::String(_) => false,
@@ -346,19 +382,26 @@ fn extract_string_list(v: Option<&Value>) -> Vec<String> {
 pub struct OidcModule {
     verifier: OidcVerifier,
     /// The verifier for the browser-login `id_token`: the same issuer and role claim, but the
+    /// audience is the OAuth `client_id`. With `client_id` unset it resolves to `audience`, so the
+    /// two verifiers are identical.
     login_verifier: OidcVerifier,
     jwks: JwksCache,
     discovery: Discovery,
     /// The identities this module verified for bearer credentials, held for their TTL
+    /// ([`verdicts`]).
     verdicts: verdicts::VerdictCache,
     /// The config, retained so the browser-login path can read the client-id, scopes, and the
+    /// authorize/token endpoints, and the JWKS url when it is configured.
     cfg: OidcConfig,
     /// The destination refusals already raised as the door's declared diagnostic
+    /// ([`Self::first_report`]): each is raised once per module, not once per request.
     reported: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
 impl OidcModule {
     /// Construct from parsed (and [`check_jwks_url`]-checked) config. Nothing is fetched here: the
+    /// JWKS, and the discovery document when a URL is not configured, are fetched by the first op
+    /// that needs them.
     pub fn new(cfg: &OidcConfig) -> Self {
         Self {
             verifier: OidcVerifier::new(&cfg.issuer, &cfg.audience, &cfg.role_claim),
@@ -379,6 +422,8 @@ impl OidcModule {
     }
 
     /// Whether the destination refusal `why` is met for the first time by this module: the door
+    /// raises it as its declared diagnostic only then, so a refusal every request meets is audited
+    /// once, not per request.
     pub fn first_report(&self, why: &str) -> bool {
         self.reported
             .lock()
@@ -387,6 +432,7 @@ impl OidcModule {
     }
 
     /// Have the issuer's discovery document asked for again at its next use (`refresh`), the one
+    /// held serving until then.
     pub fn rediscover(&self) {
         self.discovery.expire();
     }
@@ -397,11 +443,15 @@ impl OidcModule {
     }
 
     /// How often `tick` asks to run: the JWKS refetch bound (`jwks_min_refetch_secs`, 60 s by
+    /// default), at least one second.
     pub fn tick_period(&self) -> Duration {
         Duration::from_secs(self.cfg.jwks_min_refetch_secs.max(1))
     }
 
     /// The tick refreshes ahead of the TTL: the key set is fetched again once it is within one
+    /// tick period of its TTL (`jwks_ttl_secs`, 3600 s by default), on the caller's ticket and
+    /// rate-limited like every fetch, so the request that finds the set stale is not the one that
+    /// waits on its refresh.
     pub fn refresh_ahead(&self, now: Instant, io: &mut dyn Fetch) -> Step<Result<(), String>> {
         let url = match self.jwks_url(now, io) {
             Step::Ready(Err(error)) => {
@@ -416,6 +466,7 @@ impl OidcModule {
     }
 
     /// Whether the settings name an operator CA (`ca_cert_pem`, non-empty): the module's requests
+    /// then go out on the needs that trust it, else on the public set.
     pub fn anchored(&self) -> bool {
         self.cfg
             .ca_cert_pem
@@ -432,6 +483,8 @@ impl OidcModule {
     }
 
     /// The host's `ready` (after `open`, before any listener binds; boot awaits it): boot-time
+    /// discovery, the JWKS url from the issuer's discovery document (an explicit `jwks_url` skips
+    /// it), a failure refusing boot, then the key set's best-effort warm-up.
     pub fn ready(&self, now: Instant, io: &mut dyn Fetch) -> Step<Result<(), String>> {
         let url = step_ok!(self.jwks_url(now, io));
 
@@ -443,6 +496,8 @@ impl OidcModule {
     }
 
     /// The login endpoint `configured`, else the discovery document's `field` (the SAME
+    /// issuer-match-guarded document [`Self::jwks_url`] reads); `None` when the document omits it
+    /// too, so that half of browser login is unavailable and fails closed.
     fn endpoint<'a>(
         &'a self,
         configured: Option<&'a String>,
@@ -495,6 +550,8 @@ impl OidcModule {
     }
 
     /// Verify a login token-endpoint response into an identity. Parses the token endpoint's JSON,
+    /// extracts the `id_token`, and reuses the full verify path to produce a [`Principal`],
+    /// checking the OAuth `client_id` as the audience rather than the bearer `audience`.
     pub fn identity_from_token_response(
         &self,
         resp: &LoginHttpResponse,
@@ -565,6 +622,9 @@ impl OidcModule {
     }
 
     /// The full verification of one presented bearer credential → an [`AuthVerdict`]: none
+    /// presented, one that is not a JWT, or a JWT whose (unverified) `iss` is not this provider's
+    /// issuer, is not ours (`Pass`, to the next auth in the chain); a JWT naming this provider's
+    /// issuer is verified in full, and any failure of the token is a `Reject`.
     pub fn verify(
         &self,
         token: Option<&str>,
@@ -581,6 +641,8 @@ impl OidcModule {
     }
 
     /// The credential cache: the identity a bearer this module identified within its TTL
+    /// verified as, and the TTL it has left, answered with no decode, parse or signature check and
+    /// no request.
     pub fn cached(&self, token: &str, now_unix: i64) -> Option<verdicts::Hit> {
         self.verdicts.get(token, now_unix)
     }
@@ -609,6 +671,7 @@ impl OidcModule {
     }
 
     /// [`Self::verify`] against an explicit claim `verifier`: the bearer path passes the
+    /// `audience` verifier, the browser-login path the `client_id` one.
     fn verify_with(
         &self,
         verifier: &OidcVerifier,
@@ -694,6 +757,8 @@ impl OidcModule {
     }
 
     /// Start browser login: the CORE has already minted PKCE `state`/`code_challenge` and the
+    /// `nonce`; answer the IdP authorize URL to redirect to. Fails closed (`Reject`) when no
+    /// `authorization_endpoint` is configured or discovered.
     pub fn begin_login(
         &self,
         req: &BeginLogin,
@@ -732,6 +797,8 @@ impl OidcModule {
     }
 
     /// The callback's token request: its `code`, `redirect_uri` and `code_verifier`, and the lent
+    /// client `secret` (if any), as the form [`token_form`] builds. `None` (fail closed) for a
+    /// callback lacking any of the three.
     pub fn token_exchange(
         &self,
         code: Option<&str>,
@@ -814,6 +881,8 @@ fn wiped<'de, D: serde::Deserializer<'de>>(
 }
 
 /// The nonce binding: `true` when the token endpoint's `body`
+/// carries no `id_token`, or carries one whose (unverified) payload names `nonce` as its `nonce`
+/// claim, compared in constant time.
 pub(crate) fn nonce_binds(body: &str, nonce: &str) -> bool {
     if nonce.is_empty() {
         return false;
@@ -847,6 +916,8 @@ const OAUTH_ERRORS: &[&str] = &[
 ];
 
 /// The RFC 6749 §5.2 error a token-endpoint `body` carries, as a log may print it: the allow-listed
+/// code, `(unlisted)` for any other string; `None` when the body is not a JSON object with a string
+/// `error`.
 fn oauth_error(body: &str) -> Option<&'static str> {
     #[derive(Deserialize)]
     struct ErrorBody {
@@ -857,6 +928,7 @@ fn oauth_error(body: &str) -> Option<&'static str> {
 }
 
 /// The OAuth `client_id` to present: the explicit `client_id`, else the `audience` (the common
+/// confidential-client case where the app's client-id IS the token audience).
 fn resolved_client_id(cfg: &OidcConfig) -> String {
     cfg.client_id
         .clone()
@@ -876,6 +948,7 @@ fn scope_value(cfg: &OidcConfig, extra: &[String]) -> String {
 }
 
 /// Percent-encode `s` for use as a URL QUERY-component value (RFC 3986 unreserved set kept literal,
+/// everything else `%`-escaped). Used only for the authorize URL.
 fn pct(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for &b in s.as_bytes() {
@@ -890,6 +963,8 @@ fn pct(s: &str) -> String {
 }
 
 /// Build the OAuth **authorization-code** authorize URL: `response_type=code`, `client_id`,
+/// `code_challenge_method=S256`, and `nonce` when present. Structurally cannot contain a
+/// `client_secret`.
 pub fn build_authorize_url(
     cfg: &OidcConfig,
     redirect_uri: &str,
@@ -938,6 +1013,8 @@ fn authorize_url(
 }
 
 /// THE TOKEN REQUEST'S FORM (`url`'s authorization-code grant): `grant_type=authorization_code`,
+/// `code`, `redirect_uri`, `code_verifier`, `client_id`, then the lent client `secret` sealed as
+/// `client_secret`. With no secret lent the field is left out rather than sent empty.
 pub fn token_form(
     cfg: &OidcConfig,
     url: &str,
@@ -959,6 +1036,8 @@ pub fn token_form(
 }
 
 /// The fail-closed mapping every clock reading takes (the request's timestamp, the host's
+/// `clock.now`, the tests' `now_unix`): a reading at or above [`CLOCK_SANITY_FLOOR_UNIX`] passes
+/// through, anything below becomes `i64::MAX`.
 pub(crate) fn clock_or_fail_closed(t: i64) -> i64 {
     if t >= CLOCK_SANITY_FLOOR_UNIX {
         t
@@ -968,6 +1047,9 @@ pub(crate) fn clock_or_fail_closed(t: i64) -> i64 {
 }
 
 /// The setting an operator configures to name a discovered endpoint's URL themselves: the discovery
+/// fields whose URL the module FETCHES (`jwks_uri`, `token_endpoint`) or sends the browser to
+/// (`authorization_endpoint`), and so holds to https ([`discovered_secure`]). `None` for any other
+/// field.
 fn discovered_setting(field: &str) -> Option<&'static str> {
     match field {
         "jwks_uri" => Some("jwks_url"),
@@ -978,6 +1060,8 @@ fn discovered_setting(field: &str) -> Option<&'static str> {
 }
 
 /// A DISCOVERED ENDPOINT'S SCHEME (OIDC Discovery 1.0 §3, RFC 9700 §4): a `field` URL the issuer's
+/// discovery document names is taken on ANY host, but only over https (plain http only to a
+/// loopback host). WHERE it may go is the destination guard's.
 pub fn discovered_secure(field: &str, setting: &str, url: &str) -> Result<(), String> {
     let Ok(parsed) = url::Url::parse(url) else {
         return Err(fetch::refusal(
@@ -1033,6 +1117,8 @@ pub fn check_jwks_url(cfg: &OidcConfig) -> Result<Option<String>, String> {
 }
 
 /// Whether the parsed URL's host is loopback: an IPv4 literal in 127.0.0.0/8, the IPv6 literal
+/// `::1`, or the `localhost` name or a name under it, a trailing dot and case ignored. It reads the
+/// parsed host only and makes no DNS lookup.
 fn is_loopback_host(url: &url::Url) -> bool {
     match url.host() {
         Some(url::Host::Ipv4(v4)) => v4.is_loopback(),

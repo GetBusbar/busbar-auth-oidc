@@ -2,6 +2,11 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The JWKS cache: fetch-on-demand, TTL refresh, and a BOUNDED refetch — when a token names a `kid`
+//! absent from the cached set (the provider rotated its signing key), refetch once, rate-limited,
+//! and retry. This keeps a bogus-`kid` flood from turning into a fetch storm. The cache never
+//! blocks and never dials: its fetch is the caller's [`Fetch`], which answers PENDING while the
+//! caller's own exchange is in flight, and one caller claims the fetch while every other caller
+//! with nothing to serve waits to be woken.
 
 use crate::fetch::{Doc, Fetch};
 use crate::flight::{Flight, Step};
@@ -55,12 +60,17 @@ const MAX_STALE_TTLS: u32 = 24;
 const MAX_STALE_FLOOR: Duration = Duration::from_secs(24 * 3600);
 
 /// A JWKS cache. Holds the last-fetched key set, the timestamps that bound refresh and the fetch in
+/// flight.
 pub struct JwksCache {
     /// Minimum gap between fetch ATTEMPTS — the bound on every refetch trigger (cold, TTL-stale,
+    /// kid-rotation), so no flood of requests can turn into a fetch storm.
     min_refetch_interval: Duration,
     /// TTL after which the cached set is considered stale and proactively refetched on next use.
     ttl: Duration,
     /// Absolute ceiling on how long a cached key set may keep serving while every refetch attempt
+    /// fails. A transient blip keeps serving the last-known-good keys, but past this ceiling the
+    /// cache fails closed, so a long outage cannot keep validating against keys the provider may
+    /// have rotated out. Derived from `ttl` as `max(ttl * 24, 24h)`.
     max_stale: Duration,
     /// The cached data. Held for microseconds only — NEVER across a fetch or a signature verify.
     inner: Mutex<Inner>,
@@ -96,6 +106,9 @@ impl JwksCache {
     }
 
     /// Run `f` against the key matching `kid`, the JWKS fetched from `url` through `io`. If the
+    /// cache is empty or stale, fetch first; if `kid` still misses after that (key rotation),
+    /// refetch once, rate-limited by `min_refetch_interval`, and retry. A miss after the bounded
+    /// refetch is a precise [`KeyError`].
     pub fn with_key<T>(
         &self,
         url: &str,
@@ -108,6 +121,8 @@ impl JwksCache {
     }
 
     /// [`Self::with_key`] for a token signed with `alg`: a token naming NO kid (`kid` empty) is
+    /// verified by the set's single usable signing key for `alg` ([`JwkSet::select`]), if there is
+    /// exactly one.
     pub fn with_key_for<T>(
         &self,
         url: &str,
@@ -171,6 +186,7 @@ impl JwksCache {
     }
 
     /// THE WARM-UP (`ready`, at boot): fetch the key set once when the cache holds none, so the
+    /// first verdicts are answered on the spot.
     pub fn warm(&self, url: &str, now: Instant, io: &mut dyn Fetch) -> Step<Result<(), String>> {
         let mine = self.lock().flight.filter(|(fl, _)| fl.mine(io.caller()));
         if let Some((flight, _)) = mine {
@@ -186,6 +202,8 @@ impl JwksCache {
     }
 
     /// THE TICK'S REFRESH AHEAD OF THE TTL: when the set is due (none yet, or within `lead` of its
+    /// TTL), fetch it on this caller's ticket, rate-limited like every trigger and never waiting on
+    /// another caller's fetch.
     pub fn refresh_ahead(
         &self,
         url: &str,
@@ -209,6 +227,7 @@ impl JwksCache {
     }
 
     /// Whether the set is due for its refresh at `now`: none fetched, or `lead` or less short of
+    /// its TTL.
     fn due(&self, now: Instant, lead: Duration) -> bool {
         self.lock()
             .fetched_at
@@ -216,6 +235,8 @@ impl JwksCache {
     }
 
     /// The lookup after the bounded rotation refetch: a match, or the unknown-`kid` error — a
+    /// MISMATCH when the set in hand is the one the IdP last answered, an OUTAGE when its latest
+    /// fetch failed.
     fn after_rotation<T>(
         &self,
         keys: Option<&JwkSet>,
@@ -251,6 +272,8 @@ impl JwksCache {
     }
 
     /// Try `f` against every key in `set` selected for `kid` and `alg` ([`JwkSet::select`]),
+    /// returning the first `Ok`, the last error when keys matched but all errored, or `None` when
+    /// no key matched at all.
     fn try_all<T>(
         set: &JwkSet,
         kid: &str,
@@ -268,6 +291,7 @@ impl JwksCache {
     }
 
     /// Snapshot the cached set, whether it is past TTL, and whether it is past the absolute staleness
+    /// ceiling (`max_stale`).
     fn snapshot(&self, now: Instant) -> (Option<Arc<JwkSet>>, bool, bool) {
         self.snapshot_of(&self.lock(), now)
     }
@@ -342,6 +366,9 @@ impl JwksCache {
     }
 
     /// The fetch claimed at `at` answered `fetched`: install a parsed set, or keep the previous keys
+    /// (a transient provider blip must not blow away a working key set), unless those are already
+    /// past the absolute staleness ceiling. Ends the caller's flight and wakes every op waiting on
+    /// it.
     fn settle(
         &self,
         io: &dyn Fetch,
@@ -409,6 +436,7 @@ impl JwksCache {
     }
 
     /// Whether a fetch ATTEMPT is allowed now. Anchored on the last attempt (not the last success),
+    /// so failures are rate-limited exactly like successes.
     fn permits_attempt(&self, inner: &Inner, now: Instant) -> bool {
         match inner.last_attempt {
             None => true,
@@ -424,6 +452,7 @@ impl JwksCache {
     }
 
     /// Return the currently cached keys, but ONLY if they are within the absolute staleness ceiling
+    /// (`max_stale`); past the ceiling it fails closed with an error.
     fn serve_within_ceiling(
         &self,
         inner: &Inner,
@@ -444,6 +473,7 @@ impl JwksCache {
     }
 
     /// Take the data lock, recovering from poisoning rather than failing auth: the guarded data is a
+    /// public key cache, and a panic elsewhere leaves it structurally intact.
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
         self.inner.lock().unwrap_or_else(|p| p.into_inner())
     }

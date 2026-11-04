@@ -2,6 +2,12 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! THE ISSUER'S DISCOVERY DOCUMENT (`<issuer>/.well-known/openid-configuration`), fetched on the
+//! first op that needs it and again a day later ([`REDISCOVER`]) or after a `refresh`, sans-IO
+//! single-flight like the JWKS ([`crate::cache`]). It names the JWKS url when `jwks_url` is not
+//! configured, and whichever login endpoint is not. A failed fetch is remembered with its error for
+//! `jwks_min_refetch_secs`, so an unreachable issuer is not asked again per request. The document's
+//! own `issuer` must equal the issuer it was requested from (RFC 8414 §3.3), so a poisoned response
+//! cannot repoint `jwks_uri`.
 
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
@@ -52,6 +58,7 @@ pub fn check_document(
 }
 
 /// How long a fetched document is held before the issuer is asked again: an IdP that moves its
+/// keys or endpoints is followed within a day.
 pub const REDISCOVER: Duration = Duration::from_secs(24 * 3600);
 
 /// Where the document stands.
@@ -61,6 +68,8 @@ enum State {
     /// A caller's fetch is in flight, and the document it re-discovers (served meanwhile), if any.
     Flight(Flight, Option<Arc<Value>>),
     /// Fetched and valid; asked for again after `due`'s elapsed duration (`None`: at its next use,
+    /// after a `refresh`). Keeping the start and duration avoids overflowing `Instant` for an
+    /// accepted retry interval as large as `u64::MAX` seconds.
     Done {
         doc: Arc<Value>,
         due: Option<(Instant, Duration)>,
@@ -102,6 +111,8 @@ impl Discovery {
     }
 
     /// The validated document of `cfg`'s issuer, fetched through `io` when nobody has yet, or
+    /// again once it is due ([`REDISCOVER`], [`Self::expire`]); PENDING while this caller's fetch
+    /// is in flight, WAIT while another's is and there is no document to serve meanwhile.
     pub fn document(
         &self,
         cfg: &OidcConfig,

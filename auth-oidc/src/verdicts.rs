@@ -2,6 +2,12 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The inbound verdict cache, the plugin's own (the kernel keeps no verdict cache). It holds every
+//! OIDC identity verified, so a repeat bearer is answered without a second decode, parse and
+//! signature check. The key is the SHA-256 of the credential bytes (the credential itself is never
+//! stored). An identity is held for its own `ttl_secs`, absent = 300 s and never past 3600 s. A
+//! REJECT or a PASS is never cached. At most 4096 entries are held: at capacity the expired ones
+//! go, then the oldest-inserted. A flush drops everything, and a verdict reached before a flush
+//! never outlives it.
 
 use std::collections::HashMap;
 use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -15,9 +21,11 @@ const MAX_TTL_SECS: u64 = 3600;
 /// The most entries held.
 pub const MAX_ENTRIES: usize = 4096;
 /// The largest serialized identity held. A bigger one is judged afresh. The 4096 × 8 KiB bound
+/// covers serialized content; Rust containers, cache entries and allocator overhead are additional.
 pub const MAX_PRINCIPAL_BYTES: usize = 8 * 1024;
 
 /// Count the serialized identity without allocating a second copy of its strings. Stop at the
+/// existing cache bound, including JSON punctuation and escaped characters rather than only text.
 fn serialized_len(p: &Principal) -> usize {
     #[derive(serde::Serialize)]
     struct View<'a> {
@@ -111,6 +119,7 @@ impl VerdictCache {
     }
 
     /// The identity cached for `credential` at UNIX second `now`, with the TTL it has left; an
+    /// expired entry is a miss and goes.
     pub fn get(&self, credential: &str, now: i64) -> Option<Hit> {
         let k = key(credential);
         match self.read().entries.get(&k) {
@@ -132,6 +141,7 @@ impl VerdictCache {
     }
 
     /// Hold `principal`, the identity `credential` verified as at UNIX second `now`, unless a flush
+    /// landed since `generation` was captured.
     pub fn put(&self, credential: &str, principal: &Principal, now: i64, generation: Generation) {
         let ttl = principal
             .ttl_secs

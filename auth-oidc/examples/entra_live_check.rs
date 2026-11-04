@@ -1,4 +1,10 @@
 //! Real-world proof against an actual Entra ID (Azure AD) tenant — not a fixture, not a mock. Reads
+//! a live tenant/client id and a disposable test user's credentials from env, performs a genuine
+//! password-grant token request against Entra's real token endpoint, then drives that real
+//! Entra-issued token through this crate's own sans-IO `OidcModule`, its requests made by a
+//! blocking HTTPS client standing in for the host's connector: real discovery, real JWKS fetch,
+//! real RS256 signature check, real claim validation. It also verifies that a tampered copy of the
+//! same token is genuinely rejected, so this is not a rubber stamp.
 
 use busbar_auth_oidc::fetch::{document, failed, Doc, Fetch};
 use busbar_auth_oidc::{OidcConfig, OidcModule, Step};
@@ -10,6 +16,7 @@ use std::task::Poll;
 use std::time::Instant;
 
 /// The module's requests, made at once by a blocking client (the plugin's host makes them through
+/// its connector; this example has none).
 struct Blocking(reqwest::blocking::Client);
 
 impl Fetch for Blocking {

@@ -2,6 +2,10 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! JWT parsing + **signature verification** over `ring` (the workspace's single, already-vendored
+//! crypto backend, so no new crypto dependency). Supports the two algorithms OIDC identity
+//! providers actually sign ID/access tokens with: `RS256` (RSA-PKCS1-SHA256) and `ES256`
+//! (ECDSA-P256-SHA256). This module is pure: it verifies a token against an already-fetched key and
+//! returns the decoded claims, or a precise error.
 
 use crate::jwks::{Jwk, KeyMaterial};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
@@ -9,6 +13,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 /// The two JWS algorithms this verifier accepts — the ones OIDC IdPs actually sign ID/access tokens
+/// with. Named once here so the match arms and the error text can't drift apart.
 pub(crate) const ALG_RS256: &str = "RS256";
 /// ES256 (ECDSA P-256 / SHA-256), the other accepted algorithm.
 pub(crate) const ALG_ES256: &str = "ES256";
@@ -32,6 +37,7 @@ pub struct Header {
 }
 
 /// The three base64url segments of a compact JWS, plus the signing input (`header.payload`) the
+/// signature covers. Produced by [`split`], consumed by [`verify_signature`].
 pub struct Parts<'a> {
     /// The decoded JOSE header.
     pub header: Header,
@@ -40,6 +46,7 @@ pub struct Parts<'a> {
     /// The decoded signature bytes.
     pub signature: Vec<u8>,
     /// `header_b64 + "." + payload_b64` — exactly the bytes the signature is computed over. Borrowed
+    /// from the original token string.
     pub signing_input: &'a str,
 }
 
@@ -52,6 +59,8 @@ impl Drop for Parts<'_> {
 }
 
 /// The decoded PAYLOAD of what reads as a compact JWS (exactly three dot-separated segments, the
+/// second base64url), the header left undecoded: what issuer routing reads before anything else.
+/// `None` for anything else (not this module's credential shape).
 pub fn payload(token: &str) -> Option<Vec<u8>> {
     let mut it = token.split('.');
     match (it.next(), it.next(), it.next(), it.next()) {
@@ -61,6 +70,8 @@ pub fn payload(token: &str) -> Option<Vec<u8>> {
 }
 
 /// Split and base64url-decode a compact JWT (`header.payload.signature`), decoding the header enough
+/// to select verification. Does NOT verify — that is [`verify_signature`]. Rejects a token that
+/// isn't exactly three segments.
 pub fn split(token: &str) -> Result<Parts<'_>, String> {
     let mut it = token.split('.');
     let (h, p, s) = match (it.next(), it.next(), it.next(), it.next()) {
@@ -93,6 +104,8 @@ pub fn split(token: &str) -> Result<Parts<'_>, String> {
 }
 
 /// Verify the JWS signature of `parts` against the JWKS key `key`, enforcing that the token's `alg`
+/// matches the key type (RS256 with RSA, ES256 with EC), the alg-confusion guard. Returns `Ok(())`
+/// on a valid signature and a precise `Err` otherwise.
 pub fn verify_signature(parts: &Parts, key: &Jwk) -> Result<(), String> {
     if let Some(crit) = &parts.header.crit {
         if !crit.is_empty() {
