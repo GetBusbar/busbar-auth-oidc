@@ -157,15 +157,15 @@ impl Jwk {
 #[derive(Debug, Clone)]
 pub struct JwkSet {
     /// The keys, from the top-level `keys` array of a JWKS document. An entry that is not a usable
-    /// [`Jwk`] (no `kty`, a non-string member, …) is SKIPPED rather than failing the whole
-    /// document: RFC 7517 §5 says a JWK Set consumer SHOULD ignore keys it cannot use, and one odd
-    /// entry must not take every other key (and so every token) down with it. How many were
-    /// skipped is said once per document, at warn ([`JwkSet::parse`]).
+    /// [`Jwk`] (not a JSON object, no `kty`, a non-string member, …) is SKIPPED rather than
+    /// failing the whole document: RFC 7517 §5 says a JWK Set consumer SHOULD ignore keys it
+    /// cannot use, and one odd entry must not take every other key (and so every token) down with
+    /// it. How many were skipped is said once per document, at warn ([`JwkSet::parse`]).
     pub keys: Vec<Jwk>,
 }
 
 /// A JWKS document as it arrives: its `keys` array, each entry not yet read as a [`Jwk`]. The
-/// array itself must be present and be an array.
+/// document must be a JSON object, and the array must be present and be an array.
 #[derive(Deserialize)]
 struct RawSet {
     keys: Vec<serde_json::Value>,
@@ -177,6 +177,9 @@ impl JwkSet {
     /// ZERO usable keys is an error, not an empty success, so a provider blip cannot replace a
     /// working key set.
     pub fn parse(body: &str) -> Result<Self, String> {
+        if !crate::is_json_object(body.as_bytes()) {
+            return Err("invalid JWKS document: it is not a JSON object (RFC 7517 §5)".to_string());
+        }
         let raw: RawSet = serde_json::from_str(body).map_err(
             busbar_contract::abi::sdk::auth_kit::json_error("invalid JWKS document"),
         )?;
@@ -185,6 +188,7 @@ impl JwkSet {
             keys: raw
                 .keys
                 .into_iter()
+                .filter(serde_json::Value::is_object)
                 .filter_map(|v| serde_json::from_value::<Jwk>(v).ok())
                 .collect(),
         };

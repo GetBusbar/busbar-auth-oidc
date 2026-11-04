@@ -34,10 +34,10 @@ fn malformed_endpoint_settings_are_refused_without_echoing_values() {
     }
 }
 
-/// A blank `scopes` entry loads as it did in 1.5.5 (it is no optional string setting the blank
-/// rule refuses), and `open` warns that a strict IdP refuses the empty scope-token it sends.
+/// A blank `scopes` entry is refused at load naming its index, as a blank optional string setting
+/// is: a scope-token is never empty (RFC 6749 §3.3). Non-blank entries load as in 1.5.5.
 #[test]
-fn a_blank_scope_entry_loads_with_a_warning() {
+fn a_blank_scope_entry_is_refused_at_load() {
     for blank in ["", "  \t"] {
         let config = serde_json::json!({
             "issuer": "https://idp.example",
@@ -45,24 +45,19 @@ fn a_blank_scope_entry_loads_with_a_warning() {
             "scopes": ["profile", blank],
         })
         .to_string();
-        assert!(crate::open::config(&config).is_ok(), "{blank:?} loads");
-        let cap = crate::tests::diagnostics::WarnCapture::default();
-        tracing::subscriber::with_default(cap.subscriber(), || {
-            super::module(&config).expect("opens");
-        });
-        assert!(cap.contains("settings.scopes"), "{:?}", cap.messages());
+        let err = crate::open::config(&config).expect_err("a blank entry is refused");
+        assert!(err.starts_with("settings.scopes[1]: is blank"), "{err}");
+        assert!(super::module(&config).is_err(), "{blank:?} does not open");
     }
     let config = serde_json::json!({
         "issuer": "https://idp.example",
         "audience": "aud",
-        "scopes": ["profile", "email offline_access"],
+        "scopes": ["profile", "email offline_access", " padded "],
     })
     .to_string();
-    let cap = crate::tests::diagnostics::WarnCapture::default();
-    tracing::subscriber::with_default(cap.subscriber(), || {
-        super::module(&config).expect("opens");
-    });
-    assert!(!cap.contains("settings.scopes"), "{:?}", cap.messages());
+    let cfg = crate::open::config(&config).expect("non-blank entries load");
+    assert_eq!(cfg.scopes, ["profile", "email offline_access", " padded "]);
+    assert!(super::module(&config).is_ok());
 }
 
 /// The module `open` builds, its warning (checked by `door_tests`) set aside.

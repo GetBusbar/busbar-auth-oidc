@@ -19,6 +19,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::borrow::Cow;
 use std::time::{Duration, Instant};
+use token_response::TokenResponse;
 
 #[macro_use]
 mod flight;
@@ -29,6 +30,7 @@ pub mod fetch;
 pub mod jwks;
 pub mod jwt;
 mod open;
+mod token_response;
 pub mod verdicts;
 
 pub use cache::{JwksCache, KeyError};
@@ -845,39 +847,13 @@ pub struct TokenRequest {
     pub form: FormBody,
 }
 
-/// THE TOKEN ENDPOINT'S ANSWER (RFC 6749 §5.1, OIDC Core §3.1.3.3), typed: the issued tokens are
-/// held in wiped holders, so no plain copy of one outlives its use; every other member is ignored.
-/// No `Debug`: it holds credentials.
-#[derive(Deserialize)]
-pub(crate) struct TokenResponse {
-    /// The OIDC identity token, the one member the login reads.
-    #[serde(default, deserialize_with = "wiped")]
-    pub(crate) id_token: Option<zeroize::Zeroizing<String>>,
-    /// The access token: never read, but parsed into a wiped holder rather than left to a scratch
-    /// buffer.
-    #[serde(default, deserialize_with = "wiped")]
-    #[allow(dead_code)]
-    access_token: Option<zeroize::Zeroizing<String>>,
-    /// The refresh token: as `access_token`.
-    #[serde(default, deserialize_with = "wiped")]
-    #[allow(dead_code)]
-    refresh_token: Option<zeroize::Zeroizing<String>>,
-}
-
-impl TokenResponse {
-    /// `body` parsed; the error never echoes it.
-    pub(crate) fn parse(body: &str) -> Result<Self, String> {
-        serde_json::from_str(body).map_err(busbar_contract::abi::sdk::auth_kit::json_error(
-            "token response",
-        ))
-    }
-}
-
-/// A token member deserialized straight into a wiped holder.
-fn wiped<'de, D: serde::Deserializer<'de>>(
-    d: D,
-) -> Result<Option<zeroize::Zeroizing<String>>, D::Error> {
-    Ok(Option::<String>::deserialize(d)?.map(zeroize::Zeroizing::new))
+/// Whether `json` opens with an object: its first byte past JSON whitespace is `{`. A JSON
+/// decoder then still checks the whole document; this refuses the array (or scalar) a serde
+/// derive would otherwise read a struct from.
+pub(crate) fn is_json_object(json: &[u8]) -> bool {
+    json.iter()
+        .find(|b| !matches!(b, b' ' | b'\t' | b'\n' | b'\r'))
+        .is_some_and(|b| *b == b'{')
 }
 
 /// The nonce binding: `true` when the token endpoint's `body`
@@ -887,19 +863,13 @@ pub(crate) fn nonce_binds(body: &str, nonce: &str) -> bool {
     if nonce.is_empty() {
         return false;
     }
-    use base64::Engine as _;
     let Some(id_token) = TokenResponse::parse(body).ok().and_then(|r| r.id_token) else {
         return true;
     };
     let claimed = id_token
         .split('.')
         .nth(1)
-        .and_then(|p| {
-            base64::engine::general_purpose::URL_SAFE_NO_PAD
-                .decode(p)
-                .ok()
-                .map(zeroize::Zeroizing::new)
-        })
+        .and_then(|p| jwt::decode_wiped(p).ok())
         .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
         .and_then(|c| c.get("nonce").and_then(Value::as_str).map(str::to_string));
     claimed.is_some_and(|c| busbar_contract::constant_time_eq(&c, nonce))
@@ -936,11 +906,12 @@ fn resolved_client_id(cfg: &OidcConfig) -> String {
 }
 
 /// The space-delimited `scope` value: always `openid` first, then the configured scopes and the
-/// login's `extra` ones, deduped (each entry as given, as 1.5.5 sent it).
+/// login's `extra` ones, deduped (each entry as given, as 1.5.5 sent it). A blank entry is left
+/// out: a scope-token is never empty (RFC 6749 §3.3), and the settings refuse one at load.
 fn scope_value(cfg: &OidcConfig, extra: &[String]) -> String {
     let mut scopes = vec!["openid"];
     for s in cfg.scopes.iter().chain(extra) {
-        if !scopes.contains(&s.as_str()) {
+        if !s.trim().is_empty() && !scopes.contains(&s.as_str()) {
             scopes.push(s);
         }
     }

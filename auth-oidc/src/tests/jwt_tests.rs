@@ -127,3 +127,31 @@ fn verify_signature_permits_a_signing_key_to_reach_key_material_checks() {
         "a sig-use key must reach key-material validation, not be blocked by the use check: {err}"
     );
 }
+
+/// RFC 7515 §4: the JOSE header is a JSON object. One that is not (an array a serde derive would
+/// read `alg`, `kid` and `crit` from in field order, or a scalar) is refused before it is read;
+/// an object header, leading whitespace and all, is read as before.
+#[test]
+fn a_jose_header_that_is_not_a_json_object_is_refused() {
+    let body = URL_SAFE_NO_PAD.encode(b"{}");
+    for header in [
+        &br#"["ES256","kid-1"]"#[..],
+        br#""ES256""#,
+        b"null",
+        b" [\"ES256\"]",
+    ] {
+        let token = format!("{}.{body}.c2ln", URL_SAFE_NO_PAD.encode(header));
+        let Err(err) = split(&token) else {
+            panic!("refused: {}", String::from_utf8_lossy(header));
+        };
+        assert!(err.starts_with("malformed JWT header"), "got: {err}");
+    }
+    for header in [
+        &br#"{"alg":"ES256","kid":"kid-1"}"#[..],
+        b" \r\n\t{\"alg\":\"ES256\"}",
+    ] {
+        let token = format!("{}.{body}.c2ln", URL_SAFE_NO_PAD.encode(header));
+        let parts = split(&token).expect("an object header is read");
+        assert_eq!(parts.header.alg, ALG_ES256);
+    }
+}

@@ -95,3 +95,30 @@ fn a_jwks_document_whose_every_entry_is_skipped_names_the_count() {
         "{err}"
     );
 }
+
+/// RFC 7517 §5: a JWK Set is a JSON object whose `keys` are JWK objects. An entry that is not an
+/// object is skipped (a serde derive would read a key from an array's elements in field order),
+/// and a document that is not an object is refused. Object entries load as before.
+#[test]
+fn a_jwks_entry_or_document_that_is_not_a_json_object_is_not_read_as_keys() {
+    let s = set(r#"{"keys":[
+        ["EC","array-kid",null,null,"P-256","AAAA","BBBB"],
+        "EC", 7, null, true,
+        {"kty":"EC","kid":"a","crv":"P-256","x":"AAAA","y":"BBBB"}
+    ]}"#);
+    assert_eq!(s.keys.len(), 1);
+    assert_eq!(s.keys[0].kid.as_deref(), Some("a"));
+    let err = JwkSet::parse(r#"{"keys":[["EC","array-kid",null,null,"P-256","AAAA","BBBB"]]}"#)
+        .expect_err("an array entry is no key");
+    assert!(err.contains("1 entries"), "{err}");
+    for doc in [
+        r#"[[{"kty":"EC","kid":"a","crv":"P-256","x":"AAAA","y":"BBBB"}]]"#,
+        r#""keys""#,
+        "",
+    ] {
+        let err = JwkSet::parse(doc).expect_err("not an object");
+        assert!(err.starts_with("invalid JWKS document"), "{err}");
+    }
+    let s = set(" \n\t{\"keys\":[{\"kty\":\"EC\",\"kid\":\"a\",\"crv\":\"P-256\",\"x\":\"AAAA\",\"y\":\"BBBB\"}]}");
+    assert_eq!(s.keys.len(), 1);
+}

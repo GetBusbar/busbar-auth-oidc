@@ -24,11 +24,13 @@ use crate::{check_jwks_url, OidcConfig, OidcModule};
 /// `issuer` and `audience` must not be blank: an empty one would load and then match no token (or
 /// only a token claiming an empty one), so it is refused here, naming the key.
 ///
-/// Optional string settings must be omitted rather than blank. Configured endpoint schemes are
-/// checked here, before an instance can retain the settings or start an operation.
+/// Optional string settings must be omitted rather than blank, and so must a `scopes` entry.
+/// Configured endpoint schemes are checked here, before an instance can retain the settings or
+/// start an operation.
 ///
 /// # Errors
-/// Invalid settings, blank strings, a zero refetch interval, or a disallowed endpoint scheme.
+/// Invalid settings, blank strings (a `scopes` entry included), a zero refetch interval, or a
+/// disallowed endpoint scheme.
 pub fn config(cfg: &str) -> Result<OidcConfig, String> {
     if cfg.trim().is_empty() {
         return Err(
@@ -60,6 +62,12 @@ pub fn config(cfg: &str) -> Result<OidcConfig, String> {
                 "settings.{key}: is blank; omit it or provide a non-blank value"
             ));
         }
+    }
+    if let Some(at) = cfg.scopes.iter().position(|s| s.trim().is_empty()) {
+        return Err(format!(
+            "settings.scopes[{at}]: is blank; a scope-token is never empty (RFC 6749 §3.3), so \
+             omit the entry"
+        ));
     }
     if cfg.jwks_min_refetch_secs == 0 {
         return Err("settings.jwks_min_refetch_secs: must be greater than zero".to_string());
@@ -114,14 +122,6 @@ pub(crate) fn module(cfg: &str) -> Result<(OidcModule, Option<String>), String> 
     let warning = check_jwks_url(&cfg)?;
     if let Some(warning) = &warning {
         tracing::warn!(module = "oidc", "{warning}");
-    }
-    if cfg.scopes.iter().any(|s| s.trim().is_empty()) {
-        // Loads as in 1.5.5 (the entry is still sent); said so the operator can drop it.
-        tracing::warn!(
-            module = "oidc",
-            "settings.scopes: an entry is blank; it is sent as an empty scope-token, which a \
-             strict identity provider refuses (invalid_scope); omit it"
-        );
     }
     Ok((OidcModule::new(&cfg), warning))
 }

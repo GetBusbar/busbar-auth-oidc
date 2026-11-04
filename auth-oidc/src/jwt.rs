@@ -64,9 +64,22 @@ impl Drop for Parts<'_> {
 pub fn payload(token: &str) -> Option<Vec<u8>> {
     let mut it = token.split('.');
     match (it.next(), it.next(), it.next(), it.next()) {
-        (Some(_), Some(p), Some(_), None) => URL_SAFE_NO_PAD.decode(p).ok(),
+        (Some(_), Some(p), Some(_), None) => decode_wiped(p)
+            .ok()
+            .map(|mut bytes| std::mem::take(&mut *bytes)),
         _ => None,
     }
+}
+
+/// Decode into a preallocated wiped buffer, including on a late base64 error. The encoded
+/// length bounds the decoded length, so decoding never reallocates a partial credential.
+pub(crate) fn decode_wiped(
+    encoded: &str,
+) -> Result<zeroize::Zeroizing<Vec<u8>>, base64::DecodeSliceError> {
+    let mut bytes = zeroize::Zeroizing::new(vec![0; encoded.len()]);
+    let len = URL_SAFE_NO_PAD.decode_slice(encoded, &mut bytes)?;
+    bytes.truncate(len);
+    Ok(bytes)
 }
 
 /// Split and base64url-decode a compact JWT (`header.payload.signature`), decoding the header enough
@@ -78,27 +91,25 @@ pub fn split(token: &str) -> Result<Parts<'_>, String> {
         (Some(h), Some(p), Some(s), None) => (h, p, s),
         _ => return Err("malformed JWT: expected three dot-separated segments".to_string()),
     };
-    let header_bytes = zeroize::Zeroizing::new(
-        URL_SAFE_NO_PAD
-            .decode(h)
-            .map_err(|_| "malformed JWT: header is not base64url".to_string())?,
-    );
+    let header_bytes =
+        decode_wiped(h).map_err(|_| "malformed JWT: header is not base64url".to_string())?;
+    if !crate::is_json_object(&header_bytes) {
+        return Err("malformed JWT header: it is not a JSON object (RFC 7515 §4)".to_string());
+    }
     let header: Header = serde_json::from_slice(&header_bytes).map_err(
         busbar_contract::abi::sdk::auth_kit::json_error("malformed JWT header"),
     )?;
-    let payload = URL_SAFE_NO_PAD
-        .decode(p)
-        .map_err(|_| "malformed JWT: payload is not base64url".to_string())?;
-    let signature = URL_SAFE_NO_PAD
-        .decode(s)
-        .map_err(|_| "malformed JWT: signature is not base64url".to_string())?;
+    let mut payload =
+        decode_wiped(p).map_err(|_| "malformed JWT: payload is not base64url".to_string())?;
+    let mut signature =
+        decode_wiped(s).map_err(|_| "malformed JWT: signature is not base64url".to_string())?;
 
     let last_dot = token.rfind('.').expect("token has at least two dots here");
     let signing_input = &token[..last_dot];
     Ok(Parts {
         header,
-        payload,
-        signature,
+        payload: std::mem::take(&mut *payload),
+        signature: std::mem::take(&mut *signature),
         signing_input,
     })
 }

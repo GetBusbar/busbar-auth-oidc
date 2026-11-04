@@ -1463,14 +1463,17 @@ fn build_authorize_url_escapes_delimiters_dedups_openid_and_omits_an_absent_nonc
 }
 
 /// The login's own scopes are requested beside the configured ones, deduped against them, and every
-/// entry goes out as given (a blank one too, as 1.5.5 sent it: `open` only warns about it).
+/// entry goes out as given, but a blank one (configured or the login's own) is left out: a
+/// scope-token is never empty (RFC 6749 §3.3).
 #[test]
-fn the_authorize_url_dedups_the_login_s_own_scopes_and_keeps_1_5_5_s_entries() {
+fn the_authorize_url_dedups_the_login_s_own_scopes_and_drops_blank_entries() {
     let mut c = cfg("groups");
     c.scopes = vec!["email".to_string(), " ".to_string()];
     let extra = [
         "email".to_string(),
+        String::new(),
         "profile".to_string(),
+        "\t".to_string(),
         "openid".to_string(),
     ];
     let url = authorize_url(
@@ -1483,8 +1486,8 @@ fn the_authorize_url_dedups_the_login_s_own_scopes_and_keeps_1_5_5_s_entries() {
         Some("n"),
     );
     assert!(
-        url.contains("&scope=openid%20email%20%20%20profile&"),
-        "openid first, each scope once, entries as given: {url}"
+        url.contains("&scope=openid%20email%20profile&"),
+        "openid first, each scope once, blank entries left out: {url}"
     );
     assert!(url.starts_with("https://idp.test/authorize?response_type=code&"));
 }

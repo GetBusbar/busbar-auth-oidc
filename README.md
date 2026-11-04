@@ -117,7 +117,7 @@ every `refresh`. The previous document serves during rediscovery and remains ava
 | `ca_cert_pem` | no | — | An extra root CA (PEM) to trust for the JWKS/discovery HTTPS fetch, in addition to the built-in public (webpki) roots; the OS trust store is not consulted — for a private CA or a test fixture (this is exactly what `tests/e2e.rs` uses to trust its own self-signed local JWKS server). |
 | `client_id` | no | `audience` | The OAuth `client_id` presented on the browser-login authorize URL and token exchange; the login's `id_token` must name it in `aud` (and in `azp` when it carries one, OIDC Core §3.1.3.7). |
 | `client_secret` | no | — | A SECRET REFERENCE (never the secret itself): the host resolves it and lends it at `open`, and the plugin sends it only in the token exchange's form body (sealed by the SDK, wiped after). Absent for a public client. |
-| `scopes` | no | `[]` | Extra OAuth scopes requested at browser login, on top of the always-sent `openid`. |
+| `scopes` | no | `[]` | Extra OAuth scopes requested at browser login, on top of the always-sent `openid`. A blank entry is refused at load. |
 | `authorization_endpoint` | no | discovered from `issuer` | The IdP authorize endpoint for browser login. When omitted, taken from the issuer's discovery document (fetched at boot when `jwks_url` is omitted too, else on the first browser login), which must name it over https (plain http only to loopback); absent and undiscoverable means browser login is refused (token verification is unaffected). A login the host lends no nonce is refused. |
 | `token_endpoint` | no | discovered from `issuer` | The IdP token endpoint for the browser-login code exchange. Discovered like `authorization_endpoint` when omitted. |
 
@@ -141,6 +141,34 @@ that are present but blank (omit them to select the default), and refuse
 The host still applies its destination guard, and discovery and JWKS
 fetches still require TLS. Response size and UTF-8 errors now identify
 the discovery document, JWKS, or token response whose body failed.
+
+### Differences from 1.5.5
+
+The 1.5.5 core registers OIDC as an external `auth-oidc` plugin on the
+1.0 version line (`plugins.yaml:96–103`); it does not contain the OIDC
+parser. The historical plugin source at `v1.0.6` supplies the comparisons
+below. The core registry does not pin an exact plugin patch release.
+Valid provider responses and non-blank scopes retain their behavior.
+For malformed inputs:
+
+- A blank `scopes` entry (empty or whitespace only) is refused at load as
+  `settings.scopes[<index>]: is blank`, and a blank scope a login requests
+  is left out of the authorize URL. The 1.0 plugin sent it as an empty scope-token,
+  which RFC 6749 §3.3 does not allow and a strict provider refuses.
+- A JWT whose JOSE header is not a JSON object (an array, say) is refused
+  as malformed. RFC 7515 §4 requires an object; The 1.0 plugin read `alg` and `kid`
+  from an array header's elements.
+- A JWKS document that is not a JSON object is refused, and a `keys` entry
+  that is not a JSON object is skipped like any other unusable entry
+  (RFC 7517 §5). The 1.0 plugin read a key from an array entry's elements.
+- A token response that is not a JSON object, or that names `id_token`,
+  `access_token` or `refresh_token` twice or with a value that is neither
+  a string nor `null`, is refused as malformed. The 1.0 plugin found no `id_token`
+  in a non-object or mistyped body and took the last of a repeated one.
+  Every token the response carries is decoded straight into memory that
+  is wiped when it is dropped; no token-response decoder scratch copy is
+  left behind. JWT byte decoding also wipes partially decoded buffers on
+  errors, including a payload decoded before a malformed signature.
 
 ## Build
 
