@@ -1724,9 +1724,9 @@ fn ready_and_tick_release_held_connections_on_cancel_or_refresh() {
     }
 }
 
-/// A refresh can finish while a driver is inside a host call. The old exchange must not be
+/// An executing host call retains its binding; a later refresh retires its parked exchange.
 #[test]
-fn executing_driver_does_not_repark_an_exchange_after_successful_refresh() {
+fn executing_driver_defers_refresh_until_its_host_call_returns() {
     use busbar_contract::abi::mechanism::call::{Blob, BLOB_JSON};
     use busbar_contract::abi::mechanism::lifecycle::{
         slot as life, CancelIn, CancelOut, RefreshIn,
@@ -1805,40 +1805,49 @@ fn executing_driver_does_not_repark_an_exchange_after_successful_refresh() {
                         "refused" => "{".to_string(),
                         _ => unreachable!(),
                     };
-                    let mut input: RefreshIn = z();
-                    input.head = busbar_plugin_loader::dispatch::in_head();
-                    input.generation = 2;
-                    input.settings = Blob {
-                        ptr: replacement.as_ptr(),
-                        len: replacement.len(),
-                        fmt: BLOB_JSON,
-                        flags: 0,
+                    let refresh = || {
+                        let mut input: RefreshIn = z();
+                        input.head = busbar_plugin_loader::dispatch::in_head();
+                        input.generation = 2;
+                        input.settings = Blob {
+                            ptr: replacement.as_ptr(),
+                            len: replacement.len(),
+                            fmt: BLOB_JSON,
+                            flags: 0,
+                        };
+                        b.plugin
+                            .call(life::REFRESH, &mut Frame::new(input, out_head()))
+                            .outcome
                     };
-                    let refreshed = b
-                        .plugin
-                        .call(life::REFRESH, &mut Frame::new(input, out_head()))
-                        .outcome;
                     assert_eq!(
-                        refreshed,
+                        refresh(),
+                        Outcome::Refused,
+                        "the host does not replace a binding during an executing call"
+                    );
+                    assert!(
+                        idp.connection_is_open(connection),
+                        "the refused crossing preserves the executing exchange"
+                    );
+                    resume.send(()).expect("release the executing read");
+                    assert_eq!(pending.join().unwrap(), Outcome::Pending);
+                    assert_eq!(
+                        refresh(),
                         if refresh_kind == "refused" {
                             Outcome::Failed
                         } else {
                             Outcome::Ready
-                        }
+                        },
+                        "the retry is judged after the original call has returned"
                     );
-                    resume.send(()).expect("release the executing read");
-                    let outcome = pending.join().unwrap();
                     if refresh_kind == "refused" {
-                        assert_eq!(outcome, Outcome::Pending);
                         assert!(
                             idp.connection_is_open(connection),
                             "refused refresh preserves the driver"
                         );
                     } else {
-                        assert_eq!(outcome, Outcome::Ready);
                         assert!(
                             !idp.connection_is_open(connection),
-                            "old exchange cannot be parked after refresh"
+                            "successful refresh closes the previously parked exchange"
                         );
                     }
                     assert_eq!(
