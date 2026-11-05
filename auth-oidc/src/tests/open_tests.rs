@@ -60,9 +60,9 @@ fn a_blank_scope_entry_is_refused_at_load() {
     assert!(super::module(&config).is_ok());
 }
 
-/// The module `open` builds, its warning (checked by `door_tests`) set aside.
+/// The module the lifecycle opens from validated settings.
 fn module(cfg: &str) -> Result<OidcModule, String> {
-    super::module(cfg).map(|(m, _)| m)
+    super::module(cfg)
 }
 
 /// `module` answers `Result<OidcModule, String>`, and `OidcModule` is not `Debug`, so the standard
@@ -146,9 +146,9 @@ fn an_explicit_jwks_url_opens_and_resolves_without_a_request() {
     );
 }
 
-/// A loopback `jwks_url` over plain http OPENS, as 1.5.5 booted it (the oracle's login-hop rig
+/// A plaintext loopback JWKS cannot be fetched, so refuse it before opening an instance.
 #[test]
-fn a_loopback_http_jwks_url_opens_with_a_warning() {
+fn a_loopback_http_jwks_url_is_refused() {
     for url in [
         "http://127.0.0.1:8080/jwks",
         "http://127.9.8.7/jwks",
@@ -163,13 +163,10 @@ fn a_loopback_http_jwks_url_opens_with_a_warning() {
             "jwks_url": url,
         })
         .to_string();
-        let cap = crate::tests::diagnostics::WarnCapture::default();
-        let opened = tracing::subscriber::with_default(cap.subscriber(), || module(&settings));
-        assert!(opened.is_ok(), "a loopback http jwks_url must open: {url}");
-        let logged = cap.messages().join("\n");
-        assert!(logged.contains("jwks_url"), "{url}: {logged:?}");
-        assert!(logged.contains("loopback"), "{url}: {logged:?}");
-        assert!(logged.contains("https"), "{url}: {logged:?}");
+        let err = expect_err(module(&settings));
+        assert!(err.starts_with("settings.jwks_url:"), "{url}: {err}");
+        assert!(err.contains("https"), "{url}: {err}");
+        assert!(!err.contains(url), "the settings value must not be echoed");
     }
 
     let cap = crate::tests::diagnostics::WarnCapture::default();
@@ -212,7 +209,7 @@ fn a_non_loopback_http_jwks_url_is_refused() {
             !err.contains(host),
             "{url}: a settings value is not echoed: {err}"
         );
-        assert!(err.contains("loopback"), "{url}: names the rule: {err}");
+        assert!(err.contains("https"), "{url}: names the rule: {err}");
         assert!(
             !err.contains("/keys"),
             "{url}: the URL's path is never repeated: {err}"

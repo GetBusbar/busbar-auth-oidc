@@ -146,17 +146,17 @@ fn validate_answers_a_jwks_url_as_open_does() {
     assert!(<Oidc as Life>::validate(&settings()).is_ok());
 }
 
-/// `validate` accepts a loopback http `jwks_url` as `open` does: a config `--validate` passes is
+/// Both lifecycle entry points reject a JWKS setting that cannot be fetched.
 #[test]
-fn validate_accepts_a_loopback_http_jwks_url_as_open_does() {
+fn validate_refuses_a_loopback_http_jwks_url_as_open_does() {
     let loopback = serde_json::json!({
         "issuer": ISSUER,
         "audience": AUDIENCE,
         "jwks_url": "http://127.0.0.1:8080/jwks",
     })
     .to_string();
-    assert!(<Oidc as Life>::validate(loopback.as_bytes()).is_ok());
-    assert!(Oidc::open(loopback.as_bytes(), &lent(b""), 1).is_ok());
+    assert!(<Oidc as Life>::validate(loopback.as_bytes()).is_err());
+    assert!(Oidc::open(loopback.as_bytes(), &lent(b""), 1).is_err());
 }
 
 /// A nonce mismatch answers the security-check verdict AND says so in the plugin's log, with no
@@ -308,41 +308,27 @@ fn a_blank_issuer_or_audience_is_refused_naming_the_key() {
     }
 }
 
-/// BIND-AUDIT: a plain http `jwks_url` raises the diagnostic the Statement declares,
+/// A rejected settings refresh keeps the working HTTPS provider and its settings.
 #[test]
-fn a_plain_http_jwks_url_raises_its_declared_diagnostic() {
+fn a_plain_http_jwks_refresh_is_refused_without_replacing_the_instance() {
     let plain = serde_json::json!({
         "issuer": ISSUER,
         "audience": AUDIENCE,
         "jwks_url": "http://127.0.0.1:8080/jwks",
     })
     .to_string();
-    let oidc = Oidc::open(plain.as_bytes(), &lent(b""), 1).expect("a plain http jwks_url opens");
-    let flag = oidc.flagged().expect("it raises its warning");
-    assert_eq!(DIAG_NAMES[flag.id_idx as usize], "BUSBAR-4032");
-    assert_eq!(
-        DIAG_IDS.len(),
-        DIAG_NAMES.len(),
-        "the Statement declares it"
-    );
-    assert_eq!(
-        flag.severity,
-        busbar_contract::abi::mechanism::call::SEVERITY_WARN
-    );
-    let logged = crate::check_jwks_url(&config(&plain).expect("parses"))
-        .expect("checks")
-        .expect("a warning");
-    assert_eq!(flag.text, logged, "the words the log line says");
-
-    let https = Oidc::open(&settings(), &lent(b""), 1).expect("opens");
+    let oidc = Oidc::open(&settings(), &lent(b""), 1).expect("HTTPS opens");
+    let before = oidc.now();
+    let refused = oidc
+        .refresh(plain.as_bytes(), &lent(b""), 2)
+        .expect_err("HTTP is refused");
+    assert!(refused
+        .text()
+        .unwrap_or_default()
+        .starts_with("settings.jwks_url:"));
     assert!(
-        https.flagged().is_none(),
-        "an https jwks_url raises nothing"
-    );
-    oidc.refresh(&settings(), &lent(b""), 2).expect("refreshes");
-    assert!(
-        oidc.flagged().is_none(),
-        "a refresh to https stops raising it"
+        Arc::ptr_eq(&before, &oidc.now()),
+        "keep the working instance"
     );
 }
 

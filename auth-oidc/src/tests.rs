@@ -161,7 +161,7 @@ impl Module {
     }
 }
 
-/// 1.5.5's `resolve_jwks_url`: the explicit URL (https or http), else discovered.
+/// The validated explicit JWKS URL, else the discovered URL.
 fn resolve_jwks_url(c: &OidcConfig, idp: &Idp) -> Result<String, String> {
     check_jwks_url(c)?;
     ready(OidcModule::new(c).jwks_url(Instant::now(), &mut idp.at_once(Some(ME))))
@@ -240,6 +240,68 @@ fn app_roles_claim_maps_to_groups() {
     match m.verify(&token, now, Instant::now()) {
         AuthVerdict::Identify(p) => assert_eq!(p.roles, vec!["Billing.Reader", "Billing.Admin"]),
         other => panic!("expected Identify, got {other:?}"),
+    }
+}
+
+/// A provider can withdraw every signing key with a successful empty JWKS. Neither a request
+/// refresh nor the proactive refresh may continue authenticating freshly minted old-key tokens.
+#[test]
+fn an_authoritative_empty_jwks_rejects_fresh_tokens_signed_by_a_withdrawn_key() {
+    let key = TestKey::generate(KID);
+    let now = 1_800_000_000;
+    for proactive in [false, true] {
+        let mut config = cfg("groups");
+        config.jwks_ttl_secs = 60;
+        let idp = Arc::new(Idp::new(key.jwks()));
+        let module = Module::new(&config, idp.clone());
+        let t0 = Instant::now();
+        let original = key.mint(&base_claims(now));
+        assert!(matches!(
+            module.verify(&original, now, t0),
+            AuthVerdict::Identify(_)
+        ));
+        idp.set_body(r#"{"keys":[]}"#.to_string());
+        let refreshed = t0 + Duration::from_secs(61);
+        if proactive {
+            ready(
+                module
+                    .m
+                    .refresh_ahead(refreshed, &mut idp.at_once(Some(ME))),
+            )
+            .expect("empty JWKS is a successful refresh");
+        }
+        let mut claims = base_claims(now + 61);
+        claims["oid"] = serde_json::json!("new-credential-after-withdrawal");
+        let fresh = key.mint(&claims);
+        assert!(
+            matches!(
+                module.verify(&fresh, now + 61, refreshed),
+                AuthVerdict::Reject
+            ),
+            "a fresh token cannot use a withdrawn key (proactive={proactive})"
+        );
+        assert_eq!(idp.calls(), 2, "one successful refresh; no fetch storm");
+
+        // A subsequent real outage must not resurrect the removed key set.
+        idp.set_answer(Err("provider unreachable".to_string()));
+        let mut io = idp.at_once(Some(ME));
+        assert!(
+            ready(module.m.verify(
+                Some(&fresh),
+                now + 122,
+                t0 + Duration::from_secs(122),
+                &mut io
+            ))
+            .is_err(),
+            "an outage has no old key to restore"
+        );
+
+        // Publishing a valid replacement key set restores service normally.
+        idp.set_body(key.jwks());
+        assert!(matches!(
+            module.verify(&fresh, now + 183, t0 + Duration::from_secs(183)),
+            AuthVerdict::Identify(_)
+        ));
     }
 }
 
@@ -2240,17 +2302,16 @@ fn a_hostile_discovery_issuer_is_escaped_in_the_mismatch_error() {
     }
 }
 
-/// An explicit `jwks_url` that is neither https nor http is refused at resolve time, naming the
+/// An explicit non-HTTPS JWKS URL is refused before fetching.
 #[test]
-fn an_explicit_non_http_jwks_url_is_refused_at_resolve_time() {
+fn an_explicit_non_https_jwks_url_is_refused_at_resolve_time() {
     let fetcher = FixtureFetcher::new(String::new());
-    let mut c = cfg("groups");
-    c.jwks_url = Some("http://127.0.0.1:8080/k".to_string());
-    assert_eq!(
-        resolve_jwks_url(&c, &fetcher).as_deref(),
-        Ok("http://127.0.0.1:8080/k")
-    );
-    for bad in ["not a url", "ftp://idp.invalid/k", "http://idp.invalid/k"] {
+    for bad in [
+        "not a url",
+        "ftp://idp.invalid/k",
+        "http://idp.invalid/k",
+        "http://127.0.0.1:8080/k",
+    ] {
         let mut c = cfg("groups");
         c.jwks_url = Some(bad.to_string());
         let err = resolve_jwks_url(&c, &fetcher)

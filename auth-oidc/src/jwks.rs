@@ -174,8 +174,8 @@ struct RawSet {
 impl JwkSet {
     /// Parse a JWKS document (the body of a `jwks_uri` GET). Entries that are not usable JWKs are
     /// skipped (see [`JwkSet::keys`]), one warn naming how many. A document that parses but carries
-    /// ZERO usable keys is an error, not an empty success, so a provider blip cannot replace a
-    /// working key set.
+    /// no keys is authoritative: the provider may have withdrawn every signing key. A nonempty
+    /// document whose entries are all malformed is still an error.
     pub fn parse(body: &str) -> Result<Self, String> {
         if !crate::is_json_object(body.as_bytes()) {
             return Err("invalid JWKS document: it is not a JSON object (RFC 7517 §5)".to_string());
@@ -205,13 +205,6 @@ impl JwkSet {
                 "JWKS document contains no keys this verifier can use (all {entries} entries were \
                  skipped); refusing to replace the cached key set with an empty one"
             ));
-        }
-        if set.keys.is_empty() {
-            return Err(
-                "JWKS document contains no keys; refusing to replace the cached key set with an \
-                 empty one"
-                    .to_string(),
-            );
         }
         Ok(set)
     }

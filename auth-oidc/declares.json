@@ -11,15 +11,6 @@
       "summary": "An OIDC discovery, key-set or token endpoint was refused by the plugin's HTTPS policy or the host destination guard. The operation is refused and the diagnostic is raised once per module for that refusal. The diagnostic names the host and rule without a URL path, query or credential.",
       "action": "Check the identity-provider endpoints and the operator destination allowlist. Use HTTPS and allow only the intended identity-provider hosts.",
       "since": "1.6.0"
-    },
-    {
-      "code": 4032,
-      "slug": "oidc-jwks-plain-http",
-      "title": "OIDC loopback JWKS URL uses plain HTTP",
-      "severity": "actionable",
-      "summary": "An explicitly configured loopback JWKS URL uses plain HTTP. The instance loads with a warning and a degraded audit record, but key sets are fetched only over HTTPS, so token verification remains refused until the URL uses HTTPS. This diagnostic is raised by the successful open or refresh that built the instance.",
-      "action": "Configure an HTTPS JWKS URL and trust the identity provider's CA when a private CA is required.",
-      "since": "1.6.0"
     }
   ]
 }

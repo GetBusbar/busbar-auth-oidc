@@ -1417,36 +1417,50 @@ fn ready_waits_on_another_op_s_discovery_and_a_failure_refuses_the_boot() {
 fn ready_audits_refused_warmup_destinations_without_changing_best_effort_boot() {
     let _one = support::serial();
     let key = Issuer::start(UNUSED_ISSUER, KID);
-    for guard_refused in [false, true] {
+    let idp = Idp::secure_carrier(&key);
+    let b = bind(&Arm::Linked, &idp);
+    open(&b.plugin, &config(AUDIENCE), None).expect("opens");
+    idp.refuse(1);
+    for _ in 0..2 {
+        b.plugin
+            .ready(&b.dispatcher, Duration::from_secs(10))
+            .expect("JWKS warmup remains best effort");
+    }
+    assert_eq!(
+        idp.diags()
+            .iter()
+            .filter(|line| line.starts_with("BUSBAR-4031 2 "))
+            .count(),
+        1,
+        "the existing READY envelope audits the destination once"
+    );
+    assert!(
+        idp.sent_to("/keys").is_empty(),
+        "refused before sending a request"
+    );
+}
+
+#[test]
+fn a_plaintext_loopback_jwks_url_is_refused_by_both_doors() {
+    let _one = support::serial();
+    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let lib = cdylib();
+    let stated = row().statement;
+    for arm in [
+        Arm::Linked,
+        Arm::Dropped {
+            lib: &lib,
+            stated: &stated,
+        },
+    ] {
         let idp = Idp::secure_carrier(&key);
-        let b = bind(&Arm::Linked, &idp);
+        let b = bind(&arm, &idp);
         let mut cfg: serde_json::Value = serde_json::from_str(&config(AUDIENCE)).unwrap();
-        cfg["jwks_url"] = serde_json::json!(if guard_refused {
-            support::JWKS_URL
-        } else {
-            "http://127.0.0.1/keys"
-        });
-        open(&b.plugin, &cfg.to_string(), None).expect("opens");
-        if guard_refused {
-            idp.refuse(1);
-        }
-        for _ in 0..2 {
-            b.plugin
-                .ready(&b.dispatcher, Duration::from_secs(10))
-                .expect("JWKS warmup remains best effort");
-        }
-        assert_eq!(
-            idp.diags()
-                .iter()
-                .filter(|line| line.starts_with("BUSBAR-4031 2 "))
-                .count(),
-            1,
-            "the existing READY envelope audits the destination once"
-        );
-        assert!(
-            idp.sent_to("/keys").is_empty(),
-            "refused before sending a request"
-        );
+        cfg["jwks_url"] = serde_json::json!("http://127.0.0.1/keys");
+        let error = open(&b.plugin, &cfg.to_string(), None).expect_err("plaintext JWKS is refused");
+        assert!(error.contains("settings.jwks_url:"), "{error}");
+        assert!(error.contains("https"), "{error}");
+        assert!(idp.sent_to("/keys").is_empty(), "no fetch before refusal");
     }
 }
 
@@ -1594,9 +1608,8 @@ fn a_tick_reports_a_refused_key_endpoint_through_its_envelope() {
     let key = Issuer::start(UNUSED_ISSUER, KID);
     let idp = Idp::secure_carrier(&key);
     let b = bind(&Arm::Linked, &idp);
-    let mut cfg: serde_json::Value = serde_json::from_str(&config(AUDIENCE)).unwrap();
-    cfg["jwks_url"] = serde_json::json!("http://127.0.0.1/keys");
-    open(&b.plugin, &cfg.to_string(), None).expect("legacy loopback config opens");
+    open(&b.plugin, &config(AUDIENCE), None).expect("HTTPS configuration opens");
+    idp.refuse(1);
     let driver = b.dispatcher.driver(&b.plugin, 0).expect("driver");
     for _ in 0..2 {
         b.dispatcher

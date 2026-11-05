@@ -110,7 +110,7 @@ every `refresh`. The previous document serves during rediscovery and remains ava
 |---|---|---|---|
 | `issuer` | yes | — | The IdP's OIDC issuer URL, exact-matched against the JWT's `iss` claim: a token naming another issuer passes to the next auth in the chain, a token naming this one is verified in full. A blank value is refused at load. |
 | `audience` | yes | — | The audience a bearer's `aud` claim must contain (busbar's registered client/resource identifier at the IdP); other audiences beside it are allowed (RFC 9068). A blank value is refused at load. |
-| `jwks_url` | no | discovered from `issuer` | The IdP's JWKS endpoint. Must be an `https` URL. Plain `http` is accepted only for a loopback host (127.0.0.0/8, `::1`, `localhost`); it loads with a warning (also raised as the declared diagnostic `BUSBAR-4032`, which the host audits). Since the key set is only fetched over https, verification is unavailable until the URL is https; this is an IdP outage, not a bad credential. Anything else is refused at load. When omitted, resolved at boot via OIDC discovery (`<issuer>/.well-known/openid-configuration`); a discovery failure refuses the boot. |
+| `jwks_url` | no | discovered from `issuer` | The IdP's JWKS endpoint. Must be an `https` URL, including loopback hosts; plaintext URLs fail validation and open. When omitted, resolved at boot via OIDC discovery (`<issuer>/.well-known/openid-configuration`); a discovery failure refuses the boot. |
 | `role_claim` | no | `groups` | The claim mapped onto the resulting `Principal`'s roles; set `roles` to use Entra app-roles instead. |
 | `jwks_min_refetch_secs` | no | `60` | JWKS refetch rate-limit (seconds) — the bound on how often a kid-rotation refetch can occur. |
 | `jwks_ttl_secs` | no | `3600` | JWKS cache TTL (seconds). |
@@ -149,6 +149,15 @@ The 1.5.5 core registers OIDC as an external `auth-oidc` plugin on the
 parser. The historical plugin source at `v1.0.6` supplies the comparisons
 below. The core registry does not pin an exact plugin patch release.
 Valid provider responses and non-blank scopes retain their behavior.
+An explicitly configured plaintext `jwks_url`, including loopback, now fails
+validation and open. Previously it loaded but could never fetch keys because
+JWKS retrieval already required HTTPS. Configure HTTPS before upgrading.
+
+A successful `{"keys":[]}` JWKS response authoritatively withdraws all signing
+keys. The previous key set is retained only for actual fetch or malformed-document
+failures, within the existing stale ceiling. Already cached credential verdicts
+retain their existing bounded TTL; the admin cache flush clears them.
+
 For malformed inputs:
 
 - A blank `scopes` entry (empty or whitespace only) is refused at load as

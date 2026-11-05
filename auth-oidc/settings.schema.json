@@ -30,7 +30,7 @@
         "null"
       ],
       "pattern": "[^\\x09-\\x0D \\x85\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]",
-      "description": "Optional JWKS URL; otherwise discovered from issuer. HTTPS, or HTTP to loopback (accepted with a warning; fetching still requires HTTPS)."
+      "description": "Optional JWKS URL; otherwise discovered from issuer. HTTPS only, including loopback hosts; plaintext signing keys are refused at validation/open."
     },
     "role_claim": {
       "type": "string",

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! The JWKS model's parse and key selection: an empty set is an error, keys are found by kid.
+//! The JWKS model's parse and key selection: an empty set withdraws all keys, keys are found by kid.
 
 use super::*;
 
@@ -9,15 +9,11 @@ fn set(body: &str) -> JwkSet {
     JwkSet::parse(body).unwrap()
 }
 
-/// A well-formed JWKS carrying zero keys must be an ERROR. It parses cleanly, so without this
+/// A successful empty JWKS withdraws every key; a missing keys member is malformed.
 #[test]
-fn an_empty_key_set_is_an_error_not_an_empty_success() {
-    let err = JwkSet::parse(r#"{"keys":[]}"#)
-        .expect_err("a JWKS with no keys must not parse as a successful empty set");
-    assert!(
-        err.contains("no keys"),
-        "the error should say the document carried no keys: {err}"
-    );
+fn an_empty_key_set_is_an_authoritative_success() {
+    let keys = JwkSet::parse(r#"{"keys":[]}"#).expect("an explicit empty set is valid");
+    assert!(keys.keys.is_empty());
 
     assert!(JwkSet::parse(r#"{}"#).is_err());
 

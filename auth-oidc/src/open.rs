@@ -115,15 +115,11 @@ fn configured_url(key: &str, value: &str, token: bool) -> Result<(), String> {
     ))
 }
 
-/// The module `open` builds from the settings: parsed, its explicit `jwks_url` https, or plain
-/// http, which opens with a WARNING naming it ([`check_jwks_url`]).
-pub(crate) fn module(cfg: &str) -> Result<(OidcModule, Option<String>), String> {
+/// The module `open` builds from its parsed settings and HTTPS-only explicit JWKS URL.
+pub(crate) fn module(cfg: &str) -> Result<OidcModule, String> {
     let cfg = config(cfg)?;
-    let warning = check_jwks_url(&cfg)?;
-    if let Some(warning) = &warning {
-        tracing::warn!(module = "oidc", "{warning}");
-    }
-    Ok((OidcModule::new(&cfg), warning))
+    check_jwks_url(&cfg)?;
+    Ok(OidcModule::new(&cfg))
 }
 
 #[cfg(test)]

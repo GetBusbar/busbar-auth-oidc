@@ -348,6 +348,21 @@ fn a_fetch_failure_keeps_serving_the_previously_fetched_keys() {
     assert_eq!(idp.calls(), 2, "the refetch was attempted");
 }
 
+/// Empty keys are valid, but malformed documents must retain the bounded outage fallback.
+#[test]
+fn a_malformed_jwks_refresh_keeps_the_previous_keys() {
+    for body in ["not JSON", "{}", r#"{"keys":[{"kid":"missing-kty"}]}"#] {
+        let cache = JwksCache::new(Duration::from_secs(1), Duration::from_secs(1));
+        let idp = Idp::new(jwks("k1"));
+        let t0 = Instant::now();
+        serve(&cache, &idp, t0).expect("prime");
+        idp.set_body(body.to_string());
+        serve(&cache, &idp, t0 + Duration::from_secs(10))
+            .expect("malformed response keeps the previously trusted keys");
+        assert_eq!(idp.calls(), 2);
+    }
+}
+
 #[test]
 fn a_failed_refresh_that_keeps_the_previous_keys_logs_a_warn_with_the_error() {
     let c = JwksCache::new(Duration::from_millis(1), Duration::from_millis(1));

@@ -27,7 +27,7 @@ use busbar_contract::abi::auth::{
     STRIP_FIELD, VERDICT_IDENTITY, VERDICT_PASS, VERDICT_REJECT,
 };
 use busbar_contract::abi::mechanism::call::{
-    AbiStr, Blob, OutHead, Outcome, Span, BLOB_ABSENT, BLOB_OCTETS, SEVERITY_ERROR, SEVERITY_WARN,
+    AbiStr, Blob, OutHead, Outcome, Span, BLOB_ABSENT, BLOB_OCTETS, SEVERITY_ERROR,
 };
 use busbar_contract::abi::mechanism::door::{
     MarkWord, MetricFamily, Rewrite, Statement, FAMILY_COUNTER,
@@ -41,7 +41,7 @@ use busbar_contract::abi::sdk::conn::{ConnFailure, Host};
 use busbar_contract::abi::sdk::cred::{self, Cred};
 use busbar_contract::abi::sdk::door::{abi_str, alias, statement, AbiIn, AbiOut};
 use busbar_contract::abi::sdk::lent::HostBuf;
-use busbar_contract::abi::sdk::life::{Counted, Flagged, Held, Life, Refreshed, Refusal};
+use busbar_contract::abi::sdk::life::{Counted, Held, Life, Refreshed, Refusal};
 use busbar_contract::abi::sdk::{Instance, Lent, Out, Safe, SafeSlot};
 use busbar_contract::auth::{AuthVerdict, BeginLogin, LoginHttpResponse, LoginOutcome, Principal};
 use zeroize::Zeroizing;
@@ -87,22 +87,15 @@ pub const CACHE_FAMILY: u32 = 0;
 
 /// The diagnostics this plugin declares, in index order: the ids its envelopes report and the host
 /// audits on its behalf.
-pub const DIAG_NAMES: &[&str] = &["BUSBAR-4031", "BUSBAR-4032"];
+pub const DIAG_NAMES: &[&str] = &["BUSBAR-4031"];
 
 /// The declared diagnostic a refused IdP destination raises ([`raise_refusals`]): the module's own
 /// refusal (a discovered `jwks_uri` or `token_endpoint` over plain http, a scheme) or the host's
 /// (the destination guard refusing the address), naming the host and the rule.
 pub const DIAG_DESTINATION_REFUSED: u32 = 0;
 
-/// The declared diagnostic a plain http `jwks_url` raises at warn on the `open` or `refresh` that
-/// built the module ([`crate::check_jwks_url`], [`Life::flagged`]), in the words `open` logs.
-pub const DIAG_JWKS_PLAIN_HTTP: u32 = 1;
-
 /// [`DIAG_NAMES`] as the Statement carries them.
-const DIAG_IDS: &[AbiStr] = &[
-    abi_str(DIAG_NAMES[DIAG_DESTINATION_REFUSED as usize]),
-    abi_str(DIAG_NAMES[DIAG_JWKS_PLAIN_HTTP as usize]),
-];
+const DIAG_IDS: &[AbiStr] = &[abi_str(DIAG_NAMES[DIAG_DESTINATION_REFUSED as usize])];
 
 const DECLARES: &[u8] = include_bytes!("../declares.json");
 const DECLARES_EXTENSION: [u8; extensions::entry_len(EXT_DECLARES, DECLARES)] =
@@ -215,13 +208,11 @@ struct Opened {
     secret: Option<Cred>,
     /// The settings and secret it was opened with: a `refresh` with the same ones keeps it.
     settings: Vec<u8>,
-    /// The warning its settings raise ([`crate::check_jwks_url`]), in the words `open` logs.
-    flagged: Option<String>,
 }
 
 impl Opened {
     fn new(settings: &[u8], secrets: &[&[u8]]) -> Result<Self, Refusal> {
-        let (module, flagged) = module(text(settings)?).map_err(Refusal::failed)?;
+        let module = module(text(settings)?).map_err(Refusal::failed)?;
 
         let secret = lent_secret(secrets);
         if secret.as_ref().is_some_and(|s| !s.is_text()) {
@@ -231,7 +222,6 @@ impl Opened {
             module,
             secret,
             settings: settings.to_vec(),
-            flagged,
         })
     }
 
@@ -627,7 +617,7 @@ impl Life for Oidc {
 
     fn validate(settings: &[u8]) -> Result<(), Refusal> {
         config(text(settings)?)
-            .and_then(|c| crate::check_jwks_url(&c).map(drop))
+            .and_then(|c| crate::check_jwks_url(&c))
             .map_err(Refusal::failed)
     }
 
@@ -685,15 +675,6 @@ impl Life for Oidc {
                 family: CACHE_FAMILY,
                 value: flushed as f64,
             }),
-        })
-    }
-
-    /// A plain http `jwks_url` raises [`DIAG_JWKS_PLAIN_HTTP`] at warn on the `open` or `refresh`
-    fn flagged(&self) -> Option<Flagged> {
-        self.now().flagged.clone().map(|text| Flagged {
-            id_idx: DIAG_JWKS_PLAIN_HTTP,
-            severity: SEVERITY_WARN,
-            text,
         })
     }
 

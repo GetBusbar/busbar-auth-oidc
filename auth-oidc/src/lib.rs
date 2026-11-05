@@ -1082,29 +1082,18 @@ pub fn discovered_secure(field: &str, setting: &str, url: &str) -> Result<(), St
 }
 
 /// The configured `jwks_url`, checked. Absent is fine (discovery names it), and so is `https`.
-pub fn check_jwks_url(cfg: &OidcConfig) -> Result<Option<String>, String> {
-    const ONLY: &str = "it must be an https URL (plain http only to a loopback host)";
+pub fn check_jwks_url(cfg: &OidcConfig) -> Result<(), String> {
     let Some(url) = &cfg.jwks_url else {
-        return Ok(None);
+        return Ok(());
     };
     let parsed = url::Url::parse(url)
-        .map_err(|e| format!("settings.jwks_url: is not a valid URL ({e}); {ONLY}"))?;
-    match parsed.scheme() {
-        "https" => Ok(None),
-        "http" if is_loopback_host(&parsed) => Ok(Some(
-            "jwks_url is plain http to a loopback host; it loads, but the JWKS is only ever \
-             fetched over https, so OIDC verification is unavailable until jwks_url is an https \
-             URL"
-            .to_string(),
-        )),
-        "http" => Err(
-            "settings.jwks_url: is plain http to a host that is not loopback: signing keys over \
-             plain http can be substituted in transit, so it is refused; use https (plain http \
-             only to a loopback host)"
-                .to_string(),
-        ),
-        _ => Err(format!("settings.jwks_url: must be an https URL; {ONLY}")),
+        .map_err(|_| "settings.jwks_url: must be a valid https URL".to_string())?;
+    if parsed.scheme() != "https" {
+        return Err(
+            "settings.jwks_url: must be an https URL; signing keys require TLS".to_string(),
+        );
     }
+    Ok(())
 }
 
 /// Whether the parsed URL's host is loopback: an IPv4 literal in 127.0.0.0/8, the IPv6 literal
