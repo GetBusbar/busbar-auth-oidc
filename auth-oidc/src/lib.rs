@@ -271,7 +271,21 @@ impl OidcVerifier {
             .or_else(|| claims.get("email").and_then(Value::as_str))
             .map(str::to_string);
 
-        let mut principal = Principal::from_id(format!("oidc:{subject}"));
+        // Subjects are unique only inside their verified issuer. Base64url prevents
+        // the issuer's URL separators from entering the self-serve subject path;
+        // its alphabet excludes ':' so the issuer/subject boundary is unambiguous.
+        // Preserve the subject bytes and the existing self-serve subject checks.
+        let identity_len = base64::encoded_len(self.issuer.len(), false)
+            .and_then(|n| n.checked_add(9))
+            .and_then(|n| n.checked_add(subject.len()));
+        if identity_len.is_none_or(|n| u32::try_from(n).is_err()) {
+            return Err("issuer-qualified principal exceeds the ABI identity byte bound".into());
+        }
+        let issuer_namespace = base64::Engine::encode(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+            self.issuer.as_bytes(),
+        );
+        let mut principal = Principal::from_id(format!("oidc-v2:{issuer_namespace}:{subject}"));
         principal.name = name;
         principal.roles = groups;
 

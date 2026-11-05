@@ -221,7 +221,7 @@ fn valid_token_identifies_with_groups() {
     let token = key.mint(&base_claims(now));
     match m.verify(&token, now, Instant::now()) {
         AuthVerdict::Identify(p) => {
-            assert_eq!(p.id, "oidc:object-guid");
+            assert_eq!(p.id, "oidc-v2:aHR0cHM6Ly9sb2dpbi5taWNyb3NvZnRvbmxpbmUuY29tL3RlbmFudC1ndWlkL3YyLjA:object-guid");
             assert_eq!(p.name.as_deref(), Some("Alice Contoso"));
             assert_eq!(p.roles, vec!["11111111-aaaa", "22222222-bbbb"]);
         }
@@ -351,7 +351,7 @@ fn valid_rs256_token_identifies() {
     let token = key.mint(&base_claims(now));
     match m.verify(&token, now, Instant::now()) {
         AuthVerdict::Identify(p) => {
-            assert_eq!(p.id, "oidc:object-guid");
+            assert_eq!(p.id, "oidc-v2:aHR0cHM6Ly9sb2dpbi5taWNyb3NvZnRvbmxpbmUuY29tL3RlbmFudC1ndWlkL3YyLjA:object-guid");
             assert_eq!(p.roles, vec!["11111111-aaaa", "22222222-bbbb"]);
         }
         other => panic!("expected Identify for a valid RS256 token, got {other:?}"),
@@ -558,7 +558,7 @@ fn kid_rotation_triggers_bounded_refetch() {
 
     let tok_new = new.mint(&base_claims(now));
     match m.verify(&tok_new, now, t0 + Duration::from_secs(61)) {
-        AuthVerdict::Identify(p) => assert_eq!(p.id, "oidc:object-guid"),
+        AuthVerdict::Identify(p) => assert_eq!(p.id, "oidc-v2:aHR0cHM6Ly9sb2dpbi5taWNyb3NvZnRvbmxpbmUuY29tL3RlbmFudC1ndWlkL3YyLjA:object-guid"),
         other => panic!("expected Identify after rotation, got {other:?}"),
     }
     assert_eq!(fetcher.calls(), 2, "exactly one refetch for the rotation");
@@ -589,7 +589,7 @@ fn a_verified_identity_is_answered_from_the_verdict_cache_for_its_ttl() {
 
     fetcher.set_body(TestKey::generate("another-kid").jwks());
     match m.verify(&token, now + 299, t0 + Duration::from_secs(3601)) {
-        AuthVerdict::Identify(p) => assert_eq!(p.id, "oidc:object-guid"),
+        AuthVerdict::Identify(p) => assert_eq!(p.id, "oidc-v2:aHR0cHM6Ly9sb2dpbi5taWNyb3NvZnRvbmxpbmUuY29tL3RlbmFudC1ndWlkL3YyLjA:object-guid"),
         other => panic!("expected the cached identity, got {other:?}"),
     }
     assert_eq!(fetcher.calls(), 1, "answered from the cache: no fetch");
@@ -1100,7 +1100,10 @@ fn unmapped_no_groups_still_identifies_with_empty_groups() {
     c.as_object_mut().unwrap().remove("groups");
     let p = verifier("groups").validate_claims(&c, now).unwrap();
     assert!(p.roles.is_empty());
-    assert_eq!(p.id, "oidc:object-guid");
+    assert_eq!(
+        p.id,
+        "oidc-v2:aHR0cHM6Ly9sb2dpbi5taWNyb3NvZnRvbmxpbmUuY29tL3RlbmFudC1ndWlkL3YyLjA:object-guid"
+    );
 }
 
 #[test]
@@ -1200,7 +1203,8 @@ fn subject_prefers_immutable_oid_over_mutable_preferred_username() {
     let c = base_claims(now);
     let p = verifier("groups").validate_claims(&c, now).unwrap();
     assert_eq!(
-        p.id, "oidc:object-guid",
+        p.id,
+        "oidc-v2:aHR0cHM6Ly9sb2dpbi5taWNyb3NvZnRvbmxpbmUuY29tL3RlbmFudC1ndWlkL3YyLjA:object-guid",
         "oid must win over preferred_username"
     );
 }
@@ -1211,7 +1215,11 @@ fn subject_falls_back_to_sub_when_oid_absent() {
     let mut c = base_claims(now);
     c.as_object_mut().unwrap().remove("oid");
     let p = verifier("groups").validate_claims(&c, now).unwrap();
-    assert_eq!(p.id, "oidc:subject-guid", "sub must win when oid is absent");
+    assert_eq!(
+        p.id,
+        "oidc-v2:aHR0cHM6Ly9sb2dpbi5taWNyb3NvZnRvbmxpbmUuY29tL3RlbmFudC1ndWlkL3YyLjA:subject-guid",
+        "sub must win when oid is absent"
+    );
 }
 
 /// Falling through to the MUTABLE preferred_username when neither immutable claim is present would
@@ -1267,7 +1275,10 @@ fn blank_oid_falls_through_to_a_valid_sub() {
     let p = verifier("groups")
         .validate_claims(&c, now)
         .expect("a blank oid must fall through to the valid sub");
-    assert_eq!(p.id, "oidc:subject-guid");
+    assert_eq!(
+        p.id,
+        "oidc-v2:aHR0cHM6Ly9sb2dpbi5taWNyb3NvZnRvbmxpbmUuY29tL3RlbmFudC1ndWlkL3YyLjA:subject-guid"
+    );
 }
 
 #[test]
@@ -1277,7 +1288,8 @@ fn display_name_falls_back_to_preferred_username_when_name_claim_absent() {
     c.as_object_mut().unwrap().remove("name");
     let p = verifier("groups").validate_claims(&c, now).unwrap();
     assert_eq!(
-        p.id, "oidc:object-guid",
+        p.id,
+        "oidc-v2:aHR0cHM6Ly9sb2dpbi5taWNyb3NvZnRvbmxpbmUuY29tL3RlbmFudC1ndWlkL3YyLjA:object-guid",
         "identity must still be the immutable oid"
     );
     assert_eq!(
@@ -1565,7 +1577,7 @@ fn identity_from_token_response_verifies_id_token() {
     let resp = LoginHttpResponse { status: 200, body };
     match m.identity_from_token_response(&resp, now, Instant::now()) {
         LoginOutcome::Identify(p) => {
-            assert_eq!(p.id, "oidc:object-guid");
+            assert_eq!(p.id, "oidc-v2:aHR0cHM6Ly9sb2dpbi5taWNyb3NvZnRvbmxpbmUuY29tL3RlbmFudC1ndWlkL3YyLjA:object-guid");
             assert_eq!(p.roles, vec!["11111111-aaaa", "22222222-bbbb"]);
         }
         other => panic!("expected Identify, got {other:?}"),
@@ -1700,7 +1712,7 @@ fn login_id_token_audience_is_the_client_id_not_the_bearer_audience() {
     };
 
     match m.identity_from_token_response(&response_for("cid"), now, Instant::now()) {
-        LoginOutcome::Identify(p) => assert_eq!(p.id, "oidc:object-guid"),
+        LoginOutcome::Identify(p) => assert_eq!(p.id, "oidc-v2:aHR0cHM6Ly9sb2dpbi5taWNyb3NvZnRvbmxpbmUuY29tL3RlbmFudC1ndWlkL3YyLjA:object-guid"),
         other => panic!("an id_token whose aud is the client_id must Identify, got {other:?}"),
     }
     assert!(
@@ -1863,7 +1875,7 @@ fn begin_and_complete_login_drive_the_full_flow() {
 
     match m.identity_from_token_response(cl2.token_response.as_ref().unwrap(), now, Instant::now())
     {
-        LoginOutcome::Identify(p) => assert_eq!(p.id, "oidc:object-guid"),
+        LoginOutcome::Identify(p) => assert_eq!(p.id, "oidc-v2:aHR0cHM6Ly9sb2dpbi5taWNyb3NvZnRvbmxpbmUuY29tL3RlbmFudC1ndWlkL3YyLjA:object-guid"),
         other => panic!("expected Identify, got {other:?}"),
     }
 }
@@ -1889,7 +1901,7 @@ fn the_module_verifies_a_token_response_and_rejects_a_forged_one() {
         }),
         ..Default::default()
     }) {
-        LoginOutcome::Identify(p) => assert_eq!(p.id, "oidc:object-guid"),
+        LoginOutcome::Identify(p) => assert_eq!(p.id, "oidc-v2:aHR0cHM6Ly9sb2dpbi5taWNyb3NvZnRvbmxpbmUuY29tL3RlbmFudC1ndWlkL3YyLjA:object-guid"),
         other => panic!("a validly signed id_token must Identify, got {other:?}"),
     }
 
@@ -2618,7 +2630,13 @@ fn a_token_of_the_second_provider_passes_the_first_and_is_admitted_by_the_second
     let cap = crate::tests::diagnostics::WarnCapture::capturing_debug();
     let walked =
         tracing::subscriber::with_default(cap.subscriber(), || chain(&[&a, &b], &token, now));
-    assert_eq!(walked, Walked::Admitted(1, "oidc:object-guid".to_string()));
+    assert_eq!(
+        walked,
+        Walked::Admitted(
+            1,
+            "oidc-v2:aHR0cHM6Ly9pZHAtYi5leGFtcGxlL3JlYWxtcy9i:object-guid".to_string()
+        )
+    );
     assert_eq!(
         a.idp.calls(),
         0,
@@ -2632,7 +2650,7 @@ fn a_token_of_the_second_provider_passes_the_first_and_is_admitted_by_the_second
     let token_a = key_a.mint(&base_claims(now));
     assert_eq!(
         chain(&[&b, &a], &token_a, now),
-        Walked::Admitted(1, "oidc:object-guid".to_string())
+        Walked::Admitted(1, "oidc-v2:aHR0cHM6Ly9sb2dpbi5taWNyb3NvZnRvbmxpbmUuY29tL3RlbmFudC1ndWlkL3YyLjA:object-guid".to_string())
     );
 }
 
@@ -2758,3 +2776,84 @@ fn an_unreadable_idp_document_is_refused_without_echoing_it() {
 
 #[path = "tests/diagnostics.rs"]
 pub(crate) mod diagnostics;
+
+#[test]
+fn verified_issuer_namespaces_equal_subjects_and_survives_key_rotation() {
+    let now = 1_700_000_000;
+    for use_oid in [false, true] {
+        let key_a = TestKey::generate("issuer-a");
+        let key_b = TestKey::generate("issuer-b");
+        let key_rotated = TestKey::generate("issuer-a-rotated");
+        let config_a = cfg("groups");
+        let mut config_b = cfg("groups");
+        config_b.issuer = "https://second-issuer.example/tenant".into();
+        let a = Module::new(&config_a, FixtureFetcher::new(key_a.jwks()));
+        let b = Module::new(&config_b, FixtureFetcher::new(key_b.jwks()));
+        let rotated = Module::new(&config_a, FixtureFetcher::new(key_rotated.jwks()));
+        let mut claims_a = base_claims(now);
+        if !use_oid {
+            claims_a.as_object_mut().unwrap().remove("oid");
+        }
+        let mut claims_b = claims_a.clone();
+        claims_b["iss"] = serde_json::json!(config_b.issuer);
+        let token_a = key_a.mint(&claims_a);
+        let token_b = key_b.mint(&claims_b);
+        // The first provider passes a foreign issuer so both providers can coexist.
+        assert!(matches!(
+            a.verify(&token_b, now, Instant::now()),
+            AuthVerdict::Pass
+        ));
+        assert!(matches!(
+            b.verify(&token_a, now, Instant::now()),
+            AuthVerdict::Pass
+        ));
+        let identify =
+            |module: &Module, token: &str| match module.verify(token, now, Instant::now()) {
+                AuthVerdict::Identify(p) => p.id,
+                other => panic!("the actual signature and issuer must verify: {other:?}"),
+            };
+        let actor_a = identify(&a, &token_a);
+        let actor_b = identify(&b, &token_b);
+        assert_ne!(
+            actor_a, actor_b,
+            "equal subjects from independent issuers are different actors"
+        );
+        assert!(
+            !actor_a.contains('/'),
+            "issuer qualification must remain a safe self-serve subject"
+        );
+        assert!(!actor_a.chars().any(char::is_control));
+        assert!(actor_a.starts_with("oidc-v2:"));
+        assert!(
+            !actor_a.starts_with("oidc:"),
+            "no old oidc:subject actor can alias a new actor"
+        );
+        assert_eq!(actor_a, identify(&a, &token_a), "cached identity is stable");
+        claims_a["name"] = serde_json::json!("renamed connector");
+        claims_a["exp"] = serde_json::json!(now + 300);
+        assert_eq!(
+            actor_a,
+            identify(&rotated, &key_rotated.mint(&claims_a)),
+            "issuer key and token rotation preserve actor identity"
+        );
+    }
+}
+
+#[test]
+fn issuer_subject_framing_cannot_alias_at_a_delimiter() {
+    let now = 1_700_000_000;
+    let actor = |issuer: &str, subject: &str| {
+        let mut claims = base_claims(now);
+        claims.as_object_mut().unwrap().remove("oid");
+        claims["iss"] = serde_json::json!(issuer);
+        claims["sub"] = serde_json::json!(subject);
+        OidcVerifier::new(issuer, AUDIENCE, "groups")
+            .validate_claims(&claims, now)
+            .unwrap()
+            .id
+    };
+    assert_ne!(
+        actor("https://issuer.example/realm", "other:connector"),
+        actor("https://issuer.example/realm:other", "connector")
+    );
+}

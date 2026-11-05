@@ -51,7 +51,7 @@ fn load_and_exercise_auth_oidc_plugin_success() {
     let identified = module.verify(Some(&token), None);
     assert!(
         identified.starts_with(
-            "verdict 1 subject=Some(\"oidc:subject-guid\") name=Some(\"Alice Example\") \
+            "verdict 1 subject=Some(\"oidc-v2:aHR0cHM6Ly9pZHAuY29uZm9ybWFuY2UuZXhhbXBsZS92Mi4w:subject-guid\") name=Some(\"Alice Example\") \
              groups=[\"11111111-aaaa\", \"22222222-bbbb\"]"
         ),
         "expected the JWKS fetch through the host + real signature verification to identify the \

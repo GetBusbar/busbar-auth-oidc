@@ -44,7 +44,7 @@
     "cases": [
       {
         "credential": "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImNvbmZvcm1hbmNlLWtpZCJ9.eyJpc3MiOiJodHRwczovL2lkcC5jb25mb3JtYW5jZS5leGFtcGxlL3YyLjAiLCJhdWQiOiJhcGk6Ly9idXNiYXItY29uZm9ybWFuY2UiLCJzdWIiOiJjb25mb3JtYW5jZS1zdWJqZWN0IiwibmFtZSI6IkNvbmZvcm1hbmNlIENhbGxlciIsInJvbGVzIjpbIkdhdGV3YXkuVXNlciJdLCJleHAiOjQxMDI0NDQ4MDAsIm5iZiI6MH0.KppCE8tyokmC1OPBAmeymOMmpIzHEhadwypCgYOB4J-O5Va5YsEEq1an7snxheNXcTeWT341LFzm6aNgKWdEgA",
-        "verdict": "identity:oidc:conformance-subject",
+        "verdict": "identity:oidc-v2:aHR0cHM6Ly9pZHAuY29uZm9ybWFuY2UuZXhhbXBsZS92Mi4w:conformance-subject",
         "timestamp": 1800000000
       },
       {
@@ -82,7 +82,7 @@
         "redirect_uri": "https://node.example/auth/token",
         "code_verifier": "conformance-verifier"
       },
-      "complete_verdict": "identity:oidc:conformance-subject",
+      "complete_verdict": "identity:oidc-v2:aHR0cHM6Ly9pZHAuY29uZm9ybWFuY2UuZXhhbXBsZS92Mi4w:conformance-subject",
       "complete_crossings": 1
     }
   }

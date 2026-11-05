@@ -296,3 +296,9 @@ Licensed **Apache-2.0** ([LICENSE](LICENSE)). Contributions welcome — see
 [CONTRIBUTING.md](CONTRIBUTING.md). Governed by our
 [Code of Conduct](CODE_OF_CONDUCT.md); security issues go through
 [SECURITY.md](SECURITY.md), not public issues.
+
+### Issuer-qualified principal identity
+
+Verified identities use `oidc-v2:<base64url-no-padding(issuer)>:<oid-or-sub>`. The exact verified issuer is encoded; the existing immutable `oid`-before-`sub` selection and original subject bytes are preserved. Encoding only the issuer keeps URL separators out of self-serve subject paths while preserving existing invalid-subject refusals. Key rotation, token renewal, display-name changes and provider aliases do not change this identity.
+
+This replaces the former `oidc:<oid-or-sub>` identity. Every OIDC actor changes, including actor-scoped idempotency/recovery records, synthetic governance keys and quota buckets, self-key bindings and personal groups, and privacy caller references. Historical audit/usage records retain their original identities. Before rollout, reconcile state only where the original issuer is known; ambiguous historical identities must not be automatically merged or aliased. Existing self-issued keys and their limits/revocations need explicit operator reconciliation so a newly named identity does not silently reset personal quota or bypass a prior revocation. Coordinate replacement of linked and dropped verifier instances and prior verdict caches. No fallback to the old actor namespace is provided.

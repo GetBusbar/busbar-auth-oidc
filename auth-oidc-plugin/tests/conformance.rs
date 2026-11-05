@@ -351,7 +351,7 @@ fn the_linked_and_the_dropped_in_oidc_module_are_one_module() {
     assert_eq!(a[0], format!("name {NAME}"), "{text}");
     assert_eq!(a[1], "open Ok(())", "{text}");
     assert!(
-        a[2].starts_with("verdict 1 subject=Some(\"oidc:conformance-subject\")")
+        a[2].starts_with("verdict 1 subject=Some(\"oidc-v2:aHR0cHM6Ly9pZHAuY29uZm9ybWFuY2UuZXhhbXBsZS92Mi4w:conformance-subject\")")
             && a[2].contains("\"Gateway.Admin\""),
         "the valid token identifies the caller with its roles, after discovery and the JWKS \
          fetch both crossed PENDING: {text}"
@@ -372,7 +372,7 @@ fn the_linked_and_the_dropped_in_oidc_module_are_one_module() {
         "the authorize URL is the DISCOVERED endpoint's: {text}"
     );
     assert!(
-        a[9].starts_with("verdict 1 subject=Some(\"oidc:conformance-subject\")"),
+        a[9].starts_with("verdict 1 subject=Some(\"oidc-v2:aHR0cHM6Ly9pZHAuY29uZm9ybWFuY2UuZXhhbXBsZS92Mi4w:conformance-subject\")"),
         "the login's token exchange answers an identity: {text}"
     );
     assert!(
@@ -1950,7 +1950,7 @@ fn wide_verified_identity_keeps_its_first_judgment_through_both_doors() {
             );
             assert!(answer.starts_with("short(needed "), "{answer}");
             assert!(
-                answer.contains("verdict 1 subject=Some(\"oidc:conformance-subject\")"),
+                answer.contains("verdict 1 subject=Some(\"oidc-v2:aHR0cHM6Ly9pZHAuY29uZm9ybWFuY2UuZXhhbXBsZS92Mi4w:conformance-subject\")"),
                 "{answer}"
             );
             assert_eq!(
@@ -2299,7 +2299,7 @@ fn configured_oidc_cases_validate_refresh_close_and_never_echo_credentials_both_
         );
         assert_eq!(crossings() - before, 1);
         counts.push(crossings() - before);
-        assert!(login.starts_with("verdict 1 subject=Some(\"oidc:conformance-subject\")"));
+        assert!(login.starts_with("verdict 1 subject=Some(\"oidc-v2:aHR0cHM6Ly9pZHAuY29uZm9ybWFuY2UuZXhhbXBsZS92Mi4w:conformance-subject\")"));
         answers.push(login);
         assert_eq!(idp.sent_to("/token").len(), 1);
         let mut i: busbar_contract::abi::auth::OpenOutboundIn = z();
@@ -2870,7 +2870,7 @@ fn two_ticketless_short_verifies_keep_independent_identities_and_cleanup_both_wa
             assert!(answered.error.is_none());
             let identity = support::identity(&retry.out, &bytes, &groups);
             assert!(
-                identity.starts_with("subject=Some(\"oidc:ticketless-b\")"),
+                identity.starts_with("subject=Some(\"oidc-v2:aHR0cHM6Ly9pZHAuY29uZm9ybWFuY2UuZXhhbXBsZS92Mi4w:ticketless-b\")"),
                 "{identity}"
             );
             assert!(identity.contains("group-299"));
@@ -2887,7 +2887,7 @@ fn two_ticketless_short_verifies_keep_independent_identities_and_cleanup_both_wa
                 assert!(answered.error.is_none());
                 let identity = support::identity(&retry.out, &bytes, &groups);
                 assert!(
-                    identity.starts_with("subject=Some(\"oidc:ticketless-a\")"),
+                    identity.starts_with("subject=Some(\"oidc-v2:aHR0cHM6Ly9pZHAuY29uZm9ybWFuY2UuZXhhbXBsZS92Mi4w:ticketless-a\")"),
                     "{identity}"
                 );
                 assert!(identity.contains("group-299"));
