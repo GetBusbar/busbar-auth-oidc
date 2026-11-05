@@ -10,8 +10,8 @@
 # GetBusbar/busbar at the pin in `.busbar-ref`; no sibling-checkout path dependency ships in any manifest.
 #
 # THIRD-PARTY VERSIONS ARE THE FLEET'S, NOT THIS REPO'S. The table below is busbar's own root
-# `[workspace.dependencies]` (third-party rows) at busbar 892773b8ed5d0cc78694bbcf5a10d89346ad61e6, followed by the plugin-only rows
-# of busbar's `.github/fleet/deps.toml` at 892773b8ed5d0cc78694bbcf5a10d89346ad61e6. A member takes a crate with
+# `[workspace.dependencies]` (third-party rows) at busbar 1a8a677b84a1667fbb6d7603b3586ad6ffe4f23e, followed by the plugin-only rows
+# of busbar's `.github/fleet/deps.toml` at 1a8a677b84a1667fbb6d7603b3586ad6ffe4f23e. A member takes a crate with
 # `{ workspace = true }` (adding features if it needs them); a crate in neither table is a new
 # `deps.toml` row in busbar first. Heal seeds resolution from busbar's lock at the pin; this
 # plugin retains its own Cargo.lock and CI checks its pinned core revision and dependency policy.
@@ -36,12 +36,12 @@ repository = "https://github.com/GetBusbar/busbar-auth-oidc"
 needless_update = "allow"
 
 [workspace.dependencies]
-busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "892773b8ed5d0cc78694bbcf5a10d89346ad61e6" }
-busbar-plugin-loader = { git = "https://github.com/GetBusbar/busbar", rev = "892773b8ed5d0cc78694bbcf5a10d89346ad61e6" }
-"busbar-core-connector" = { "features" = ["test-support"], "git" = "https://github.com/GetBusbar/busbar", "rev" = "892773b8ed5d0cc78694bbcf5a10d89346ad61e6" }
-"busbar-transport-http" = { "git" = "https://github.com/GetBusbar/busbar-transport-http", "rev" = "337b8c0763247f9a0d7d9169f0ee129b412d405f" }
-"busbar-transport-tcp" = { "git" = "https://github.com/GetBusbar/busbar-transport-tcp", "rev" = "6c804d968737f39ea435c81ef22d16cd7ffcaf59" }
-# busbar's root [workspace.dependencies], third-party rows, at 892773b8ed5d0cc78694bbcf5a10d89346ad61e6
+busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "3faee1e368c7b4d158d49d6f46ad52d5370f6c3e" }
+busbar-plugin-loader = { git = "https://github.com/GetBusbar/busbar", rev = "3faee1e368c7b4d158d49d6f46ad52d5370f6c3e" }
+"busbar-core-connector" = { "features" = ["test-support"], "git" = "https://github.com/GetBusbar/busbar", "rev" = "3faee1e368c7b4d158d49d6f46ad52d5370f6c3e" }
+"busbar-transport-http" = { "git" = "https://github.com/GetBusbar/busbar-transport-http", "rev" = "941e5dac86958fe3e6d8e7ea4f6790688b36294b" }
+"busbar-transport-tcp" = { "git" = "https://github.com/GetBusbar/busbar-transport-tcp", "rev" = "fa01db91a63e32894a29f7cd506d0cb885edf12f" }
+# busbar's root [workspace.dependencies], third-party rows, at 1a8a677b84a1667fbb6d7603b3586ad6ffe4f23e
 arc-swap = "1"
 async-trait = "0.1"
 aws-lc-sys = { version = "=0.47.0", default-features = false }
@@ -118,7 +118,7 @@ url = "2"
 webpki = { package = "rustls-webpki", version = "0.103", default-features = false, features = ["std", "ring"] }
 webpki-roots = "1"
 zeroize = "1"
-# busbar .github/fleet/deps.toml [plugin-deps], at 892773b8ed5d0cc78694bbcf5a10d89346ad61e6
+# busbar .github/fleet/deps.toml [plugin-deps], at 1a8a677b84a1667fbb6d7603b3586ad6ffe4f23e
 fallible-iterator = "0.2"
 httparse = { version = "1", default-features = false }
 ldap3 = { version = "0.12", default-features = false, features = ["sync"] }
@@ -136,6 +136,3 @@ redis = { version = "1", default-features = false, features = ["script"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 sonic-number = "=0.1.3"
 ulid = "1"
-
-[patch."https://github.com/GetBusbar/busbar"]
-"busbar-contract" = { "git" = "https://github.com/GetBusbar/busbar", "rev" = "892773b8ed5d0cc78694bbcf5a10d89346ad61e6" }

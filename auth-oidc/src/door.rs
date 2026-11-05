@@ -108,9 +108,13 @@ const DECLARES: &[u8] = include_bytes!("../declares.json");
 const DECLARES_EXTENSION: [u8; extensions::entry_len(EXT_DECLARES, DECLARES)] =
     extensions::entry(EXT_DECLARES, DECLARES);
 
+/// JSON Schema for the lifecycle settings document, embedded in the signed Statement.
+const SETTINGS_SCHEMA: &[u8] = include_bytes!("../settings.schema.json");
+
 /// This plugin's Statement: its name and alias, its version, the most calls one instance holds in
 /// flight, its secret reference, its outbound needs, its metric family and its auth tail.
 pub const STATEMENT: Statement = Statement {
+    settings_schema: busbar_contract::abi::mechanism::call::Blob::json(SETTINGS_SCHEMA),
     extensions: Blob {
         ptr: DECLARES_EXTENSION.as_ptr(),
         len: DECLARES_EXTENSION.len(),
@@ -1173,7 +1177,7 @@ impl SafeSlot for Verify {
         raise_refusals(&opened.module, &mut io, &mut out);
         let verdict = match judged {
             Step::Ready(_) | Step::Pending | Step::Wait if ticketless && io.wanted_io() => {
-                return Outcome::Refused
+                return Outcome::Refused;
             }
             Step::Ready(Err(e)) if ticketless => return out.fail(Refusal::refused(e)),
             Step::Pending | Step::Wait if ticketless => return Outcome::Refused,
@@ -1543,3 +1547,7 @@ pub use table::door;
 #[cfg(test)]
 #[path = "tests/door_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "settings_schema_tests.rs"]
+mod settings_schema_tests;

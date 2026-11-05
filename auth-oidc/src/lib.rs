@@ -1001,7 +1001,13 @@ pub fn token_form(
         .public("code_verifier", code_verifier)
         .public("client_id", &resolved_client_id(cfg));
     match secret {
-        Some(secret) => form.sealed("client_secret", &secret.clone().secure_for(url)),
+        Some(secret) => form.sealed(
+            "client_secret",
+            &secret.clone().require_secure_if(
+                url.split_once("://")
+                    .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("https")),
+            ),
+        ),
         None => form,
     }
 }

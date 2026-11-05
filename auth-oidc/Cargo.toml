@@ -36,6 +36,7 @@ zeroize = { workspace = true }
 
 
 [dev-dependencies]
+jsonschema = { workspace = true }
 tracing-subscriber = { workspace = true }
 # Diagnostic assertions use a local test subscriber; test-seal is for sealed values.
 busbar-contract = { workspace = true, features = ["test-seal"] }

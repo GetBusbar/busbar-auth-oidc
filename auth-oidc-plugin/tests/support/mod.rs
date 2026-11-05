@@ -28,7 +28,7 @@ use busbar_contract::services::{
     Caller, DiskDest, HookAsk, Later, NestAsk, Ran, Reading, RecordsList, Snapshot, Stored,
     TrustKeyRef, UNSERVED,
 };
-use busbar_contract::transport::ConnFacts;
+use busbar_contract::transport::{CertFacts, ConnFacts};
 use busbar_plugin_loader::dispatch::kinds::auth::Auth;
 use busbar_plugin_loader::dispatch::{
     in_head, load_dropped, load_dropped_bytes, load_linked, now_ns, out_head, Bind, ConnTable,
@@ -406,8 +406,26 @@ struct Response {
 /// One paused provider path and the actual instance/ticket reads waiting for its release.
 type HeldReads = (String, Vec<(InstanceId, u64)>);
 
-/// THE IdP: every need framed; an open is the whole request (kept in `sent`), answered by its path
+/// Security established by the scripted carrier, independent of the requested URL.
+#[derive(Clone, Copy, Debug)]
+pub enum CarrierSecurity {
+    Unavailable,
+    Insecure,
+    Secure,
+}
+
+struct Connection {
+    owner: InstanceId,
+    need: NeedId,
+    target: String,
+    security: CarrierSecurity,
+    committed: bool,
+}
+
+/// THE IdP: framed requests are captured only after committing the prepared carrier.
 pub struct Idp {
+    security: CarrierSecurity,
+    connections: Mutex<HashMap<u64, Connection>>,
     wake: Mutex<Option<Wake>>,
     /// `(connection, the waking ticket)` of every first read: which op made each request.
     woken: Mutex<Vec<(u64, u64)>>,
@@ -450,7 +468,18 @@ impl EnvelopeSink for Recorder {
 impl Idp {
     /// The IdP of `ISSUER`, signing with `key`: its discovery document (naming its JWKS, authorize
     pub fn new(key: &Issuer) -> Arc<Self> {
+        Self::with_carrier(key, CarrierSecurity::Unavailable)
+    }
+
+    /// Explicitly model a carrier whose handshake established peer authentication.
+    pub fn secure_carrier(key: &Issuer) -> Arc<Self> {
+        Self::with_carrier(key, CarrierSecurity::Secure)
+    }
+
+    pub fn with_carrier(key: &Issuer, security: CarrierSecurity) -> Arc<Self> {
         let idp = Arc::new(Self {
+            security,
+            connections: Mutex::new(HashMap::new()),
             wake: Mutex::new(None),
             woken: Mutex::new(Vec::new()),
             answers: Mutex::new(HashMap::new()),
@@ -644,44 +673,15 @@ fn piece(kind: PieceKind, len: usize) -> Piece {
 }
 
 impl Conns for Idp {
-    fn open(&self, _: InstanceId, need: NeedId, desc: &OpenDesc<'_>) -> Result<ConnId, ConnError> {
-        if self.refused.lock().unwrap().contains(&need.0) {
-            return Err(ConnError::Refused);
-        }
-        let path = String::from_utf8_lossy(desc.head_target).into_owned();
-        let id = self.next.fetch_add(1, Ordering::SeqCst);
-        self.sent.lock().unwrap().push(Sent {
-            conn: id,
-            need: need.0,
-            target: desc.target.to_owned(),
-            method: String::from_utf8_lossy(desc.method).into_owned(),
-            path: path.clone(),
-            body: String::from_utf8_lossy(&desc.body).into_owned(),
-        });
-        let response = self
-            .answers
-            .lock()
-            .unwrap()
-            .get(&path)
-            .cloned()
-            .unwrap_or(Response {
-                status: 404,
-                fields: Vec::new(),
-                body: b"{}".to_vec(),
-                timeout_body: false,
-            });
-        self.reads.lock().unwrap().insert(
-            id,
-            Reply {
-                step: 0,
-                at: 0,
-                status: response.status,
-                fields: response.fields,
-                body: response.body,
-                timeout_body: response.timeout_body,
-            },
-        );
-        Ok(ConnId(id))
+    fn open(
+        &self,
+        caller: InstanceId,
+        need: NeedId,
+        desc: &OpenDesc<'_>,
+    ) -> Result<ConnId, ConnError> {
+        let conn = self.prepare_request(caller, need, desc, desc.timeout_ms)?;
+        self.commit_request(caller, conn, desc, false)?;
+        Ok(conn)
     }
     fn write(
         &self,
@@ -700,6 +700,12 @@ impl Conns for Idp {
         ticket: u64,
         buf: &mut [u8],
     ) -> Result<Piece, ConnError> {
+        let connections = self.connections.lock().unwrap();
+        let connection = connections.get(&conn.0).ok_or(ConnError::Closed)?;
+        if connection.owner != caller || !connection.committed {
+            return Err(ConnError::Closed);
+        }
+        drop(connections);
         let paused = self.read_pause.lock().unwrap().take();
         if let Some((entered, resume)) = paused {
             entered
@@ -753,6 +759,7 @@ impl Conns for Idp {
                 buf[fields_len..fields_len + reason.len()].copy_from_slice(reason);
                 Ok(Piece {
                     status_code: Some(r.status),
+                    status_namespace: Some("http".to_owned()),
                     reason: Some(fields_len..fields_len + reason.len()),
                     ..piece(PieceKind::Fields, fields_len)
                 })
@@ -771,16 +778,121 @@ impl Conns for Idp {
     fn wait(&self, _: InstanceId, _: &[ConnId], _: u64) -> Result<usize, ConnError> {
         Err(ConnError::Closed)
     }
-    fn facts(&self, _: InstanceId, _: ConnId) -> Result<ConnFacts, ConnError> {
-        Err(ConnError::Closed)
+    fn facts(&self, caller: InstanceId, conn: ConnId) -> Result<ConnFacts, ConnError> {
+        let connections = self.connections.lock().unwrap();
+        let connection = connections.get(&conn.0).ok_or(ConnError::Closed)?;
+        if connection.owner != caller {
+            return Err(ConnError::Closed);
+        }
+        let peer_cert = match connection.security {
+            CarrierSecurity::Unavailable => return Err(ConnError::Closed),
+            CarrierSecurity::Insecure => None,
+            CarrierSecurity::Secure => Some(CertFacts {
+                subject: "scripted IdP peer".into(),
+                issuer: "scripted test authority".into(),
+                fingerprint: "scripted-peer-fingerprint".into(),
+            }),
+        };
+        Ok(ConnFacts {
+            sni: None,
+            alpn: None,
+            peer_cert,
+            claim: Some("http".into()),
+            peer_key_pin: None,
+            client_identity: false,
+        })
     }
-    fn close(&self, _: InstanceId, conn: ConnId) -> Result<(), ConnError> {
+    fn close(&self, caller: InstanceId, conn: ConnId) -> Result<(), ConnError> {
+        let mut connections = self.connections.lock().unwrap();
+        if connections.get(&conn.0).is_none_or(|c| c.owner != caller) {
+            return Err(ConnError::Closed);
+        }
+        connections.remove(&conn.0);
         self.reads.lock().unwrap().remove(&conn.0);
         Ok(())
     }
 }
 
 impl DeclaredConns for Idp {
+    fn prepare_request(
+        &self,
+        caller: InstanceId,
+        need: NeedId,
+        desc: &OpenDesc<'_>,
+        _: u64,
+    ) -> Result<ConnId, ConnError> {
+        if self.refused.lock().unwrap().contains(&need.0) {
+            return Err(ConnError::Refused);
+        }
+        let id = self.next.fetch_add(1, Ordering::SeqCst);
+        self.connections.lock().unwrap().insert(
+            id,
+            Connection {
+                owner: caller,
+                need,
+                target: desc.target.to_owned(),
+                security: self.security,
+                committed: false,
+            },
+        );
+        Ok(ConnId(id))
+    }
+
+    fn commit_request(
+        &self,
+        caller: InstanceId,
+        conn: ConnId,
+        desc: &OpenDesc<'_>,
+        require_secure: bool,
+    ) -> Result<(), ConnError> {
+        let mut connections = self.connections.lock().unwrap();
+        let connection = connections.get_mut(&conn.0).ok_or(ConnError::Closed)?;
+        if connection.owner != caller {
+            return Err(ConnError::Closed);
+        }
+        if connection.committed || connection.target != desc.target {
+            return Err(ConnError::Refused);
+        }
+        if require_secure && !matches!(connection.security, CarrierSecurity::Secure) {
+            return Err(ConnError::AuthRefused);
+        }
+        let id = conn.0;
+        let path = String::from_utf8_lossy(desc.head_target).into_owned();
+        self.sent.lock().unwrap().push(Sent {
+            conn: id,
+            need: connection.need.0,
+            target: desc.target.to_owned(),
+            method: String::from_utf8_lossy(desc.method).into_owned(),
+            path: path.clone(),
+            body: String::from_utf8_lossy(&desc.body).into_owned(),
+        });
+        let response = self
+            .answers
+            .lock()
+            .unwrap()
+            .get(&path)
+            .cloned()
+            .unwrap_or(Response {
+                status: 404,
+                fields: Vec::new(),
+                body: b"{}".to_vec(),
+                timeout_body: false,
+            });
+        self.reads.lock().unwrap().insert(
+            id,
+            Reply {
+                step: 0,
+                at: 0,
+                status: response.status,
+                fields: response.fields,
+                body: response.body,
+                timeout_body: response.timeout_body,
+            },
+        );
+        connection.committed = true;
+        Ok(())
+    }
+
     fn serves_scheme(&self, transport: &str) -> bool {
         transport == "http"
     }

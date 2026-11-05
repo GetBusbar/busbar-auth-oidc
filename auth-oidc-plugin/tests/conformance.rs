@@ -204,7 +204,7 @@ fn signed_mixed_type_audiences_are_refused_by_both_doors_and_login_modes() {
             stated: &stated,
         },
     ] {
-        let b = bind(&arm, &Idp::new(&key));
+        let b = bind(&arm, &Idp::secure_carrier(&key));
         open(&b.plugin, &cfg, Some(CLIENT_SECRET)).unwrap();
         for (index, extra) in [
             serde_json::json!(42),
@@ -335,13 +335,13 @@ fn the_linked_and_the_dropped_in_oidc_module_are_one_module() {
         "the signed manifest states the door's own Statement"
     );
 
-    let linked = bind(&Arm::Linked, &Idp::new(&key));
+    let linked = bind(&Arm::Linked, &Idp::secure_carrier(&key));
     let dropped = bind(
         &Arm::Dropped {
             lib: &lib,
             stated: &stated,
         },
-        &Idp::new(&key),
+        &Idp::secure_carrier(&key),
     );
     let a = transcript(&linked, &cfg, &t);
     let b = transcript(&dropped, &cfg, &t);
@@ -486,7 +486,7 @@ fn the_linked_and_the_dropped_in_oidc_module_are_one_module() {
             lib: &lib,
             stated: &stated,
         },
-        &Idp::new(&key),
+        &Idp::secure_carrier(&key),
     );
     assert_ne!(
         transcript(&other, &config("api://someone-else"), &t),
@@ -499,7 +499,7 @@ fn the_linked_and_the_dropped_in_oidc_module_are_one_module() {
             lib: &lib,
             stated: &stated,
         },
-        &Idp::new(&key),
+        &Idp::secure_carrier(&key),
     );
     let p = transcript(&public, &config_public(AUDIENCE), &t);
     let answers = a
@@ -536,7 +536,7 @@ fn the_linked_and_the_dropped_in_oidc_module_are_one_module() {
         lib: &lib,
         stated: &stated,
     };
-    match bind_as::<Secret>(&arm, &Idp::new(&key)).1 {
+    match bind_as::<Secret>(&arm, &Idp::secure_carrier(&key)).1 {
         Err(LoadError::ManifestKind { .. }) => {}
         Err(e) => panic!("an auth door stated as secret must be refused at its kind: {e}"),
         Ok(_) => panic!("an auth door stated as secret must not load"),
@@ -556,7 +556,7 @@ fn the_linked_and_the_dropped_in_oidc_module_are_one_module() {
         lib: &lib,
         stated: &tampered,
     };
-    match bind_as::<Auth>(&arm, &Idp::new(&key)).1 {
+    match bind_as::<Auth>(&arm, &Idp::secure_carrier(&key)).1 {
         Err(LoadError::StatementMismatch) => {}
         Err(e) => panic!("a Statement that is not the door's must be refused as one: {e}"),
         Ok(_) => panic!("a Statement that is not the door's must not load"),
@@ -580,7 +580,7 @@ fn red_an_unreachable_issuer_and_a_ticketless_call_fail_verify_in_1_5_5_s_words(
             stated: &stated,
         },
     ] {
-        let idp = Idp::new(&key);
+        let idp = Idp::secure_carrier(&key);
         idp.answer(DISCOVERY_PATH, 503, "{}");
         let b = bind(&arm, &idp);
         open(&b.plugin, &config(AUDIENCE), None).expect("opens: nothing is fetched at open");
@@ -621,7 +621,7 @@ fn cold_verifies(staggered: bool) {
     let _one = support::serial();
     let key = Issuer::start(UNUSED_ISSUER, KID);
     let token = key.sign(&claims(AUDIENCE));
-    let idp = Idp::new(&key);
+    let idp = Idp::secure_carrier(&key);
     idp.pend_for(Duration::from_millis(300));
     let b = bind(&Arm::Linked, &idp);
     open(&b.plugin, &config(AUDIENCE), None).expect("opens");
@@ -684,7 +684,7 @@ fn red_an_oversized_reply_is_cut_off_at_the_cap_not_buffered_whole() {
     let _one = support::serial();
     let key = Issuer::start(UNUSED_ISSUER, KID);
     let token = key.sign(&claims(AUDIENCE));
-    let idp = Idp::new(&key);
+    let idp = Idp::secure_carrier(&key);
     let huge = "x".repeat(4 * 1024 * 1024);
     idp.answer(DISCOVERY_PATH, 200, &huge);
     let b = bind(&Arm::Linked, &idp);
@@ -712,7 +712,7 @@ fn a_non_utf8_discovery_reply_names_the_document_without_echoing_the_body() {
     let _one = support::serial();
     let key = Issuer::start(UNUSED_ISSUER, KID);
     let token = key.sign(&claims(AUDIENCE));
-    let idp = Idp::new(&key);
+    let idp = Idp::secure_carrier(&key);
     idp.answer_bytes(DISCOVERY_PATH, 200, b"private-document-contents\xff");
     let b = bind(&Arm::Linked, &idp);
     open(&b.plugin, &config(AUDIENCE), None).expect("opens");
@@ -730,7 +730,7 @@ fn red_an_oversized_error_reply_names_its_status_and_is_cut_off_at_the_cap() {
     let _one = support::serial();
     let key = Issuer::start(UNUSED_ISSUER, KID);
     let token = key.sign(&claims(AUDIENCE));
-    let idp = Idp::new(&key);
+    let idp = Idp::secure_carrier(&key);
     let huge = "x".repeat(4 * 1024 * 1024);
     idp.answer(DISCOVERY_PATH, 500, &huge);
     let b = bind(&Arm::Linked, &idp);
@@ -757,7 +757,7 @@ fn red_an_oversized_error_reply_names_its_status_and_is_cut_off_at_the_cap() {
 fn a_login_whose_key_set_cannot_be_had_is_an_outage_not_declined() {
     let _one = support::serial();
     let key = Issuer::start(UNUSED_ISSUER, KID);
-    let idp = Idp::new(&key);
+    let idp = Idp::secure_carrier(&key);
     idp.answer(DISCOVERY_PATH, 503, "{}");
     let id_token = serde_json::json!({ "id_token": key.sign(&claims(AUDIENCE)) }).to_string();
     idp.answer("/token", 200, &id_token);
@@ -782,7 +782,7 @@ fn a_waiter_is_woken_by_the_fetch_it_waits_on_not_a_polling_timer() {
     let _one = support::serial();
     let key = Issuer::start(UNUSED_ISSUER, KID);
     let token = key.sign(&claims(AUDIENCE));
-    let idp = Idp::new(&key);
+    let idp = Idp::secure_carrier(&key);
     idp.pend_for(Duration::from_millis(400));
     let b = bind(&Arm::Linked, &idp);
     open(&b.plugin, &config(AUDIENCE), None).expect("opens");
@@ -844,7 +844,7 @@ fn a_tick_refreshes_the_key_set_ahead_of_its_ttl() {
     let _one = support::serial();
     let key = Issuer::start(UNUSED_ISSUER, KID);
     let token = key.sign(&claims(AUDIENCE));
-    let idp = Idp::new(&key);
+    let idp = Idp::secure_carrier(&key);
     let b = bind(&Arm::Linked, &idp);
     let mut cfg: serde_json::Value = serde_json::from_str(&config(AUDIENCE)).unwrap();
     cfg["jwks_ttl_secs"] = serde_json::json!(3);
@@ -1002,7 +1002,7 @@ fn a_bearer_that_is_not_utf8_passes_with_a_decision_and_its_line_named() {
             stated: &stated,
         },
     ] {
-        let idp = Idp::new(&key);
+        let idp = Idp::secure_carrier(&key);
         let b = bind(&arm, &idp);
         open(&b.plugin, &config(AUDIENCE), None).expect("opens");
         let (verdict, decision, strips) =
@@ -1019,7 +1019,7 @@ fn an_identity_carries_the_credential_it_was_verified_from() {
     let _one = support::serial();
     let key = Issuer::start(UNUSED_ISSUER, KID);
     let token = key.sign(&claims(AUDIENCE));
-    let idp = Idp::new(&key);
+    let idp = Idp::secure_carrier(&key);
     let b = bind(&Arm::Linked, &idp);
     open(&b.plugin, &config(AUDIENCE), None).expect("opens");
     let (mut bytes, mut groups) = (
@@ -1070,7 +1070,7 @@ fn a_token_s_expiry_is_judged_at_the_request_s_timestamp() {
         (0, "Failed "),
         (now, "verdict 1 "),
     ] {
-        let idp = Idp::new(&key);
+        let idp = Idp::secure_carrier(&key);
         let b = bind(&Arm::Linked, &idp);
         open(&b.plugin, &config(AUDIENCE), None).expect("opens");
         let verdict = b.verify_at(Some(&token), at);
@@ -1185,7 +1185,7 @@ fn pending_verify_and_begin_keep_their_opened_configuration_across_refresh() {
     let _one = support::serial();
     let key = Issuer::start(UNUSED_ISSUER, KID);
     for begin in [false, true] {
-        let idp = Idp::new(&key);
+        let idp = Idp::secure_carrier(&key);
         let b = bind(&Arm::Linked, &idp);
         let mut cfg: serde_json::Value = serde_json::from_str(&config_public(AUDIENCE)).unwrap();
         cfg["client_id"] = serde_json::json!("original-client");
@@ -1254,7 +1254,7 @@ fn pending_complete_keeps_its_client_and_token_answer_across_refresh() {
     let key = Issuer::start(UNUSED_ISSUER, KID);
 
     for path in ["/token", "/keys"] {
-        let idp = Idp::new(&key);
+        let idp = Idp::secure_carrier(&key);
         let b = bind(&Arm::Linked, &idp);
         let mut cfg: serde_json::Value = serde_json::from_str(&config_public(AUDIENCE)).unwrap();
         cfg["client_id"] = serde_json::json!("original-client");
@@ -1315,7 +1315,7 @@ fn a_verify_meeting_the_verdict_cache_on_re_entry_still_lands_its_fetch() {
     let _one = support::serial();
     let old = Issuer::start(UNUSED_ISSUER, KID);
     let new = Issuer::start(UNUSED_ISSUER, "rotated-kid");
-    let idp = Idp::new(&old);
+    let idp = Idp::secure_carrier(&old);
     let b = bind(&Arm::Linked, &idp);
     let mut cfg: serde_json::Value = serde_json::from_str(&config(AUDIENCE)).unwrap();
     cfg["jwks_ttl_secs"] = serde_json::json!(1);
@@ -1355,7 +1355,7 @@ fn a_verify_meeting_the_verdict_cache_on_re_entry_still_lands_its_fetch() {
 fn a_tick_during_the_last_tick_s_fetch_does_not_fetch_again() {
     let _one = support::serial();
     let key = Issuer::start(UNUSED_ISSUER, KID);
-    let idp = Idp::new(&key);
+    let idp = Idp::secure_carrier(&key);
     let b = bind(&Arm::Linked, &idp);
     let mut cfg: serde_json::Value = serde_json::from_str(&config(AUDIENCE)).unwrap();
     cfg["jwks_ttl_secs"] = serde_json::json!(3);
@@ -1392,7 +1392,7 @@ fn a_tick_during_the_last_tick_s_fetch_does_not_fetch_again() {
 fn ready_waits_on_another_op_s_discovery_and_a_failure_refuses_the_boot() {
     let _one = support::serial();
     let key = Issuer::start(UNUSED_ISSUER, KID);
-    let idp = Idp::new(&key);
+    let idp = Idp::secure_carrier(&key);
     idp.answer(DISCOVERY_PATH, 503, "{}");
     idp.pend_for(Duration::from_millis(500));
     let b = bind(&Arm::Linked, &idp);
@@ -1418,7 +1418,7 @@ fn ready_audits_refused_warmup_destinations_without_changing_best_effort_boot() 
     let _one = support::serial();
     let key = Issuer::start(UNUSED_ISSUER, KID);
     for guard_refused in [false, true] {
-        let idp = Idp::new(&key);
+        let idp = Idp::secure_carrier(&key);
         let b = bind(&Arm::Linked, &idp);
         let mut cfg: serde_json::Value = serde_json::from_str(&config(AUDIENCE)).unwrap();
         cfg["jwks_url"] = serde_json::json!(if guard_refused {
@@ -1485,7 +1485,7 @@ fn a_login_id_token_s_expiry_is_judged_at_the_host_clock() {
         ),
     ] {
         let _wall = host_wall.map(support::HeldClock::wall_at);
-        let idp = Idp::new(&key);
+        let idp = Idp::secure_carrier(&key);
         let body = serde_json::json!({ "id_token": key.sign(&c) }).to_string();
         idp.answer("/token", 200, &body);
         let b = bind(&Arm::Linked, &idp);
@@ -1516,7 +1516,7 @@ fn a_short_login_answer_uses_the_host_monotonic_expiry_boundary() {
     ] {
         let at = busbar_plugin_loader::dispatch::now_ns();
         let _clock = support::HeldClock::at(at);
-        let idp = Idp::new(&key);
+        let idp = Idp::secure_carrier(&key);
         let body = serde_json::json!({ "id_token": key.sign(&claims(AUDIENCE)) }).to_string();
         idp.answer("/token", 200, &body);
         let b = bind(&Arm::Linked, &idp);
@@ -1567,7 +1567,7 @@ fn a_short_login_answer_uses_the_host_monotonic_expiry_boundary() {
 fn an_empty_callback_nonce_cannot_accept_an_empty_id_token_nonce() {
     let _one = support::serial();
     let key = Issuer::start(UNUSED_ISSUER, KID);
-    let idp = Idp::new(&key);
+    let idp = Idp::secure_carrier(&key);
     let mut c = claims(AUDIENCE);
     c["nonce"] = serde_json::json!("");
     idp.answer(
@@ -1592,7 +1592,7 @@ fn an_empty_callback_nonce_cannot_accept_an_empty_id_token_nonce() {
 fn a_tick_reports_a_refused_key_endpoint_through_its_envelope() {
     let _one = support::serial();
     let key = Issuer::start(UNUSED_ISSUER, KID);
-    let idp = Idp::new(&key);
+    let idp = Idp::secure_carrier(&key);
     let b = bind(&Arm::Linked, &idp);
     let mut cfg: serde_json::Value = serde_json::from_str(&config(AUDIENCE)).unwrap();
     cfg["jwks_url"] = serde_json::json!("http://127.0.0.1/keys");
@@ -1622,7 +1622,7 @@ fn a_broken_successful_token_response_is_a_login_outage() {
         "<html>maintenance</html>",
         r#"{"access_token":"TokenCanary"}"#,
     ] {
-        let idp = Idp::new(&key);
+        let idp = Idp::secure_carrier(&key);
         idp.answer("/token", 200, body);
         let b = bind(&Arm::Linked, &idp);
         open(&b.plugin, &config(AUDIENCE), Some(CLIENT_SECRET)).expect("opens");
@@ -1642,7 +1642,7 @@ fn a_broken_successful_token_response_is_a_login_outage() {
 fn a_refused_idp_destination_raises_its_declared_diagnostic_once() {
     let _one = support::serial();
     let key = Issuer::start(UNUSED_ISSUER, KID);
-    let idp = Idp::new(&key);
+    let idp = Idp::secure_carrier(&key);
     let b = bind(&Arm::Linked, &idp);
     let mut cfg: serde_json::Value = serde_json::from_str(&config(AUDIENCE)).unwrap();
     cfg["jwks_min_refetch_secs"] = serde_json::json!(1);
@@ -1683,7 +1683,7 @@ fn ready_and_tick_release_held_connections_on_cancel_or_refresh() {
     ] {
         for ready_slot in [true, false] {
             for cancel in [true, false] {
-                let idp = Idp::new(&key);
+                let idp = Idp::secure_carrier(&key);
                 let b = bind(&arm, &idp);
                 let mut cfg: serde_json::Value = serde_json::from_str(&config(AUDIENCE)).unwrap();
                 cfg["jwks_url"] = serde_json::json!(support::JWKS_URL);
@@ -1783,7 +1783,7 @@ fn executing_driver_defers_refresh_until_its_host_call_returns() {
     ] {
         for drive in [false, true] {
             for refresh_kind in ["same", "changed", "refused"] {
-                let idp = Idp::new(&key);
+                let idp = Idp::secure_carrier(&key);
                 let b = bind(&arm, &idp);
                 let mut cfg: serde_json::Value = serde_json::from_str(&config(AUDIENCE)).unwrap();
                 cfg["jwks_url"] = serde_json::json!(support::JWKS_URL);
@@ -1934,7 +1934,7 @@ fn wide_verified_identity_keeps_its_first_judgment_through_both_doors() {
             stated: &stated,
         },
     ] {
-        let idp = Idp::new(&key);
+        let idp = Idp::secure_carrier(&key);
         let b = bind(&arm, &idp);
         open(&b.plugin, &config(AUDIENCE), None).expect("opens");
         for _ in 0..4 {
@@ -2014,7 +2014,7 @@ fn abandoned_wide_oidc_verdicts_release_and_closed_instances_refuse_recall_both_
             stated: &stated,
         },
     ] {
-        let b = bind(&arm, &Idp::new(&key));
+        let b = bind(&arm, &Idp::secure_carrier(&key));
         open(&b.plugin, &config(AUDIENCE), None).expect("opens");
         assert!(
             b.verify(Some(&token), None).contains("group-299"),
@@ -2142,7 +2142,7 @@ fn configured_oidc_cases_validate_refresh_close_and_never_echo_credentials_both_
             stated: &stated,
         },
     ] {
-        let idp = Idp::new(&key);
+        let idp = Idp::secure_carrier(&key);
         for far in input["far_ends"].as_array().unwrap() {
             let url = far["url"].as_str().unwrap();
             let path = format!(
@@ -2820,7 +2820,7 @@ fn two_ticketless_short_verifies_keep_independent_identities_and_cleanup_both_wa
             stated: &stated,
         },
     ] {
-        let idp = Idp::new(&key);
+        let idp = Idp::secure_carrier(&key);
         let bound = bind(&arm, &idp);
         open(&bound.plugin, &config(AUDIENCE), None).expect("opens");
         for token in [&a, &b] {
@@ -2897,6 +2897,120 @@ fn two_ticketless_short_verifies_keep_independent_identities_and_cleanup_both_wa
                 requests,
                 "neither recall repeats provider work"
             );
+        }
+    }
+}
+
+#[test]
+fn prepared_idp_carrier_commits_once_on_the_owned_connection() {
+    use busbar_contract::conn::{ConnError, Conns, DeclaredConns, InstanceId, NeedId, OpenDesc};
+    use support::CarrierSecurity;
+
+    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let owner = InstanceId(41);
+    let other = InstanceId(42);
+    for security in [
+        CarrierSecurity::Unavailable,
+        CarrierSecurity::Insecure,
+        CarrierSecurity::Secure,
+    ] {
+        let idp = Idp::with_carrier(&key, security);
+        let desc = OpenDesc {
+            target: support::TOKEN_URL,
+            ..Default::default()
+        };
+        let conn = idp.prepare_request(owner, NeedId(2), &desc, 0).unwrap();
+        assert!(idp.sent().is_empty(), "preparation must send no request");
+        assert!(matches!(idp.facts(other, conn), Err(ConnError::Closed)));
+        match security {
+            CarrierSecurity::Unavailable => {
+                assert!(matches!(idp.facts(owner, conn), Err(ConnError::Closed)))
+            }
+            CarrierSecurity::Insecure => {
+                assert!(idp.facts(owner, conn).unwrap().peer_cert.is_none())
+            }
+            CarrierSecurity::Secure => assert!(idp.facts(owner, conn).unwrap().peer_cert.is_some()),
+        }
+        let request = OpenDesc {
+            method: b"POST",
+            head_target: b"/token",
+            body: b"code=private".as_slice().into(),
+            ..desc.clone()
+        };
+        assert!(matches!(
+            idp.commit_request(other, conn, &request, true),
+            Err(ConnError::Closed)
+        ));
+        let foreign = OpenDesc {
+            target: support::JWKS_URL,
+            ..request.clone()
+        };
+        assert!(matches!(
+            idp.commit_request(owner, conn, &foreign, true),
+            Err(ConnError::Refused)
+        ));
+        let result = idp.commit_request(owner, conn, &request, true);
+        if matches!(security, CarrierSecurity::Secure) {
+            result.unwrap();
+            assert_eq!(idp.sent().len(), 1);
+            assert_eq!(idp.sent()[0].conn, conn.0);
+            assert!(matches!(
+                idp.commit_request(owner, conn, &request, true),
+                Err(ConnError::Refused)
+            ));
+        } else {
+            assert!(matches!(result, Err(ConnError::AuthRefused)));
+            assert!(
+                idp.sent().is_empty(),
+                "HTTPS spelling cannot authorize credentials"
+            );
+        }
+        assert!(matches!(idp.close(other, conn), Err(ConnError::Closed)));
+        idp.close(owner, conn).unwrap();
+        assert!(matches!(idp.facts(owner, conn), Err(ConnError::Closed)));
+    }
+}
+
+#[test]
+fn login_sends_no_credentials_without_secure_carrier_facts_both_ways() {
+    use support::CarrierSecurity;
+
+    let _one = support::serial();
+    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let lib = cdylib();
+    let stated = row().statement;
+    for security in [CarrierSecurity::Unavailable, CarrierSecurity::Insecure] {
+        for arm in [
+            Arm::Linked,
+            Arm::Dropped {
+                lib: &lib,
+                stated: &stated,
+            },
+        ] {
+            let idp = Idp::with_carrier(&key, security);
+            let b = bind(&arm, &idp);
+            let mut cfg: serde_json::Value = serde_json::from_str(&config(AUDIENCE)).unwrap();
+            cfg["token_endpoint"] = serde_json::json!(support::TOKEN_URL);
+            open(&b.plugin, &cfg.to_string(), Some(CLIENT_SECRET)).unwrap();
+            let answer = b.complete(
+                "private-code",
+                ("st", NONCE),
+                REDIRECT,
+                "private-verifier",
+                None,
+            );
+            assert_eq!(
+                answer.trim_end(),
+                format!("verdict {LOGIN_OUTAGE}"),
+                "{security:?}"
+            );
+            assert!(
+                idp.sent_to("/token").is_empty(),
+                "credentials escaped without secure facts: {security:?}"
+            );
+            assert!(!answer.contains(CLIENT_SECRET));
+            assert!(!answer.contains("private-code"));
+            assert!(!answer.contains("private-verifier"));
         }
     }
 }

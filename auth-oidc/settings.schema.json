@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "OIDC settings",
+  "description": "Lifecycle settings parsed as OidcConfig. client_secret is a host-resolved Statement secret reference, lent separately and never accepted here. Lifecycle also parses configured URLs and enforces HTTPS, with the documented local/private HTTP exceptions.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "issuer",
+    "audience"
+  ],
+  "properties": {
+    "issuer": {
+      "type": "string",
+      "pattern": "[^\\x09-\\x0D \\x85\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]",
+      "description": "Exact issuer URL. HTTPS, or HTTP to loopback; no query, fragment or control characters."
+    },
+    "audience": {
+      "type": "string",
+      "pattern": "[^\\x09-\\x0D \\x85\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]"
+    },
+    "jwks_url": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "[^\\x09-\\x0D \\x85\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]",
+      "description": "Optional JWKS URL; otherwise discovered from issuer. HTTPS, or HTTP to loopback (accepted with a warning; fetching still requires HTTPS)."
+    },
+    "role_claim": {
+      "type": "string",
+      "pattern": "[^\\x09-\\x0D \\x85\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]",
+      "default": "groups"
+    },
+    "jwks_min_refetch_secs": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 18446744073709551615,
+      "default": 60,
+      "x-busbar-integer-token": "unsigned"
+    },
+    "jwks_ttl_secs": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 18446744073709551615,
+      "default": 3600,
+      "x-busbar-integer-token": "unsigned"
+    },
+    "ca_cert_pem": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "[^\\x09-\\x0D \\x85\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]",
+      "description": "Optional additional CA PEM, lent to the host connector as trust_from. Lifecycle checks only that the supplied string is non-blank."
+    },
+    "client_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "[^\\x09-\\x0D \\x85\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]",
+      "description": "Defaults to audience when absent or null."
+    },
+    "scopes": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "[^\\x09-\\x0D \\x85\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]"
+      },
+      "default": [],
+      "description": "Additional scopes; openid is always added and duplicates are removed when building the authorize URL."
+    },
+    "authorization_endpoint": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "[^\\x09-\\x0D \\x85\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]",
+      "description": "Optional authorize URL, discovered when absent. HTTPS or loopback HTTP; no fragment or control characters."
+    },
+    "token_endpoint": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "[^\\x09-\\x0D \\x85\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]",
+      "description": "Optional token URL, discovered when absent. HTTPS or private/loopback HTTP; no control characters."
+    }
+  },
+  "x-busbar-settings-profile": "integer-token-v1"
+}

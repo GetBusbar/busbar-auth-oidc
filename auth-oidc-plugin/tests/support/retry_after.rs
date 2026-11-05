@@ -106,7 +106,7 @@ fn provider_retry_headers_reach_outages_through_both_doors_after_pending() {
             StatusCode::TOO_MANY_REQUESTS,
         ] {
             for &(hint, expected) in hints {
-                let idp = Idp::new(&key);
+                let idp = Idp::secure_carrier(&key);
                 let fields: Vec<_> = hint
                     .into_iter()
                     .map(|value| (RETRY_AFTER_HEADER, value))
@@ -149,7 +149,7 @@ fn outage_retry_metadata_uses_only_available_host_buffer_without_becoming_short(
         },
     ] {
         for cap in [0, needed - 1, needed, needed + 1] {
-            let idp = Idp::new(&key);
+            let idp = Idp::secure_carrier(&key);
             idp.answer_fields(
                 TOKEN_PATH,
                 u32::from(StatusCode::SERVICE_UNAVAILABLE.as_u16()),
@@ -206,7 +206,7 @@ fn retry_metadata_follows_the_outage_class_and_the_endpoint_that_failed() {
             (StatusCode::OK, valid.as_str(), LOGIN_IDENTITY),
             (StatusCode::OK, "<provider-maintenance>", LOGIN_OUTAGE),
         ] {
-            let idp = Idp::new(&key);
+            let idp = Idp::secure_carrier(&key);
             idp.answer_fields(
                 TOKEN_PATH,
                 u32::from(status.as_u16()),
@@ -227,7 +227,7 @@ fn retry_metadata_follows_the_outage_class_and_the_endpoint_that_failed() {
 
         const KEYS_RETRY_DELAY: &[u8] = b"240";
         for keys_hint in [None, Some(KEYS_RETRY_DELAY)] {
-            let idp = Idp::new(&key);
+            let idp = Idp::secure_carrier(&key);
             idp.answer_fields(
                 TOKEN_PATH,
                 u32::from(StatusCode::OK.as_u16()),
@@ -271,7 +271,7 @@ fn a_received_retry_hint_survives_a_later_body_timeout_or_reply_cap_failure() {
         },
     ] {
         for timeout in [true, false] {
-            let idp = Idp::new(&key);
+            let idp = Idp::secure_carrier(&key);
             idp.answer_fields(
                 TOKEN_PATH,
                 u32::from(StatusCode::SERVICE_UNAVAILABLE.as_u16()),

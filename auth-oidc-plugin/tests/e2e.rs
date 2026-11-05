@@ -27,7 +27,7 @@ fn load_and_exercise_auth_oidc_plugin_success() {
     })
     .to_string();
 
-    let idp = Idp::new(&key);
+    let idp = Idp::secure_carrier(&key);
     let module = support::bind(&Arm::File(&path), &idp);
     assert_eq!(module.plugin.name(), "busbar-auth-oidc");
     support::open(&module.plugin, &cfg, None).expect("the module opens across the door");
@@ -573,7 +573,7 @@ fn load_and_exercise_auth_oidc_plugin_bad_config_fails_over_abi() {
     let _one = support::serial();
     let path = plugin_path();
     let key = Issuer::start(UNUSED_ISSUER, "k");
-    let dropped = || support::bind(&Arm::File(&path), &Idp::new(&key));
+    let dropped = || support::bind(&Arm::File(&path), &Idp::secure_carrier(&key));
 
     let err = support::open(&dropped().plugin, "", None)
         .expect_err("empty config must fail to open, not silently succeed");
