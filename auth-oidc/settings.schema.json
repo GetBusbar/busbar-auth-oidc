@@ -1,6 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "OIDC settings",
+  "x-busbar-principal-format": "oidc-v2",
   "description": "Lifecycle settings parsed as OidcConfig. client_secret is a host-resolved Statement secret reference, lent separately and never accepted here. Lifecycle also parses configured URLs and enforces HTTPS, with the documented local/private HTTP exceptions.",
   "type": "object",
   "additionalProperties": false,
