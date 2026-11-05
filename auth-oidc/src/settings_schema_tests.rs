@@ -12,6 +12,14 @@ use serde_json::{json, Value};
 fn check(cases: &[(Value, bool)]) {
     let schema: Value = serde_json::from_slice(SETTINGS_SCHEMA).expect("schema JSON");
     assert_eq!(schema["x-busbar-principal-format"], "oidc-v2");
+    assert_eq!(
+        schema["x-busbar-principal-domain-fields"],
+        json!([
+            {"pointer": "/issuer", "required": true},
+            {"pointer": "/audience", "required": true},
+            {"pointer": "/client_id", "required": false},
+        ])
+    );
     let validator = settings_profile::validator(&schema).expect("valid settings schema");
     assert_eq!(STATEMENT.settings_schema.ptr, SETTINGS_SCHEMA.as_ptr());
     assert_eq!(STATEMENT.settings_schema.len, SETTINGS_SCHEMA.len());
