@@ -1608,14 +1608,20 @@ fn a_tick_reports_a_refused_key_endpoint_through_its_envelope() {
     let key = Issuer::start(UNUSED_ISSUER, KID);
     let idp = Idp::secure_carrier(&key);
     let b = bind(&Arm::Linked, &idp);
-    open(&b.plugin, &config(AUDIENCE), None).expect("HTTPS configuration opens");
+    let mut cfg: serde_json::Value = serde_json::from_str(&config(AUDIENCE)).unwrap();
+    // Refuse the key request synchronously on TICK itself. Implicit discovery can pend,
+    // leaving its later DRIVE to report the refusal after the tick's envelope has returned.
+    cfg["jwks_url"] = serde_json::json!(support::JWKS_URL);
+    open(&b.plugin, &cfg.to_string(), None).expect("HTTPS configuration opens");
     idp.refuse(1);
     let driver = b.dispatcher.driver(&b.plugin, 0).expect("driver");
     for _ in 0..2 {
-        b.dispatcher
+        let done = b
+            .dispatcher
             .tick(&b.plugin, driver, now_ns())
             .wait(Duration::from_secs(10))
             .expect("tick answers");
+        assert_eq!(done.outcome, Outcome::Ready, "refusal settles on the tick");
     }
     assert_eq!(
         idp.diags()
