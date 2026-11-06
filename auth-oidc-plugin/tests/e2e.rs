@@ -9,6 +9,8 @@ fn plugin_path() -> std::path::PathBuf {
         .expect("build the actual busbar_auth_oidc_plugin cdylib before this test")
 }
 
+#[path = "support/fresh_namespace.rs"]
+mod fresh_namespace;
 mod support;
 use support::{Arm, Idp, Issuer, UNUSED_ISSUER};
 
@@ -355,6 +357,7 @@ fn install_oidc_plugin_via_admin_api_and_authenticate() {
             .unwrap()
             .as_nanos()
     ));
+    std::fs::create_dir(&work).expect("exclusively create this fixture namespace");
     let _scratch = Scratch(work.clone());
     let plugins_dir = work.join("plugins");
     std::fs::create_dir_all(&plugins_dir).unwrap();
@@ -488,16 +491,18 @@ fn install_oidc_plugin_via_admin_api_and_authenticate() {
     let admin_addr2 = format!("127.0.0.1:{admin_port2}");
     let data_addr2 = format!("127.0.0.1:{data_port2}");
 
+    let mut serve = std::process::Command::new(&busbar_bin);
+    serve
+        .env("BUSBAR_CONFIG", &config2)
+        .env("BUSBAR_TEST_HARNESS_FIRST_PARTY_KEY", &first_party_pub)
+        .env("BUSBAR_PROVIDERS", &providers)
+        .env("BUSBAR_ADMIN_TOKEN", ADMIN_TOKEN)
+        .env("MOCK_KEY", "unused-mock-provider-key")
+        .env("BUSBAR_STATE_FILE", "")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::inherit());
     let mut child2 = KillOnDrop(
-        std::process::Command::new(&busbar_bin)
-            .env("BUSBAR_CONFIG", &config2)
-            .env("BUSBAR_TEST_HARNESS_FIRST_PARTY_KEY", &first_party_pub)
-            .env("BUSBAR_PROVIDERS", &providers)
-            .env("BUSBAR_ADMIN_TOKEN", ADMIN_TOKEN)
-            .env("MOCK_KEY", "unused-mock-provider-key")
-            .env("BUSBAR_STATE_FILE", "")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::inherit())
+        fresh_namespace::initialize_and_serve(serve, &work, 2)
             .spawn()
             .expect(
                 "spawn boot 2 (auth.chain: [oidc], picking up the admin-API-installed tarball)",
