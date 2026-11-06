@@ -81,19 +81,22 @@ fn a_decoded_token_fills_one_allocation_sized_up_front() {
         br"\ud83d\ude00\ud83d\ude00",
         br"",
     ] {
-        let out = unescape(raw).expect("a valid escape sequence");
+        let body = format!(r#"{{"id_token":"{}"}}"#, std::str::from_utf8(raw).unwrap());
+        let out = TokenResponse::parse(&body).unwrap().id_token.unwrap();
         assert_eq!(out.capacity(), raw.len(), "{raw:?}");
         assert!(out.len() <= raw.len());
     }
     assert_eq!(
-        unescape(br"a\u0041\n\ud83d\ude00")
-            .as_deref()
-            .map(String::as_str),
-        Some("aA\n\u{1F600}")
+        read(r#"{"id_token":"a\u0041\n\ud83d\ude00"}"#)[0].as_deref(),
+        Some("aA\n😀")
     );
-    assert!(unescape(br"\x").is_none());
-    assert!(unescape(br"\u12").is_none());
-    assert!(unescape(br"\u12G4").is_none());
+    for body in [
+        r#"{"id_token":"\x"}"#,
+        r#"{"id_token":"\u12"}"#,
+        r#"{"id_token":"\u12G4"}"#,
+    ] {
+        assert!(TokenResponse::parse(body).is_err());
+    }
 }
 
 #[test]
@@ -118,17 +121,18 @@ fn each_structural_fault_in_a_token_response_is_named_malformed_with_its_positio
 }
 
 #[test]
-fn a_high_surrogate_without_its_low_half_is_an_invalid_escape() {
+fn a_high_surrogate_without_its_low_half_is_refused_without_echoing_it() {
     for body in [
         r#"{"id_token":"\ud83dxy"}"#,
         r#"{"id_token":"\ud83d\ud83d"}"#,
         r#"{"id_token":"\ud83d"}"#,
     ] {
-        assert_eq!(
-            parse_err(body),
-            "token response: `id_token` holds an invalid escape",
-            "{body}"
+        let error = parse_err(body);
+        assert!(
+            error.starts_with("token response: a field is missing or has the wrong type"),
+            "{error}"
         );
+        assert!(!error.contains("id_token"));
     }
 }
 
