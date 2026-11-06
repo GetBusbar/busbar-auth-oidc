@@ -1219,6 +1219,20 @@ impl Bound {
         )
     }
 
+    /// `verify` with explicit request time and capacity, including the exact short-buffer recall.
+    pub fn verify_at_with_cap(
+        &self,
+        credential: Option<&str>,
+        timestamp: u64,
+        cap: Option<(usize, u32)>,
+    ) -> String {
+        self.identify(
+            slot::VERIFY,
+            |out_buf| verify_in_at(credential, out_buf, timestamp),
+            cap.unwrap_or((IDENTITY_BUF_BYTES, IDENTITY_GROUPS)),
+        )
+    }
+
     /// `begin_login` for the core's `state`, `challenge` and `nonce`: the authorize URL, or the
     pub fn begin(&self, redirect: &str, state: &str, challenge: &str, nonce: &str) -> String {
         let mut i: BeginLoginIn = z();

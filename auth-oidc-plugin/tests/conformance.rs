@@ -269,7 +269,8 @@ fn signed_mixed_type_audiences_are_refused_by_both_doors_and_login_modes() {
 }
 
 /// What one door does with the module opened under `cfg`, against its own IdP, as one comparable
-fn transcript(b: &Bound, cfg: &str, t: &Tokens) -> Vec<String> {
+fn transcript(b: &Bound, cfg: &str, t: &Tokens, request_at: u64) -> Vec<String> {
+    let verify = |credential, cap| b.verify_at_with_cap(credential, request_at, cap);
     let id_token = |token: &str| serde_json::json!({ "id_token": token }).to_string();
     let callback = |code: &str, cap| b.complete(code, ("st", NONCE), REDIRECT, "the-verifier", cap);
     let mut lines = vec![
@@ -283,9 +284,9 @@ fn transcript(b: &Bound, cfg: &str, t: &Tokens) -> Vec<String> {
         Some("not-a-jwt"),
         None,
     ] {
-        lines.push(b.verify(credential, None));
+        lines.push(verify(credential, None));
     }
-    lines.push(b.verify(Some(&t.valid), Some((8, 0))));
+    lines.push(verify(Some(t.valid.as_str()), Some((8, 0))));
     lines.push(b.begin(
         REDIRECT,
         "conformance-state",
@@ -343,8 +344,14 @@ fn the_linked_and_the_dropped_in_oidc_module_are_one_module() {
         },
         &Idp::secure_carrier(&key),
     );
-    let a = transcript(&linked, &cfg, &t);
-    let b = transcript(&dropped, &cfg, &t);
+    // Compare the same request and login wall facts; real monotonic deadlines still advance.
+    let request_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let _wall = support::HeldClock::wall_at(request_at * 1_000_000_000);
+    let a = transcript(&linked, &cfg, &t, request_at);
+    let b = transcript(&dropped, &cfg, &t, request_at);
     assert_eq!(a, b, "the two doors are not one module");
 
     let text = a.join("\n");
@@ -489,7 +496,7 @@ fn the_linked_and_the_dropped_in_oidc_module_are_one_module() {
         &Idp::secure_carrier(&key),
     );
     assert_ne!(
-        transcript(&other, &config("api://someone-else"), &t),
+        transcript(&other, &config("api://someone-else"), &t, request_at),
         a,
         "a different config must not read as the same module"
     );
@@ -501,7 +508,7 @@ fn the_linked_and_the_dropped_in_oidc_module_are_one_module() {
         },
         &Idp::secure_carrier(&key),
     );
-    let p = transcript(&public, &config_public(AUDIENCE), &t);
+    let p = transcript(&public, &config_public(AUDIENCE), &t, request_at);
     let answers = a
         .iter()
         .position(|l| l.starts_with("need "))
