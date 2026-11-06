@@ -126,7 +126,10 @@ pub const STATEMENT: Statement = Statement {
     mark_words_len: CARRIERS.len(),
     diag_ids: DIAG_IDS.as_ptr(),
     diag_ids_len: DIAG_IDS.len(),
-    ..with_tail(statement(NAME, env!("CARGO_PKG_VERSION"), 64), &TAIL)
+    ..with_tail(
+        statement(NAME, env!("CARGO_PKG_VERSION"), IN_FLIGHT_MAX),
+        &TAIL,
+    )
 };
 
 /// EVERY REFUSED IdP DESTINATION IS AUDITED: each refusal the op met (`io`'s, [`HostIo::take_refusals`])
@@ -141,6 +144,9 @@ fn raise_refusals<O: AbiOut>(module: &OidcModule, io: &mut HostIo<'_>, out: &mut
         }
     }
 }
+
+/// The most calls one instance has in flight at once (the statement's `max_inflight`).
+const IN_FLIGHT_MAX: u32 = 64;
 
 /// The most short answers kept for their re-call at once.
 const REACHED_MAX: usize = 1024;

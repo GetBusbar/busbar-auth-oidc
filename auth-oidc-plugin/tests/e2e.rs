@@ -12,7 +12,7 @@ fn plugin_path() -> std::path::PathBuf {
 #[path = "support/fresh_namespace.rs"]
 mod fresh_namespace;
 mod support;
-use support::{Arm, Idp, Issuer, UNUSED_ISSUER};
+use support::{Arm, Idp, Issuer};
 
 /// End-to-end SUCCESS: dlopen the real auth-oidc-plugin cdylib, `open` it against a config naming
 #[test]
@@ -20,7 +20,7 @@ fn load_and_exercise_auth_oidc_plugin_success() {
     let _one = support::serial();
     let path = plugin_path();
 
-    let key = Issuer::start(UNUSED_ISSUER, "test-kid-1");
+    let key = Issuer::start("test-kid-1");
     const AUDIENCE: &str = "api://busbar-client";
     let cfg = serde_json::json!({
         "issuer": support::ISSUER,
@@ -79,7 +79,7 @@ fn load_and_exercise_auth_oidc_plugin_success() {
         )
     );
 
-    let forged_token = Issuer::start(UNUSED_ISSUER, "test-kid-1").sign(&claims);
+    let forged_token = Issuer::start("test-kid-1").sign(&claims);
     assert_eq!(
         module.verify(Some(&forged_token), None),
         "verdict 2 ",
@@ -91,7 +91,7 @@ fn load_and_exercise_auth_oidc_plugin_success() {
 fn busbar_root() -> std::path::PathBuf {
     let dir = std::env::var_os("BUSBAR_CHECKOUT").expect(
         "BUSBAR_CHECKOUT is unset: the live e2e builds the real busbar binaries from a checkout of \
-         GetBusbar/busbar at .busbar-ref (ci.yml `e2e` sets it)",
+         GetBusbar/busbar at .busbar-ref (set BUSBAR_CHECKOUT to one)",
     );
     std::path::PathBuf::from(dir)
         .canonicalize()
@@ -268,13 +268,15 @@ fn pack_oidc_tarball(
     std::fs::read(out).unwrap()
 }
 
-/// An ephemeral local TCP port (bind :0, read back the OS-assigned port, drop the listener before the
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+/// Two DISTINCT ephemeral local TCP ports: both `:0` listeners are held until both ports are read,
+/// then dropped so busbar can bind them.
+fn free_port_pair() -> (u16, u16) {
+    let a = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let b = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    (
+        a.local_addr().unwrap().port(),
+        b.local_addr().unwrap().port(),
+    )
 }
 
 /// A spawned busbar, killed and reaped when it drops: a failing assertion between its spawn and
@@ -329,22 +331,22 @@ fn install_oidc_plugin_via_admin_api_and_authenticate() {
     if std::env::var_os("BUSBAR_CHECKOUT").is_none() {
         if std::env::var_os("CI").is_some() {
             panic!(
-                "BUSBAR_CHECKOUT is unset under CI: plugin-ci's busbar_checkout must provide a \
-                 busbar checkout at .busbar-ref so the admin-API install e2e runs instead of passing \
-                 while checking nothing."
+                "BUSBAR_CHECKOUT is unset under CI: set BUSBAR_CHECKOUT to a busbar checkout at \
+                 .busbar-ref so the admin-API install e2e runs instead of passing while checking \
+                 nothing."
             );
         }
 
         eprintln!(
             "skip: BUSBAR_CHECKOUT unset — the admin-API install e2e needs a busbar checkout at \
-             .busbar-ref to build the real busbar binary (ci.yml `e2e` runs it)"
+             .busbar-ref to build the real busbar binary (set BUSBAR_CHECKOUT to one)"
         );
         return;
     }
     let (busbar_bin, pack_bin) = build_real_binaries();
     let (sign_key, first_party_pub) = first_party_keypair(&pack_bin);
 
-    let key = Issuer::start(UNUSED_ISSUER, "admin-e2e-kid");
+    let key = Issuer::start("admin-e2e-kid");
     let (jwks_url, cert_pem) = (key.jwks_url().to_string(), key.cert_pem().to_string());
     const ISSUER: &str = "https://oidc-admin-e2e.invalid/v2.0";
     const AUDIENCE: &str = "api://busbar-admin-e2e";
@@ -370,13 +372,9 @@ fn install_oidc_plugin_via_admin_api_and_authenticate() {
     )
     .unwrap();
 
-    let client = reqwest::blocking::Client::builder()
-        .danger_accept_invalid_certs(false)
-        .build()
-        .unwrap();
+    let client = reqwest::blocking::Client::builder().build().unwrap();
 
-    let data_port1 = free_port();
-    let admin_port1 = free_port();
+    let (data_port1, admin_port1) = free_port_pair();
     let config1 = work.join("config1.yaml");
     std::fs::write(
         &config1,
@@ -459,8 +457,7 @@ fn install_oidc_plugin_via_admin_api_and_authenticate() {
 
     drop(child1);
 
-    let data_port2 = free_port();
-    let admin_port2 = free_port();
+    let (data_port2, admin_port2) = free_port_pair();
     let config2 = work.join("config2.yaml");
     std::fs::write(
         &config2,
@@ -552,7 +549,7 @@ fn install_oidc_plugin_via_admin_api_and_authenticate() {
          handling, so this assertion would not have noticed an auth regression: body {body}"
     );
 
-    let forged_key = Issuer::start(UNUSED_ISSUER, "admin-e2e-kid");
+    let forged_key = Issuer::start("admin-e2e-kid");
     let forged_token = forged_key.sign(&claims);
     let forged_resp = client
         .post(format!("http://{data_addr2}/v1/chat/completions"))
@@ -577,7 +574,7 @@ fn install_oidc_plugin_via_admin_api_and_authenticate() {
 fn load_and_exercise_auth_oidc_plugin_bad_config_fails_over_abi() {
     let _one = support::serial();
     let path = plugin_path();
-    let key = Issuer::start(UNUSED_ISSUER, "k");
+    let key = Issuer::start("k");
     let dropped = || support::bind(&Arm::File(&path), &Idp::secure_carrier(&key));
 
     let err = support::open(&dropped().plugin, "", None)

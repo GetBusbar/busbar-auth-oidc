@@ -14,7 +14,7 @@ const URL: &str = "https://idp.example/jwks";
 #[test]
 fn jwks_body_over_the_cap_is_refused() {
     let cap = 16usize;
-    let err = capped(URL, vec![b'x'; cap * 2], cap).unwrap_err();
+    let err = capped_for(NEED_JWKS, URL, vec![b'x'; cap * 2], cap).unwrap_err();
     assert_eq!(
         err,
         "https://idp.example/jwks JWKS body exceeds the 16-byte cap"
@@ -24,12 +24,17 @@ fn jwks_body_over_the_cap_is_refused() {
 #[test]
 fn jwks_body_exactly_at_the_cap_is_accepted() {
     let cap = 16usize;
-    assert_eq!(capped(URL, vec![b'x'; cap], cap).unwrap().len(), cap);
+    assert_eq!(
+        capped_for(NEED_JWKS, URL, vec![b'x'; cap], cap)
+            .unwrap()
+            .len(),
+        cap
+    );
 }
 
 #[test]
 fn a_non_utf8_jwks_body_is_a_clean_error_not_a_panic() {
-    let err = capped(URL, vec![0xff, 0xfe], 1024).unwrap_err();
+    let err = capped_for(NEED_JWKS, URL, vec![0xff, 0xfe], 1024).unwrap_err();
     assert_eq!(err, "https://idp.example/jwks JWKS body is not UTF-8");
 }
 
@@ -399,8 +404,8 @@ fn an_error_naming_a_url_drops_its_userinfo() {
     for said in [
         failed(url, "the connection was refused"),
         document(url, 404, Vec::new()).unwrap_err(),
-        capped(url, vec![0xff], 16).unwrap_err(),
-        capped(url, vec![b'x'; 32], 16).unwrap_err(),
+        capped_for(NEED_JWKS, url, vec![0xff], 16).unwrap_err(),
+        capped_for(NEED_JWKS, url, vec![b'x'; 32], 16).unwrap_err(),
     ] {
         assert!(!said.contains("Zq7pw") && !said.contains("user:"), "{said}");
         assert!(said.contains("https://idp.example/jwks"), "{said}");
@@ -444,4 +449,46 @@ fn far_end_url_and_host_displays_use_the_existing_untrusted_bound() {
     let refusal = refusal(&host, "is refused");
     assert!(refusal.len() < 150);
     assert!(!refusal.contains("HostCanary"));
+}
+
+/// An op with an exchange in flight to one URL must carry it on before requesting another.
+#[test]
+fn an_op_is_busy_elsewhere_only_while_another_urls_exchange_is_in_flight() {
+    let in_flight = url::Url::parse(URL).unwrap();
+    let ticket = Ticket {
+        slot: 1,
+        generation: 1,
+    };
+    let state = IoState {
+        current: Some((
+            URL.to_string(),
+            Exchange::request(get_request(&in_flight)).expect("a GET exchange"),
+        )),
+        ..IoState::default()
+    };
+    let io = HostIo::new(None, ticket, state, false);
+    assert!(io.busy_elsewhere("https://idp.example/other"));
+    assert!(!io.busy_elsewhere(URL));
+
+    let idle = HostIo::new(None, ticket, IoState::default(), false);
+    assert!(!idle.busy_elsewhere(URL));
+    assert!(!idle.busy_elsewhere("https://idp.example/other"));
+}
+
+#[test]
+fn an_unparseable_url_still_loses_its_userinfo_when_it_has_a_scheme() {
+    for (url, shown_as) in [
+        ("https://user:Zq7pw@[bad/jwks", "https://[bad/jwks"),
+        (
+            "https://user:Zq7pw@idp.example:notaport/x?a=b@c",
+            "https://idp.example:notaport/x?a=b@c",
+        ),
+        ("https://[bad/no-userinfo", "https://[bad/no-userinfo"),
+        ("no scheme here", "no scheme here"),
+    ] {
+        assert!(url::Url::parse(url).is_err(), "{url} must not parse");
+        let said = shown(url);
+        assert_eq!(said, shown_as);
+        assert!(!said.contains("Zq7pw"), "{said}");
+    }
 }

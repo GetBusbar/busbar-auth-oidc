@@ -95,3 +95,46 @@ fn a_decoded_token_fills_one_allocation_sized_up_front() {
     assert!(unescape(br"\u12").is_none());
     assert!(unescape(br"\u12G4").is_none());
 }
+
+#[test]
+fn each_structural_fault_in_a_token_response_is_named_malformed_with_its_position_only() {
+    let malformed = "token response: it is not well-formed JSON (line 1, column";
+    for (body, why) in [
+        (
+            r#"{id_token":"x"}"#,
+            "a member name without its opening quote",
+        ),
+        (r#"{"id_token" "x"}"#, "a member name without its colon"),
+        (
+            r#"{"id_token":"x" "access_token":"y"}"#,
+            "two members without a comma",
+        ),
+        (r#"{"id_token":"x";}"#, "a stray separator"),
+    ] {
+        let err = parse_err(body);
+        assert!(err.starts_with(malformed), "{why}: {err}");
+        assert!(!err.contains("access_token"), "{why}: {err}");
+    }
+}
+
+#[test]
+fn a_high_surrogate_without_its_low_half_is_an_invalid_escape() {
+    for body in [
+        r#"{"id_token":"\ud83dxy"}"#,
+        r#"{"id_token":"\ud83d\ud83d"}"#,
+        r#"{"id_token":"\ud83d"}"#,
+    ] {
+        assert_eq!(
+            parse_err(body),
+            "token response: `id_token` holds an invalid escape",
+            "{body}"
+        );
+    }
+}
+
+fn parse_err(body: &str) -> String {
+    match TokenResponse::parse(body) {
+        Err(e) => e,
+        Ok(_) => panic!("refused: {body}"),
+    }
+}

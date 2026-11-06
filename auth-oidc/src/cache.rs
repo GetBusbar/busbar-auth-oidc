@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use std::task::Poll;
 use std::time::{Duration, Instant};
 
-/// Where in a [`JwksCache::with_key`] call its fetch was claimed: the cold/stale refresh before the
+/// Where in a [`JwksCache::with_key_for`] call its fetch was claimed: the cold/stale refresh before the
 /// first lookup, or the bounded rotation refetch after a miss. A caller re-entering its own fetch
 /// carries on from there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,7 +25,7 @@ enum Point {
     Rotation,
 }
 
-/// Why [`JwksCache::with_key`] could not answer `f`'s result: the KEY SET could not be had (an
+/// Why [`JwksCache::with_key_for`] could not answer `f`'s result: the KEY SET could not be had (an
 /// IdP outage: a fetch that failed, the rate limit holding off the retry after one, a set past its
 /// staleness ceiling, a rotation refetch that failed), or it was had and no key in it verifies the
 /// token (a bad signature, an alg/key mismatch, a kid absent from the set the IdP last answered).
@@ -109,20 +109,9 @@ impl JwksCache {
     /// cache is empty or stale, fetch first; if `kid` still misses after that (key rotation),
     /// refetch once, rate-limited by `min_refetch_interval`, and retry. A miss after the bounded
     /// refetch is a precise [`KeyError`].
-    pub fn with_key<T>(
-        &self,
-        url: &str,
-        kid: &str,
-        now: Instant,
-        io: &mut dyn Fetch,
-        f: impl Fn(&Jwk) -> Result<T, String>,
-    ) -> Step<Result<T, KeyError>> {
-        self.with_key_for(url, kid, None, now, io, f)
-    }
-
-    /// [`Self::with_key`] for a token signed with `alg`: a token naming NO kid (`kid` empty) is
-    /// verified by the set's single usable signing key for `alg` ([`JwkSet::select`]), if there is
-    /// exactly one.
+    ///
+    /// For a token signed with `alg`, a token naming NO kid (`kid` empty) is verified by the set's
+    /// single usable signing key for `alg` ([`JwkSet::select`]), if there is exactly one.
     pub fn with_key_for<T>(
         &self,
         url: &str,

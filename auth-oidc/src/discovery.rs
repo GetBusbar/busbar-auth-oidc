@@ -44,15 +44,22 @@ pub fn check_document(
         busbar_contract::abi::sdk::auth_kit::json_error("OIDC discovery document is not JSON"),
     )?;
     match doc.get("issuer").and_then(Value::as_str) {
-        Some(doc_issuer) if doc_issuer == cfg.issuer => Ok(doc),
+        Some(doc_issuer) if doc_issuer == cfg.issuer => {
+            if cfg.jwks_url.is_none() && !doc.get("jwks_uri").is_some_and(Value::is_string) {
+                return Err(format!(
+                    "OIDC discovery document names no jwks_uri ({url}); configure jwks_url explicitly"
+                ));
+            }
+            Ok(doc)
+        }
         Some(other) => Err(format!(
             "OIDC discovery document's issuer '{}' does not match the configured issuer '{}' \
-             ({url}); refusing to trust its jwks_uri",
+             ({url}); refusing to trust its endpoints",
             crate::untrusted(other),
             cfg.issuer
         )),
         None => Err(format!(
-            "OIDC discovery document has no 'issuer' ({url}); refusing to trust its jwks_uri"
+            "OIDC discovery document has no 'issuer' ({url}); refusing to trust its endpoints"
         )),
     }
 }
@@ -155,6 +162,15 @@ impl Discovery {
                         }
                         _ => None,
                     };
+                    // An op that resumed with its own exchange in flight (a token POST, a JWKS
+                    // GET) to another url must carry it on: claiming a flight here would make
+                    // it ask for the discovery document and drop that exchange (a single-use
+                    // code redeemed twice). It is served the previous document instead.
+                    if io.busy_elsewhere(&url) {
+                        if let Some(prev) = prev.clone() {
+                            return Step::Ready(Ok(prev));
+                        }
+                    }
                     let Some(owner) = me else {
                         if let Some(prev) = prev {
                             return Step::Ready(Ok(prev));

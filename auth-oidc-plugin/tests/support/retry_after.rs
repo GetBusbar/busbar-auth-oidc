@@ -78,7 +78,7 @@ fn complete(b: &Bound, cap: usize) -> (u32, Option<Vec<u8>>) {
 #[test]
 fn provider_retry_headers_reach_outages_through_both_doors_after_pending() {
     let _one = support::serial();
-    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let key = Issuer::start(KID);
     let lib = cdylib();
     let stated = row().statement;
     for arm in [
@@ -137,7 +137,7 @@ fn provider_retry_headers_reach_outages_through_both_doors_after_pending() {
 #[test]
 fn outage_retry_metadata_uses_only_available_host_buffer_without_becoming_short() {
     let _one = support::serial();
-    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let key = Issuer::start(KID);
     let lib = cdylib();
     let stated = row().statement;
     let needed = extensions::entry_len(EXT_RETRY_AFTER, RETRY_DELAY);
@@ -172,7 +172,7 @@ fn outage_retry_metadata_uses_only_available_host_buffer_without_becoming_short(
 #[test]
 fn retry_metadata_follows_the_outage_class_and_the_endpoint_that_failed() {
     let _one = support::serial();
-    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let key = Issuer::start(KID);
     let lib = cdylib();
     let stated = row().statement;
     for arm in [
@@ -259,7 +259,7 @@ fn retry_metadata_follows_the_outage_class_and_the_endpoint_that_failed() {
 #[test]
 fn a_received_retry_hint_survives_a_later_body_timeout_or_reply_cap_failure() {
     let _one = support::serial();
-    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let key = Issuer::start(KID);
     let lib = cdylib();
     let stated = row().statement;
     let over_cap = vec![b'x'; busbar_auth_oidc::fetch::MAX_TOKEN_BYTES + 1];
@@ -294,5 +294,37 @@ fn a_received_retry_hint_survives_a_later_body_timeout_or_reply_cap_failure() {
                 "the failed exchange closed its connection"
             );
         }
+    }
+}
+
+/// A host wall clock the plugin cannot judge by (below its sanity floor) makes an HTTP-date hint
+/// unreadable, so the host keeps its default delay; a delay-seconds hint needs no clock.
+#[test]
+fn an_http_date_retry_hint_is_unreadable_while_the_host_clock_is_unusable() {
+    let _one = support::serial();
+    let _wall = support::HeldClock::wall_at(1_000_000_000_000_000_000);
+    let key = Issuer::start(KID);
+    let hints: &[RetryHintCase] = &[
+        (Some(b"Wed, 21 Oct 2099 07:28:00 GMT"), None),
+        (Some(RETRY_DELAY), Some(RETRY_DELAY)),
+    ];
+    for &(hint, expected) in hints {
+        let idp = Idp::secure_carrier(&key);
+        let fields: Vec<_> = hint
+            .into_iter()
+            .map(|value| (RETRY_AFTER_HEADER, value))
+            .collect();
+        idp.answer_fields(
+            TOKEN_PATH,
+            u32::from(StatusCode::SERVICE_UNAVAILABLE.as_u16()),
+            EMPTY_RESPONSE,
+            &fields,
+        );
+        let b = bind(&Arm::Linked, &idp);
+        open(&b.plugin, &config(AUDIENCE), Some(CLIENT_SECRET)).expect("opens");
+        assert_eq!(
+            complete(&b, IDENTITY_BUF_BYTES),
+            (LOGIN_OUTAGE, expected.map(<[u8]>::to_vec))
+        );
     }
 }

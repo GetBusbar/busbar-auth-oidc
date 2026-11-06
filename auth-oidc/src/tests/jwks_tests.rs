@@ -118,3 +118,69 @@ fn a_jwks_entry_or_document_that_is_not_a_json_object_is_not_read_as_keys() {
     let s = set(" \n\t{\"keys\":[{\"kty\":\"EC\",\"kid\":\"a\",\"crv\":\"P-256\",\"x\":\"AAAA\",\"y\":\"BBBB\"}]}");
     assert_eq!(s.keys.len(), 1);
 }
+
+/// RFC 7518 sections 6.2.1.2 and 6.2.1.3: a P-256 JWK's `x` and `y` are each exactly 32 octets. A
+/// 65-byte concatenation of a 31-byte `x` and a 33-byte `y` is not a key.
+#[test]
+fn an_ec_jwk_with_a_coordinate_that_is_not_32_bytes_is_unusable() {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine as _;
+    let jwk = |x: usize, y: usize| -> Jwk {
+        serde_json::from_value(serde_json::json!({
+            "kty": "EC", "crv": "P-256", "kid": "k",
+            "x": URL_SAFE_NO_PAD.encode(vec![7u8; x]),
+            "y": URL_SAFE_NO_PAD.encode(vec![9u8; y]),
+        }))
+        .unwrap()
+    };
+    assert!(matches!(
+        KeyMaterial::from_jwk(&jwk(32, 32)),
+        KeyMaterial::Ec { .. }
+    ));
+    for (x, y) in [(31, 33), (33, 31), (32, 33), (31, 32)] {
+        let m = KeyMaterial::from_jwk(&jwk(x, y));
+        assert!(
+            matches!(&m, KeyMaterial::Unusable(e) if e.contains("32")),
+            "x={x} y={y}: {m:?}"
+        );
+    }
+}
+
+#[test]
+fn an_rsa_key_without_an_exponent_is_unusable_and_says_so() {
+    let s = set(r#"{"keys":[{"kty":"RSA","kid":"r","n":"AQAB"}]}"#);
+    match s.keys[0].material() {
+        KeyMaterial::Unusable(msg) => assert_eq!(msg, "JWKS key missing RSA exponent e"),
+        other => panic!("expected Unusable, got {other:?}"),
+    }
+    let bad = set(r#"{"keys":[{"kty":"RSA","kid":"r","n":"AQAB","e":"!!"}]}"#);
+    match bad.keys[0].material() {
+        KeyMaterial::Unusable(msg) => {
+            assert_eq!(msg, "JWKS key RSA exponent e is not base64url")
+        }
+        other => panic!("expected Unusable, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_ec_key_without_a_y_coordinate_is_unusable_and_says_so() {
+    let s = set(r#"{"keys":[{"kty":"EC","crv":"P-256","kid":"e","x":"AAAA"}]}"#);
+    match s.keys[0].material() {
+        KeyMaterial::Unusable(msg) => assert_eq!(msg, "JWKS key missing EC coordinate y"),
+        other => panic!("expected Unusable, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_key_signs_only_the_algorithms_busbar_supports() {
+    let s = set(r#"{"keys":[
+        {"kty":"RSA","n":"AQAB","e":"AQAB"},
+        {"kty":"EC","crv":"P-256","x":"AAAA","y":"BBBB"}
+    ]}"#);
+    for key in &s.keys {
+        assert!(!key.signs("HS256"), "HMAC is never accepted");
+        assert!(!key.signs("none"));
+    }
+    assert!(s.keys[0].signs("RS256") && !s.keys[0].signs("ES256"));
+    assert!(s.keys[1].signs("ES256") && !s.keys[1].signs("RS256"));
+}

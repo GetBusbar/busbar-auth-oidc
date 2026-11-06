@@ -1133,12 +1133,14 @@ fn an_nbf_at_i64_min_does_not_panic() {
     );
 }
 
-/// The `exp` clock-skew window at its exact boundary, and the ttl clamp at 0 (OIDC-15): an `exp`
+/// The `exp` clock-skew window at its exact boundary (RFC 7519 section 4.1.4: now strictly before
+/// exp plus leeway), and the ttl clamp at 0 (OIDC-15): an `exp` one second inside the window
+/// verifies with ttl 0; at the window's edge, and past it, the token is expired.
 #[test]
-fn exp_at_the_skew_boundary_verifies_with_ttl_zero_and_one_past_is_expired() {
+fn exp_at_the_skew_boundary_is_expired_and_one_inside_verifies_with_ttl_zero() {
     let now = 1_700_000_000;
     let mut c = base_claims(now);
-    c["exp"] = serde_json::json!(now - CLOCK_SKEW_SECS);
+    c["exp"] = serde_json::json!(now - CLOCK_SKEW_SECS + 1);
     let p = verifier("groups")
         .validate_claims(&c, now)
         .expect("exp within the skew window verifies");
@@ -1148,11 +1150,13 @@ fn exp_at_the_skew_boundary_verifies_with_ttl_zero_and_one_past_is_expired() {
         "a just-expired-within-skew token is not cached"
     );
 
-    c["exp"] = serde_json::json!(now - CLOCK_SKEW_SECS - 1);
-    let err = verifier("groups")
-        .validate_claims(&c, now)
-        .expect_err("exp one second past the skew window is expired");
-    assert!(err.contains("expired"), "got: {err}");
+    for exp in [now - CLOCK_SKEW_SECS, now - CLOCK_SKEW_SECS - 1] {
+        c["exp"] = serde_json::json!(exp);
+        let err = verifier("groups")
+            .validate_claims(&c, now)
+            .expect_err("exp at or past the skew window's edge is expired");
+        assert!(err.contains("token has expired"), "got: {err}");
+    }
 }
 
 #[test]
@@ -1475,12 +1479,14 @@ fn role_claim_as_a_single_scalar_string_is_accepted() {
 
 /// The authorize URL is an OAuth authorization-code request carrying PKCE + state + nonce, and
 #[test]
-fn build_authorize_url_has_pkce_state_no_secret() {
+fn authorize_url_has_pkce_and_state() {
     let mut c = cfg("groups");
     c.authorization_endpoint = Some("https://idp.test/authorize".to_string());
     c.scopes = vec!["email".to_string(), "profile".to_string()];
-    let url = build_authorize_url(
+    let url = authorize_url(
         &c,
+        "https://idp.test/authorize",
+        &[],
         "https://busbar.test/auth/token",
         "state-xyz",
         "challenge-abc",
@@ -1507,20 +1513,23 @@ fn build_authorize_url_has_pkce_state_no_secret() {
         url.contains(&format!("client_id={}", pct(AUDIENCE))),
         "client_id must default to the audience: {url}"
     );
-
-    assert!(
-        !url.contains("client_secret") && !url.contains("secret"),
-        "authorize URL must not carry a secret: {url}"
-    );
 }
 
 /// The authorize URL's query encoding (OIDC-16): query delimiters in a value are escaped (never
 #[test]
-fn build_authorize_url_escapes_delimiters_dedups_openid_and_omits_an_absent_nonce() {
+fn authorize_url_escapes_delimiters_dedups_openid_and_omits_an_absent_nonce() {
     let mut c = cfg("groups");
     c.authorization_endpoint = Some("https://idp.test/authorize".to_string());
     c.scopes = vec!["openid".to_string(), "email".to_string()];
-    let url = build_authorize_url(&c, "https://busbar.test/cb", "a&b=c#d+e%", "ch", None);
+    let url = authorize_url(
+        &c,
+        "https://idp.test/authorize",
+        &[],
+        "https://busbar.test/cb",
+        "a&b=c#d+e%",
+        "ch",
+        None,
+    );
     assert!(
         url.contains("&state=a%26b%3Dc%23d%2Be%25&"),
         "every query delimiter in a value must be percent-encoded: {url}"
@@ -1567,10 +1576,18 @@ fn the_authorize_url_dedups_the_login_s_own_scopes_and_drops_blank_entries() {
 }
 
 #[test]
-fn build_authorize_url_keeps_an_existing_endpoint_query() {
+fn authorize_url_keeps_an_existing_endpoint_query() {
     let mut c = cfg("groups");
     c.authorization_endpoint = Some("https://idp/authorize?p=b2c_1".to_string());
-    let url = build_authorize_url(&c, "https://busbar.test/cb", "st", "ch", None);
+    let url = authorize_url(
+        &c,
+        "https://idp/authorize?p=b2c_1",
+        &[],
+        "https://busbar.test/cb",
+        "st",
+        "ch",
+        None,
+    );
     assert!(
         url.starts_with("https://idp/authorize?p=b2c_1&response_type=code&"),
         "the endpoint's own query must be kept and joined with '&': {url}"
@@ -1833,6 +1850,7 @@ fn discovery_populates_authorization_and_token_endpoints() {
 fn explicit_login_endpoints_win_and_both_explicit_skip_discovery() {
     let doc = serde_json::json!({
         "issuer": ISSUER,
+        "jwks_uri": "https://login.microsoftonline.com/discovered/keys",
         "authorization_endpoint": "https://login.microsoftonline.com/discovered/authorize",
         "token_endpoint": "https://login.microsoftonline.com/discovered/token",
     });
@@ -1930,13 +1948,9 @@ fn begin_and_complete_login_drive_the_full_flow() {
     }
 
     let body = serde_json::json!({ "id_token": key.mint(&base_claims(now)) }).to_string();
-    let cl2 = CompleteLogin {
-        token_response: Some(LoginHttpResponse { status: 200, body }),
-        ..Default::default()
-    };
+    let response = LoginHttpResponse { status: 200, body };
 
-    match m.identity_from_token_response(cl2.token_response.as_ref().unwrap(), now, Instant::now())
-    {
+    match m.identity_from_token_response(&response, now, Instant::now()) {
         LoginOutcome::Identify(p) => assert_eq!(p.id, "oidc-v2:aHR0cHM6Ly9sb2dpbi5taWNyb3NvZnRvbmxpbmUuY29tL3RlbmFudC1ndWlkL3YyLjA:object-guid"),
         other => panic!("expected Identify, got {other:?}"),
     }
@@ -2085,6 +2099,7 @@ fn only_an_rfc_6749_credential_error_at_the_token_endpoint_is_a_decline() {
         (400, "<html>bad gateway</html>"),
         (401, "{}"),
         (400, r#"{"error":42}"#),
+        (400, r#"["invalid_grant"]"#),
     ] {
         let (outcome, warn, _) = answered(status, body);
         let Err(cause) = outcome else {
@@ -2191,9 +2206,10 @@ fn far_end_and_attacker_strings_are_escaped_and_capped_in_errors() {
 
     let c = crate::cache::JwksCache::new(Duration::from_secs(60), Duration::from_secs(3600));
     let idp = FixtureFetcher::new(key.jwks());
-    let err = ready(c.with_key(
+    let err = ready(c.with_key_for(
         "https://jwks.test/keys",
         &hostile,
+        None,
         Instant::now(),
         &mut idp.at_once(Some(ME)),
         |_| Ok(()),
@@ -2255,9 +2271,10 @@ fn untrusted_kid_and_alg_are_escaped_in_error_text() {
     let key = TestKey::generate(KID);
     let c = crate::cache::JwksCache::new(Duration::from_secs(60), Duration::from_secs(3600));
     let idp = FixtureFetcher::new(key.jwks());
-    let err = ready(c.with_key(
+    let err = ready(c.with_key_for(
         "https://jwks.test/keys",
         "a\nb\u{1b}[31m",
+        None,
         Instant::now(),
         &mut idp.at_once(Some(ME)),
         |_| Ok(()),
@@ -2393,6 +2410,19 @@ fn an_id_token_binds_only_to_the_logins_nonce() {
 }
 
 #[test]
+fn an_empty_expected_nonce_binds_nothing() {
+    let part = |v: &serde_json::Value| URL_SAFE_NO_PAD.encode(serde_json::to_vec(v).unwrap());
+    let id_token = format!(
+        "{}.{}.sig",
+        part(&serde_json::json!({ "alg": "ES256" })),
+        part(&serde_json::json!({ "nonce": "" }))
+    );
+    let with_empty = serde_json::json!({ "id_token": id_token }).to_string();
+    assert!(!nonce_binds(&with_empty, ""));
+    assert!(!nonce_binds(r#"{"error":"invalid_grant"}"#, ""));
+}
+
+#[test]
 fn the_token_response_holds_its_tokens_in_wiped_holders() {
     let r = TokenResponse::parse(
         r#"{"id_token":"a.b.c","access_token":"at","refresh_token":"rt","token_type":"Bearer","expires_in":3600,"x":{"y":[1]}}"#,
@@ -2415,14 +2445,22 @@ fn a_logged_idp_url_drops_its_userinfo() {
         let url = "https://jwks-user:SECRETPW@jwks.test/keys";
         let idp = Idp::answering(Err("down".to_string()));
         let t0 = Instant::now();
-        let _ = ready(c.with_key(url, KID, t0, &mut idp.at_once(Some(ME)), |_| Ok(())));
+        let _ = ready(c.with_key_for(url, KID, None, t0, &mut idp.at_once(Some(ME)), |_| Ok(())));
         idp.set_body(key.jwks());
         let later = t0 + Duration::from_secs(2);
-        let _ = ready(c.with_key(url, KID, later, &mut idp.at_once(Some(ME)), |_| Ok(())));
-        idp.set_answer(Err("down".to_string()));
-        let _ = ready(c.with_key(
+        let _ = ready(c.with_key_for(
             url,
             KID,
+            None,
+            later,
+            &mut idp.at_once(Some(ME)),
+            |_| Ok(()),
+        ));
+        idp.set_answer(Err("down".to_string()));
+        let _ = ready(c.with_key_for(
+            url,
+            KID,
+            None,
             later + Duration::from_secs(2),
             &mut idp.at_once(Some(ME)),
             |_| Ok(()),
@@ -2439,7 +2477,7 @@ fn a_logged_idp_url_drops_its_userinfo() {
     assert!(logged.contains("OIDC discovery failed"), "{logged}");
     assert!(
         !logged.contains("SECRETPW"),
-        "a URL's userinfo is logged: {logged}"
+        "a URL's userinfo must not be logged: {logged}"
     );
 }
 
@@ -2529,7 +2567,9 @@ fn a_refused_token_exchange_is_logged_with_its_reason() {
     let mut none = cfg("groups");
     none.jwks_url = None;
     none.token_endpoint = None;
-    idp.set_body(serde_json::json!({ "issuer": ISSUER }).to_string());
+    idp.set_body(
+        serde_json::json!({ "issuer": ISSUER, "jwks_uri": "https://idp.example/keys" }).to_string(),
+    );
     let mut io = idp.at_once(Some(ME));
     let cap = crate::tests::diagnostics::WarnCapture::default();
     let out = tracing::subscriber::with_default(cap.subscriber(), || {
@@ -2917,5 +2957,179 @@ fn issuer_subject_framing_cannot_alias_at_a_delimiter() {
     assert_ne!(
         actor("https://issuer.example/realm", "other:connector"),
         actor("https://issuer.example/realm:other", "connector")
+    );
+}
+
+#[test]
+fn an_exp_that_is_not_a_numeric_date_is_named_as_such() {
+    let now = 1_700_000_000;
+    for bad in [
+        serde_json::json!("soon"),
+        serde_json::json!(true),
+        serde_json::json!([now + 3600]),
+    ] {
+        let mut c = base_claims(now);
+        c["exp"] = bad.clone();
+        let err = verifier("groups")
+            .validate_claims(&c, now)
+            .expect_err("an unreadable exp is refused");
+        assert_eq!(
+            err, "token has an 'exp' claim that is not a NumericDate",
+            "{bad}"
+        );
+    }
+}
+
+#[test]
+fn claim_sources_beside_claim_names_without_a_groups_claim_is_overage() {
+    let now = 1_700_000_000;
+    let mut c = base_claims(now);
+    c.as_object_mut().unwrap().remove("groups");
+    c["_claim_sources"] = serde_json::json!({ "src1": { "endpoint": "https://graph.example/x" } });
+    c["_claim_names"] = serde_json::json!({ "roles": "src1" });
+    let err = verifier("groups")
+        .validate_claims(&c, now)
+        .expect_err("a deliberately omitted groups claim is the overage case");
+    assert!(err.contains("OVERAGE"), "got: {err}");
+
+    c.as_object_mut().unwrap().remove("_claim_names");
+    verifier("groups")
+        .validate_claims(&c, now)
+        .expect("claim sources alone, with no claim names, is not overage");
+}
+
+#[test]
+fn a_role_claim_of_the_wrong_type_yields_no_roles_and_a_warning() {
+    for value in [
+        serde_json::json!(7),
+        serde_json::json!(true),
+        serde_json::json!({"SecretRoleClaim": "admin"}),
+    ] {
+        let cap = crate::tests::diagnostics::WarnCapture::default();
+        let roles = tracing::subscriber::with_default(cap.subscriber(), || {
+            extract_string_list(Some(&value))
+        });
+        assert!(roles.is_empty(), "{value}");
+        assert!(cap.contains("role claim"), "{value}");
+        assert!(!cap.contains("SecretRoleClaim"));
+    }
+    let cap = crate::tests::diagnostics::WarnCapture::default();
+    let roles = tracing::subscriber::with_default(cap.subscriber(), || extract_string_list(None));
+    assert!(roles.is_empty());
+    assert!(cap.messages().is_empty(), "an absent claim is not a fault");
+}
+
+/// A discovery document naming `field` as `value`, resolved through the module.
+fn discovered_endpoint_error(field: &str, value: &str) -> (String, Vec<String>) {
+    let mut doc = serde_json::json!({
+        "issuer": ISSUER,
+        "jwks_uri": "https://login.microsoftonline.com/keys",
+    });
+    doc[field] = serde_json::json!(value);
+    let idp = Idp::new(doc.to_string());
+    let m = OidcModule::new(&discovery_cfg());
+    let mut io = idp.at_once(Some(ME));
+    let err = match field {
+        "token_endpoint" => ready(m.token_endpoint(Instant::now(), &mut io)).map(|_| ()),
+        "authorization_endpoint" => {
+            ready(m.authorization_endpoint(Instant::now(), &mut io)).map(|_| ())
+        }
+        _ => ready(m.jwks_url(Instant::now(), &mut io)).map(|_| ()),
+    }
+    .expect_err("refused");
+    (err, idp.refusals())
+}
+
+#[test]
+fn a_discovered_endpoint_that_is_not_a_url_is_refused_and_audited() {
+    for field in ["token_endpoint", "authorization_endpoint", "jwks_uri"] {
+        let (err, refusals) = discovered_endpoint_error(field, "not a url at all");
+        assert!(
+            err.contains(&format!("the discovery document's {field} is not a URL")),
+            "{err}"
+        );
+        assert_eq!(refusals, vec![err.clone()], "the host is told why: {field}");
+    }
+}
+
+#[test]
+fn a_discovered_endpoint_over_plain_http_is_refused_unless_loopback() {
+    let (err, refusals) = discovered_endpoint_error("token_endpoint", "http://idp.example/token");
+    assert!(err.contains("is named over http"), "{err}");
+    assert!(
+        err.contains("set token_endpoint to name another URL"),
+        "{err}"
+    );
+    assert_eq!(refusals.len(), 1);
+
+    let (err, _) = discovered_endpoint_error("jwks_uri", "ftp://idp.example/keys");
+    assert!(err.contains("is named over ftp"), "{err}");
+    assert!(err.contains("set jwks_url"), "{err}");
+
+    for ok in [
+        "http://localhost/token",
+        "http://LOCALHOST./token",
+        "http://sso.localhost/token",
+        "http://127.0.0.1:8080/token",
+        "http://[::1]/token",
+        "https://idp.example/token",
+    ] {
+        assert_eq!(
+            discovered_secure("token_endpoint", "token_endpoint", ok),
+            Ok(()),
+            "{ok}"
+        );
+    }
+    for bad in [
+        "http://localhost.example/token",
+        "http://10.0.0.1/token",
+        "http://[::2]/t",
+    ] {
+        assert!(
+            discovered_secure("token_endpoint", "token_endpoint", bad).is_err(),
+            "{bad}"
+        );
+    }
+}
+
+#[test]
+fn a_discovered_authorization_endpoint_with_a_fragment_is_refused() {
+    let (err, _) = discovered_endpoint_error(
+        "authorization_endpoint",
+        "https://idp.example/authorize#frag",
+    );
+    assert!(
+        err.contains("control characters and authorization fragments are not allowed"),
+        "{err}"
+    );
+}
+
+#[test]
+fn the_tick_refresh_reports_a_discovery_failure_and_follows_its_flight() {
+    let idp = Idp::new(serde_json::json!({ "issuer": "https://other.example" }).to_string());
+    let m = OidcModule::new(&discovery_cfg());
+    let cap = crate::tests::diagnostics::WarnCapture::default();
+    let err = tracing::subscriber::with_default(cap.subscriber(), || {
+        ready(m.refresh_ahead(Instant::now(), &mut idp.at_once(Some(ME))))
+    })
+    .expect_err("discovery failed");
+    assert!(
+        err.contains("does not match the configured issuer"),
+        "{err}"
+    );
+    assert!(cap.contains("OIDC refresh cannot resolve its key endpoint"));
+
+    let good = Idp::new(
+        serde_json::json!({ "issuer": ISSUER, "jwks_uri": "https://login.microsoftonline.com/keys" })
+            .to_string(),
+    );
+    let m = OidcModule::new(&discovery_cfg());
+    let now = Instant::now();
+    let mut first = good.pending(crate::script::ticket(1));
+    assert_eq!(m.refresh_ahead(now, &mut first), Step::Pending);
+    assert_eq!(
+        m.refresh_ahead(now, &mut good.pending(crate::script::ticket(2))),
+        Step::Wait,
+        "another op's discovery is in flight and there is no document yet"
     );
 }

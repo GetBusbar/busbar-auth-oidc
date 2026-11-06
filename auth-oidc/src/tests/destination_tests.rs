@@ -54,8 +54,12 @@ fn cfg() -> OidcConfig {
     .unwrap()
 }
 
+/// A discovery document naming `url` as its `field`, beside the usable `jwks_uri` every discovery
+/// document must name when `jwks_url` is not configured (a `jwks_uri` case overrides it).
 fn doc(field: &str, url: &str) -> String {
-    serde_json::json!({ "issuer": ISSUER, field: url }).to_string()
+    let mut doc = serde_json::json!({ "issuer": ISSUER, "jwks_uri": "https://idp.example/keys" });
+    doc[field] = serde_json::json!(url);
+    doc.to_string()
 }
 
 #[test]

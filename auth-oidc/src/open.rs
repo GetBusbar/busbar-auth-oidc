@@ -4,7 +4,7 @@
 //! THE MODULE FROM ITS SETTINGS: the engine's JSON config adapted into an [`OidcModule`]. The
 //! door's `validate`, `open` and `refresh` ([`crate::door`]) build their instance here. Nothing is
 //! fetched at `open`: the JWKS and, when a URL is not configured, the issuer's discovery document
-//! are fetched by the first op that needs them.
+//! are fetched at boot (`ready`), else by the first op that needs them.
 
 use crate::{check_jwks_url, OidcConfig, OidcModule};
 
@@ -25,12 +25,13 @@ use crate::{check_jwks_url, OidcConfig, OidcModule};
 /// only a token claiming an empty one), so it is refused here, naming the key.
 ///
 /// Optional string settings must be omitted rather than blank, and so must a `scopes` entry.
-/// Configured endpoint schemes are checked here, before an instance can retain the settings or
-/// start an operation.
+/// The issuer and the login endpoints are checked here, before an instance can retain the
+/// settings or start an operation; `jwks_url`'s scheme is checked by `check_jwks_url` (called from
+/// `module()` and the door's validate).
 ///
 /// # Errors
-/// Invalid settings, blank strings (a `scopes` entry included), a zero refetch interval, or a
-/// disallowed endpoint scheme.
+/// Invalid settings, blank strings (a `scopes` entry included), an issuer with surrounding
+/// whitespace, a zero refetch interval, or a disallowed endpoint scheme.
 pub fn config(cfg: &str) -> Result<OidcConfig, String> {
     if cfg.trim().is_empty() {
         return Err(
@@ -85,6 +86,13 @@ pub fn config(cfg: &str) -> Result<OidcConfig, String> {
 /// Keep the existing plaintext exceptions: local issuer/browser URLs, and private or loopback
 /// token endpoints. Destination authorization remains the host's.
 fn configured_url(key: &str, value: &str, token: bool) -> Result<(), String> {
+    // The issuer is matched EXACTLY against every token's `iss`; `Url::parse` would accept a
+    // padded one that then matches no token.
+    if key == "issuer" && value.trim() != value {
+        return Err(format!(
+            "settings.{key}: has leading or trailing whitespace"
+        ));
+    }
     let parsed =
         url::Url::parse(value).map_err(|_| format!("settings.{key}: must be a valid URL"))?;
     if value.chars().any(char::is_control)

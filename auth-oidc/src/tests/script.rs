@@ -61,7 +61,6 @@ pub fn ready<T>(step: Step<T>) -> T {
 pub struct Idp {
     body: Mutex<Result<String, String>>,
     calls: AtomicUsize,
-    reply: Mutex<Result<LoginHttpResponse, String>>,
     woken: Mutex<Vec<Ticket>>,
     refusals: Mutex<Vec<String>>,
 }
@@ -77,10 +76,6 @@ impl Idp {
         Self {
             body: Mutex::new(answer),
             calls: AtomicUsize::new(0),
-            reply: Mutex::new(Ok(LoginHttpResponse {
-                status: 200,
-                body: "{}".to_string(),
-            })),
             woken: Mutex::new(Vec::new()),
             refusals: Mutex::new(Vec::new()),
         }
@@ -184,6 +179,9 @@ impl Fetch for Caller<'_> {
         if !self.answered(url) {
             return Poll::Pending;
         }
-        Poll::Ready(self.idp.reply.lock().unwrap().clone())
+        Poll::Ready(Ok(LoginHttpResponse {
+            status: 200,
+            body: "{}".to_string(),
+        }))
     }
 }

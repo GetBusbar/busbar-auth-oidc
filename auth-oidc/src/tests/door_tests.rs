@@ -587,10 +587,14 @@ fn short_login_cursor_cleanup_owns_only_its_continuation() {
             "release" => drop(guard),
             "cancel" => {
                 oidc.cancel(ticket(1));
+                assert!(oidc.login_cursors.lock().unwrap().is_empty(), "{cleanup}");
+                assert!(oidc.reached.lock().unwrap().is_empty(), "{cleanup}");
                 drop(guard);
             }
             "retire" => {
                 oidc.retire(1);
+                assert!(oidc.login_cursors.lock().unwrap().is_empty(), "{cleanup}");
+                assert!(oidc.reached.lock().unwrap().is_empty(), "{cleanup}");
                 drop(guard);
             }
             _ => unreachable!(),
@@ -619,4 +623,160 @@ fn short_login_cursor_cleanup_owns_only_its_continuation() {
     drop(old);
     assert_eq!(oidc.login_cursors.lock().unwrap()[&ticket(1)].issued, 29);
     assert!(oidc.reached.lock().unwrap().contains_key(&ticket(1)));
+}
+
+fn io_without_a_host() -> HostIo<'static> {
+    HostIo::new(None, Ticket::NONE, IoState::default(), false)
+}
+
+/// A callback missing any of its code, redirect URI or verifier is declined before any request.
+#[test]
+fn a_callback_missing_its_code_is_declined_without_a_request() {
+    let oidc = Oidc::open(&settings(), &lent(b""), 1).expect("opens");
+    for (code, redirect, verifier) in [
+        (None, Some("https://app/cb"), Some("v")),
+        (Some("c"), None, Some("v")),
+        (Some("c"), Some("https://app/cb"), None),
+    ] {
+        let mut io = io_without_a_host();
+        let login = oidc
+            .now()
+            .login(code, redirect, verifier, "nonce", &mut None, &mut io);
+        assert!(matches!(login, Step::Ready(Login::Bad)));
+        assert!(!io.wanted_io(), "no request was wanted");
+    }
+}
+
+/// With no token endpoint configured and none discoverable the exchange is an outage naming why,
+/// not a decline of the user's login.
+#[test]
+fn a_callback_with_no_reachable_token_endpoint_is_an_outage() {
+    let oidc = Oidc::open(&settings(), &lent(b""), 1).expect("opens");
+    let mut io = io_without_a_host();
+    let login = oidc.now().login(
+        Some("c"),
+        Some("https://app/cb"),
+        Some("v"),
+        "nonce",
+        &mut None,
+        &mut io,
+    );
+    match login {
+        Step::Ready(Login::Outage(why, retry_after)) => {
+            assert!(why.starts_with("OIDC discovery fetch failed"), "{why}");
+            assert!(
+                why.contains("configure the required endpoints explicitly"),
+                "{why}"
+            );
+            assert_eq!(retry_after, None);
+        }
+        _ => panic!("expected an outage"),
+    }
+}
+
+/// An IdP that answers the token endpoint with a refusal the module cannot read is an outage the
+/// caller retries, with no retry hint of its own.
+#[test]
+fn a_token_endpoint_5xx_is_an_outage_with_no_retry_hint() {
+    let oidc = Oidc::open(&settings(), &lent(b""), 1).expect("opens");
+    let mut answer = Some(LoginHttpResponse {
+        status: 503,
+        body: "{}".to_string(),
+    });
+    let mut io = io_without_a_host();
+    let login = oidc.now().login(
+        Some("c"),
+        Some("https://app/cb"),
+        Some("v"),
+        "nonce",
+        &mut answer,
+        &mut io,
+    );
+    match login {
+        Step::Ready(Login::Outage(why, None)) => {
+            assert!(why.contains("HTTP 503"), "{why}");
+        }
+        _ => panic!("expected an outage"),
+    }
+}
+
+#[test]
+fn the_cap_on_held_short_login_answers_refuses_a_new_ticket_but_not_a_held_one() {
+    let oidc = Oidc::open(&settings(), &lent(b""), 1).expect("opens");
+    let short = |n: u32| ShortLogin {
+        issued: n,
+        state: b"s",
+        code: b"c",
+        principal: Principal::from_id("u"),
+    };
+    let max = u32::try_from(REACHED_MAX).expect("fits");
+    for n in 1..=max {
+        hold_short_login(&oidc, ticket(n), Some(1), short(n)).expect("room");
+    }
+    let refused = hold_short_login(&oidc, ticket(max + 1), Some(1), short(0)).expect_err("full");
+    assert_eq!(refused, "oidc: too many held short login answers");
+    assert_eq!(oidc.login_cursors.lock().unwrap().len(), REACHED_MAX);
+    assert!(!oidc
+        .login_cursors
+        .lock()
+        .unwrap()
+        .contains_key(&ticket(max + 1)));
+    hold_short_login(&oidc, ticket(1), Some(2), short(99)).expect("a held ticket may re-hold");
+    assert_eq!(oidc.login_cursors.lock().unwrap()[&ticket(1)].issued, 99);
+}
+
+/// A lease owns its callback's identity only through the cursor it marks: with that cursor's map
+/// alive the release removes both; once the map is gone (the instance tore down) it removes
+/// nothing, even though the identity map is still there.
+#[test]
+fn releasing_a_lease_whose_cursor_map_is_gone_leaves_the_identities_alone() {
+    let oidc = Oidc::open(&settings(), &lent(b""), 1).expect("opens");
+    let lease = |cursors: &Arc<LoginCursors>| {
+        let marker = Arc::new(());
+        cursors.lock().unwrap().insert(
+            ticket(1),
+            LoginCursor {
+                marker: Arc::clone(&marker),
+                issued: 1,
+            },
+        );
+        ReleaseLogin {
+            ticket: ticket(1),
+            marker,
+            cursors: Arc::downgrade(cursors),
+            reached: Arc::downgrade(&oidc.reached),
+        }
+    };
+
+    oidc.reached
+        .lock()
+        .unwrap()
+        .insert(ticket(1), kept_for(1, 0));
+    let live: Arc<LoginCursors> = Arc::default();
+    drop(lease(&live));
+    assert!(
+        !oidc.reached.lock().unwrap().contains_key(&ticket(1)),
+        "a lease whose cursor is held releases its identity"
+    );
+
+    oidc.reached
+        .lock()
+        .unwrap()
+        .insert(ticket(1), kept_for(1, 0));
+    let gone: Arc<LoginCursors> = Arc::default();
+    let orphaned = lease(&gone);
+    drop(gone);
+    drop(orphaned);
+    assert!(
+        oidc.reached.lock().unwrap().contains_key(&ticket(1)),
+        "without its cursor map the lease owns nothing"
+    );
+}
+
+#[test]
+fn the_instance_debug_names_nothing_it_holds() {
+    let oidc = Oidc::open(&settings(), &lent(b"a-client-secret"), 1).expect("opens");
+    let shown = format!("{oidc:?}");
+    assert!(!shown.contains("a-client-secret"), "{shown}");
+    assert_eq!(shown, "Oidc { .. }");
 }

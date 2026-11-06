@@ -76,8 +76,8 @@ pub struct OidcConfig {
     /// §4.1.3, RFC 9068 §4). For Entra this is the application (client) id.
     pub audience: String,
     /// The JWKS endpoint. Optional: when absent it is derived from the issuer's OIDC discovery
-    /// document (`<issuer>/.well-known/openid-configuration` → `jwks_uri`), fetched by the first
-    /// op that needs it.
+    /// document (`<issuer>/.well-known/openid-configuration` → `jwks_uri`), fetched at boot
+    /// (`ready`), else by the first op that needs it.
     #[serde(default)]
     pub jwks_url: Option<String>,
     /// Which token claim carries the caller's roles/groups → the principal's ROLES. Default
@@ -122,6 +122,9 @@ pub struct OidcConfig {
     pub token_endpoint: Option<String>,
 }
 
+/// The prefix of every principal id this module issues, ahead of the issuer namespace.
+const PRINCIPAL_PREFIX: &str = "oidc-v2:";
+
 fn default_role_claim() -> String {
     DEFAULT_ROLE_CLAIM.to_string()
 }
@@ -132,9 +135,9 @@ fn default_ttl_secs() -> u64 {
     DEFAULT_JWKS_TTL_SECS
 }
 
-/// The pure token VERIFIER: config-derived policy (issuer/audience/role_claim) plus the current time
-/// source. Separated from the module and JWKS cache so the whole verify path, signature aside, is
-/// unit testable with plain claim maps. Signature verification is [`jwt::verify_signature`].
+/// The pure token VERIFIER: config-derived policy (issuer/audience/role_claim), with the current time
+/// passed to each check rather than held. Separated from the module and JWKS cache so the whole
+/// verify path, signature aside, is unit testable with plain claim maps. Signature verification is [`jwt::verify_signature`].
 pub struct OidcVerifier {
     issuer: String,
     audience: String,
@@ -216,7 +219,7 @@ impl OidcVerifier {
         }
 
         let exp = match as_numeric_date_floor(claims.get("exp")) {
-            Some(exp) if exp.saturating_add(CLOCK_SKEW_SECS) >= now_unix => exp,
+            Some(exp) if exp.saturating_add(CLOCK_SKEW_SECS) > now_unix => exp,
             Some(_) => return Err("token has expired".to_string()),
             None if claims.get("exp").is_none() => {
                 return Err("token has no 'exp' claim".to_string())
@@ -276,7 +279,7 @@ impl OidcVerifier {
         // its alphabet excludes ':' so the issuer/subject boundary is unambiguous.
         // Preserve the subject bytes and the existing self-serve subject checks.
         let identity_len = base64::encoded_len(self.issuer.len(), false)
-            .and_then(|n| n.checked_add(9))
+            .and_then(|n| n.checked_add(PRINCIPAL_PREFIX.len() + 1)) // prefix + the `:` after the issuer
             .and_then(|n| n.checked_add(subject.len()));
         if identity_len.is_none_or(|n| u32::try_from(n).is_err()) {
             return Err("issuer-qualified principal exceeds the ABI identity byte bound".into());
@@ -285,7 +288,8 @@ impl OidcVerifier {
             &base64::engine::general_purpose::URL_SAFE_NO_PAD,
             self.issuer.as_bytes(),
         );
-        let mut principal = Principal::from_id(format!("oidc-v2:{issuer_namespace}:{subject}"));
+        let mut principal =
+            Principal::from_id(format!("{PRINCIPAL_PREFIX}{issuer_namespace}:{subject}"));
         principal.name = name;
         principal.roles = groups;
 
@@ -416,8 +420,8 @@ pub struct OidcModule {
 
 impl OidcModule {
     /// Construct from parsed (and [`check_jwks_url`]-checked) config. Nothing is fetched here: the
-    /// JWKS, and the discovery document when a URL is not configured, are fetched by the first op
-    /// that needs them.
+    /// JWKS, and the discovery document when a URL is not configured, are fetched at boot
+    /// (`ready`), else by the first op that needs them.
     pub fn new(cfg: &OidcConfig) -> Self {
         Self {
             verifier: OidcVerifier::new(&cfg.issuer, &cfg.audience, &cfg.role_claim),
@@ -900,12 +904,14 @@ const OAUTH_ERRORS: &[&str] = &[
 ];
 
 /// The RFC 6749 §5.2 error a token-endpoint `body` carries, as a log may print it: the allow-listed
-/// code, `(unlisted)` for any other string; `None` when the body is not a JSON object with a string
-/// `error`.
+/// code; `None` for any other string, or a body that is not a JSON object with a string `error`.
 fn oauth_error(body: &str) -> Option<&'static str> {
     #[derive(Deserialize)]
     struct ErrorBody {
         error: String,
+    }
+    if !is_json_object(body.as_bytes()) {
+        return None;
     }
     let code = serde_json::from_str::<ErrorBody>(body).ok()?.error;
     OAUTH_ERRORS.iter().find(|c| **c == code).copied()
@@ -947,29 +953,9 @@ fn pct(s: &str) -> String {
     out
 }
 
-/// Build the OAuth **authorization-code** authorize URL: `response_type=code`, `client_id`,
-/// `code_challenge_method=S256`, and `nonce` when present. Structurally cannot contain a
-/// `client_secret`.
-pub fn build_authorize_url(
-    cfg: &OidcConfig,
-    redirect_uri: &str,
-    state: &str,
-    code_challenge: &str,
-    nonce: Option<&str>,
-) -> String {
-    let endpoint = cfg.authorization_endpoint.as_deref().unwrap_or_default();
-    authorize_url(
-        cfg,
-        endpoint,
-        &[],
-        redirect_uri,
-        state,
-        code_challenge,
-        nonce,
-    )
-}
-
-/// [`build_authorize_url`] at `endpoint`, the login's `extra` scopes requested beside `cfg`'s.
+/// The OAuth **authorization-code** authorize URL at `endpoint`: `response_type=code`, `client_id`,
+/// PKCE `code_challenge_method=S256`, and `nonce` when present, the login's `extra` scopes
+/// requested beside `cfg`'s. Structurally cannot contain a `client_secret`.
 fn authorize_url(
     cfg: &OidcConfig,
     endpoint: &str,

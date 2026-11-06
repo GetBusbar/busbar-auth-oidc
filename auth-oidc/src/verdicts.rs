@@ -77,6 +77,9 @@ pub struct Generation(u64);
 struct Entry {
     /// UNIX seconds; served while `expires_at > now`.
     expires_at: i64,
+    /// The TTL it was stored with, seconds: no hit has more than this left (a clock stepped back
+    /// would otherwise serve it past the ceiling).
+    ttl: i64,
     inserted: u64,
     principal: Arc<Principal>,
 }
@@ -104,6 +107,13 @@ fn key(credential: &str) -> [u8; 32] {
     k
 }
 
+impl Entry {
+    /// Whether it may be served at `now`: unexpired, and not further from expiry than its TTL.
+    fn servable(&self, now: i64) -> bool {
+        self.expires_at > now && self.expires_at.saturating_sub(now) <= self.ttl
+    }
+}
+
 impl VerdictCache {
     fn read(&self) -> RwLockReadGuard<'_, State> {
         self.state.read().unwrap_or_else(PoisonError::into_inner)
@@ -121,9 +131,13 @@ impl VerdictCache {
     /// The identity cached for `credential` at UNIX second `now`, with the TTL it has left; an
     /// expired entry is a miss and goes.
     pub fn get(&self, credential: &str, now: i64) -> Option<Hit> {
+        if now == i64::MAX {
+            // The fail-closed clock: nothing is served, nothing is evicted.
+            return None;
+        }
         let k = key(credential);
         match self.read().entries.get(&k) {
-            Some(e) if e.expires_at > now => {
+            Some(e) if e.servable(now) => {
                 let left = u64::try_from(e.expires_at.saturating_sub(now)).unwrap_or(0);
                 return Some(Hit {
                     principal: Arc::clone(&e.principal),
@@ -134,7 +148,7 @@ impl VerdictCache {
             None => return None,
         }
         let mut state = self.lock();
-        if state.entries.get(&k).is_some_and(|e| e.expires_at <= now) {
+        if state.entries.get(&k).is_some_and(|e| !e.servable(now)) {
             state.entries.remove(&k);
         }
         None
@@ -170,10 +184,12 @@ impl VerdictCache {
             }
         }
         *seq += 1;
+        let ttl = i64::try_from(ttl).unwrap_or(i64::MAX);
         entries.insert(
             k,
             Entry {
-                expires_at: now.saturating_add(i64::try_from(ttl).unwrap_or(i64::MAX)),
+                expires_at: now.saturating_add(ttl),
+                ttl,
                 inserted: *seq,
                 principal: Arc::new(principal.clone()),
             },

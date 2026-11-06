@@ -29,14 +29,14 @@ pub enum KeyMaterial {
         /// `0x04 || X || Y`.
         point: Vec<u8>,
     },
-    /// The key material was absent or not base64url; the deferred error is surfaced at verify time.
+    /// The key material was absent, not base64url, or (P-256) an `x`/`y` that is not 32 bytes; the deferred error is surfaced at verify time.
     Unusable(String),
 }
 
 impl KeyMaterial {
     /// Decode a key's material from its base64url fields, selected by `kty`. Never fails — a decode
     /// problem becomes [`KeyMaterial::Unusable`] so it surfaces at verify time with an exact
-    /// message.
+    /// message (a P-256 key whose `x`/`y` are not 32 bytes is `Unusable` too).
     fn from_jwk(jwk: &Jwk) -> Self {
         match jwk.kty.as_str() {
             "RSA" => {
@@ -59,6 +59,13 @@ impl KeyMaterial {
                     Ok(v) => v,
                     Err(e) => return Self::Unusable(e),
                 };
+                // RFC 7518 sections 6.2.1.2 and 6.2.1.3: each P-256 coordinate is exactly 32 octets.
+                if jwk.crv.as_deref() == Some("P-256") && (x.len() != 32 || y.len() != 32) {
+                    return Self::Unusable(
+                        "JWKS key EC coordinates x and y must each be 32 bytes for P-256"
+                            .to_string(),
+                    );
+                }
 
                 let mut point = Vec::with_capacity(1 + x.len() + y.len());
                 point.push(0x04);

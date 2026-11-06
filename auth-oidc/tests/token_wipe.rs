@@ -99,16 +99,35 @@ fn reading_a_token_response_frees_no_unwiped_copy_of_a_token() {
             .expect("settings"),
     );
     let canary = std::str::from_utf8(CANARY).expect("ascii");
-    for body in [
-        format!(r#"{{"id_token":"{canary}\n{canary}\u00e9\"tail","token_type":"Bearer"}}"#),
-        format!(
-            r#"{{"access_token":"{canary}\/at","refresh_token":"{canary}\\rt","id_token":"{canary}\ud83d\ude00"}}"#
+    // Each body must reach and pass through `TokenResponse::parse`: the answer is pinned so an
+    // early return cannot keep this green.
+    let reject = "Ready(Ok(Reject))";
+    for (body, expected) in [
+        (
+            format!(r#"{{"id_token":"{canary}\n{canary}\u00e9\"tail","token_type":"Bearer"}}"#),
+            reject,
         ),
-        format!(r#"{{"id_token":"{canary}\t","id_token":"{canary}\t"}}"#),
-        format!(r#"{{"id_token":"{canary}\ud800"}}"#),
-        format!(r#"{{"{canary}\u0041":{{"nested":"{canary}\n"}},"id_token":"{canary}\t"}}"#),
+        (
+            format!(
+                r#"{{"access_token":"{canary}\/at","refresh_token":"{canary}\\rt","id_token":"{canary}\ud83d\ude00"}}"#
+            ),
+            reject,
+        ),
+        (
+            format!(r#"{{"id_token":"{canary}\t","id_token":"{canary}\t"}}"#),
+            r#"Ready(Err("token response: duplicate field `id_token`"))"#,
+        ),
+        (
+            format!(r#"{{"id_token":"{canary}\ud800"}}"#),
+            r#"Ready(Err("token response: `id_token` holds an invalid escape"))"#,
+        ),
+        (
+            format!(r#"{{"{canary}\u0041":{{"nested":"{canary}\n"}},"id_token":"{canary}\t"}}"#),
+            reject,
+        ),
     ] {
         let resp = LoginHttpResponse { status: 200, body };
+        let mut answered = String::new();
         let found = unwiped_frees(|| {
             let answer = module.identity_from_token_response(
                 &resp,
@@ -116,8 +135,10 @@ fn reading_a_token_response_frees_no_unwiped_copy_of_a_token() {
                 Instant::now(),
                 &mut NoNet,
             );
+            answered = format!("{answer:?}");
             drop(answer);
         });
+        assert_eq!(answered, expected);
         assert_eq!(found, 0, "an unwiped token copy was freed");
     }
 }

@@ -32,7 +32,7 @@ use busbar_plugin_loader::sign::{sign, Manifest, SigningKey, TrustPolicy};
 use busbar_plugin_loader::PluginRegistry;
 use support::{
     bind, bind_as, identity_buf, open, row, verify_in, verify_ticketless, verify_ticketless_raw, z,
-    Arm, Bound, Idp, Issuer, DISCOVERY_PATH, ISSUER, UNUSED_ISSUER,
+    Arm, Bound, Idp, Issuer, DISCOVERY_PATH, ISSUER,
 };
 
 /// The module's registry name and alias (what an operator's `identity-providers:` names).
@@ -175,7 +175,7 @@ fn claims(aud: &str) -> serde_json::Value {
 fn tokens(key: &Issuer) -> Tokens {
     Tokens {
         valid: key.sign(&claims(AUDIENCE)),
-        forged: Issuer::start(UNUSED_ISSUER, KID).sign(&claims(AUDIENCE)),
+        forged: Issuer::start(KID).sign(&claims(AUDIENCE)),
         wrong_audience: key.sign(&claims("api://someone-else")),
         other_nonce: {
             let mut c = claims(AUDIENCE);
@@ -189,7 +189,7 @@ fn tokens(key: &Issuer) -> Tokens {
 #[test]
 fn signed_mixed_type_audiences_are_refused_by_both_doors_and_login_modes() {
     let _one = support::serial();
-    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let key = Issuer::start(KID);
     let row = row();
     let registry = scanned("mixed-aud", manifest("auth", &row.statement), &cdylib());
     let (lib, stated) = admitted(&registry);
@@ -324,7 +324,7 @@ fn transcript(b: &Bound, cfg: &str, t: &Tokens, request_at: u64) -> Vec<String> 
 #[test]
 fn the_linked_and_the_dropped_in_oidc_module_are_one_module() {
     let _one = support::serial();
-    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let key = Issuer::start(KID);
     let cfg = config(AUDIENCE);
     let t = tokens(&key);
     let row = row();
@@ -573,7 +573,7 @@ fn the_linked_and_the_dropped_in_oidc_module_are_one_module() {
 #[test]
 fn red_an_unreachable_issuer_and_a_ticketless_call_fail_verify_in_1_5_5_s_words() {
     let _one = support::serial();
-    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let key = Issuer::start(KID);
     let token = key.sign(&claims(AUDIENCE));
     let lib = cdylib();
     let stated = row().statement;
@@ -626,7 +626,7 @@ fn simultaneous_cold_verifies_make_one_discovery_and_one_jwks_request() {
 /// Two cold verifies on one instance; the second submitted once the first pended (`staggered`) or
 fn cold_verifies(staggered: bool) {
     let _one = support::serial();
-    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let key = Issuer::start(KID);
     let token = key.sign(&claims(AUDIENCE));
     let idp = Idp::secure_carrier(&key);
     idp.pend_for(Duration::from_millis(300));
@@ -689,7 +689,7 @@ fn cold_verifies(staggered: bool) {
 #[test]
 fn red_an_oversized_reply_is_cut_off_at_the_cap_not_buffered_whole() {
     let _one = support::serial();
-    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let key = Issuer::start(KID);
     let token = key.sign(&claims(AUDIENCE));
     let idp = Idp::secure_carrier(&key);
     let huge = "x".repeat(4 * 1024 * 1024);
@@ -717,7 +717,7 @@ fn red_an_oversized_reply_is_cut_off_at_the_cap_not_buffered_whole() {
 #[test]
 fn a_non_utf8_discovery_reply_names_the_document_without_echoing_the_body() {
     let _one = support::serial();
-    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let key = Issuer::start(KID);
     let token = key.sign(&claims(AUDIENCE));
     let idp = Idp::secure_carrier(&key);
     idp.answer_bytes(DISCOVERY_PATH, 200, b"private-document-contents\xff");
@@ -735,7 +735,7 @@ fn a_non_utf8_discovery_reply_names_the_document_without_echoing_the_body() {
 #[test]
 fn red_an_oversized_error_reply_names_its_status_and_is_cut_off_at_the_cap() {
     let _one = support::serial();
-    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let key = Issuer::start(KID);
     let token = key.sign(&claims(AUDIENCE));
     let idp = Idp::secure_carrier(&key);
     let huge = "x".repeat(4 * 1024 * 1024);
@@ -763,7 +763,7 @@ fn red_an_oversized_error_reply_names_its_status_and_is_cut_off_at_the_cap() {
 #[test]
 fn a_login_whose_key_set_cannot_be_had_is_an_outage_not_declined() {
     let _one = support::serial();
-    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let key = Issuer::start(KID);
     let idp = Idp::secure_carrier(&key);
     idp.answer(DISCOVERY_PATH, 503, "{}");
     let id_token = serde_json::json!({ "id_token": key.sign(&claims(AUDIENCE)) }).to_string();
@@ -787,7 +787,7 @@ fn a_login_whose_key_set_cannot_be_had_is_an_outage_not_declined() {
 #[test]
 fn a_waiter_is_woken_by_the_fetch_it_waits_on_not_a_polling_timer() {
     let _one = support::serial();
-    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let key = Issuer::start(KID);
     let token = key.sign(&claims(AUDIENCE));
     let idp = Idp::secure_carrier(&key);
     idp.pend_for(Duration::from_millis(400));
@@ -849,7 +849,7 @@ fn a_waiter_is_woken_by_the_fetch_it_waits_on_not_a_polling_timer() {
 #[test]
 fn a_tick_refreshes_the_key_set_ahead_of_its_ttl() {
     let _one = support::serial();
-    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let key = Issuer::start(KID);
     let token = key.sign(&claims(AUDIENCE));
     let idp = Idp::secure_carrier(&key);
     let b = bind(&Arm::Linked, &idp);
@@ -999,7 +999,7 @@ fn red_the_statement_declares_six_outbound_http_needs_in_their_classes() {
 #[test]
 fn a_bearer_that_is_not_utf8_passes_with_a_decision_and_its_line_named() {
     let _one = support::serial();
-    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let key = Issuer::start(KID);
     let lib = cdylib();
     let stated = row().statement;
     for arm in [
@@ -1024,7 +1024,7 @@ fn a_bearer_that_is_not_utf8_passes_with_a_decision_and_its_line_named() {
 #[test]
 fn an_identity_carries_the_credential_it_was_verified_from() {
     let _one = support::serial();
-    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let key = Issuer::start(KID);
     let token = key.sign(&claims(AUDIENCE));
     let idp = Idp::secure_carrier(&key);
     let b = bind(&Arm::Linked, &idp);
@@ -1066,7 +1066,7 @@ fn an_identity_carries_the_credential_it_was_verified_from() {
 #[test]
 fn a_token_s_expiry_is_judged_at_the_request_s_timestamp() {
     let _one = support::serial();
-    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let key = Issuer::start(KID);
     let token = key.sign(&claims(AUDIENCE));
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1204,7 +1204,7 @@ fn replacement_config() -> String {
 #[test]
 fn pending_verify_and_begin_keep_their_opened_configuration_across_refresh() {
     let _one = support::serial();
-    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let key = Issuer::start(KID);
     for begin in [false, true] {
         let idp = Idp::secure_carrier(&key);
         let b = bind(&Arm::Linked, &idp);
@@ -1272,7 +1272,7 @@ fn pending_verify_and_begin_keep_their_opened_configuration_across_refresh() {
 #[test]
 fn pending_complete_keeps_its_client_and_token_answer_across_refresh() {
     let _one = support::serial();
-    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let key = Issuer::start(KID);
 
     for path in ["/token", "/keys"] {
         let idp = Idp::secure_carrier(&key);
@@ -1334,8 +1334,8 @@ fn pending_complete_keeps_its_client_and_token_answer_across_refresh() {
 #[test]
 fn a_verify_meeting_the_verdict_cache_on_re_entry_still_lands_its_fetch() {
     let _one = support::serial();
-    let old = Issuer::start(UNUSED_ISSUER, KID);
-    let new = Issuer::start(UNUSED_ISSUER, "rotated-kid");
+    let old = Issuer::start(KID);
+    let new = Issuer::start("rotated-kid");
     let idp = Idp::secure_carrier(&old);
     let b = bind(&Arm::Linked, &idp);
     let mut cfg: serde_json::Value = serde_json::from_str(&config(AUDIENCE)).unwrap();
@@ -1375,7 +1375,7 @@ fn a_verify_meeting_the_verdict_cache_on_re_entry_still_lands_its_fetch() {
 #[test]
 fn a_tick_during_the_last_tick_s_fetch_does_not_fetch_again() {
     let _one = support::serial();
-    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let key = Issuer::start(KID);
     let idp = Idp::secure_carrier(&key);
     let b = bind(&Arm::Linked, &idp);
     let mut cfg: serde_json::Value = serde_json::from_str(&config(AUDIENCE)).unwrap();
@@ -1412,7 +1412,7 @@ fn a_tick_during_the_last_tick_s_fetch_does_not_fetch_again() {
 #[test]
 fn ready_waits_on_another_op_s_discovery_and_a_failure_refuses_the_boot() {
     let _one = support::serial();
-    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let key = Issuer::start(KID);
     let idp = Idp::secure_carrier(&key);
     idp.answer(DISCOVERY_PATH, 503, "{}");
     idp.pend_for(Duration::from_millis(500));
@@ -1437,7 +1437,7 @@ fn ready_waits_on_another_op_s_discovery_and_a_failure_refuses_the_boot() {
 #[test]
 fn ready_audits_refused_warmup_destinations_without_changing_best_effort_boot() {
     let _one = support::serial();
-    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let key = Issuer::start(KID);
     let idp = Idp::secure_carrier(&key);
     let b = bind(&Arm::Linked, &idp);
     open(&b.plugin, &config(AUDIENCE), None).expect("opens");
@@ -1464,7 +1464,7 @@ fn ready_audits_refused_warmup_destinations_without_changing_best_effort_boot() 
 #[test]
 fn a_plaintext_loopback_jwks_url_is_refused_by_both_doors() {
     let _one = support::serial();
-    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let key = Issuer::start(KID);
     let lib = cdylib();
     let stated = row().statement;
     for arm in [
@@ -1488,7 +1488,7 @@ fn a_plaintext_loopback_jwks_url_is_refused_by_both_doors() {
 #[test]
 fn a_login_id_token_s_expiry_is_judged_at_the_host_clock() {
     let _one = support::serial();
-    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let key = Issuer::start(KID);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -1541,7 +1541,7 @@ fn a_login_id_token_s_expiry_is_judged_at_the_host_clock() {
 #[test]
 fn a_short_login_answer_uses_the_host_monotonic_expiry_boundary() {
     let _one = support::serial();
-    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let key = Issuer::start(KID);
     const TTL_NS: u64 = 600_000_000_000;
     for (elapsed, retained) in [
         (0, true),
@@ -1601,7 +1601,7 @@ fn a_short_login_answer_uses_the_host_monotonic_expiry_boundary() {
 #[test]
 fn an_empty_callback_nonce_cannot_accept_an_empty_id_token_nonce() {
     let _one = support::serial();
-    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let key = Issuer::start(KID);
     let idp = Idp::secure_carrier(&key);
     let mut c = claims(AUDIENCE);
     c["nonce"] = serde_json::json!("");
@@ -1626,7 +1626,7 @@ fn an_empty_callback_nonce_cannot_accept_an_empty_id_token_nonce() {
 #[test]
 fn a_tick_reports_a_refused_key_endpoint_through_its_envelope() {
     let _one = support::serial();
-    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let key = Issuer::start(KID);
     let idp = Idp::secure_carrier(&key);
     let b = bind(&Arm::Linked, &idp);
     let mut cfg: serde_json::Value = serde_json::from_str(&config(AUDIENCE)).unwrap();
@@ -1657,7 +1657,7 @@ fn a_tick_reports_a_refused_key_endpoint_through_its_envelope() {
 #[test]
 fn a_broken_successful_token_response_is_a_login_outage() {
     let _one = support::serial();
-    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let key = Issuer::start(KID);
     for body in [
         "<html>maintenance</html>",
         r#"{"access_token":"TokenCanary"}"#,
@@ -1681,7 +1681,7 @@ fn a_broken_successful_token_response_is_a_login_outage() {
 #[test]
 fn a_refused_idp_destination_raises_its_declared_diagnostic_once() {
     let _one = support::serial();
-    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let key = Issuer::start(KID);
     let idp = Idp::secure_carrier(&key);
     let b = bind(&Arm::Linked, &idp);
     let mut cfg: serde_json::Value = serde_json::from_str(&config(AUDIENCE)).unwrap();
@@ -1711,7 +1711,7 @@ fn ready_and_tick_release_held_connections_on_cancel_or_refresh() {
         slot as life, CancelIn, CancelOut, ReadyIn, TickIn, TickOut,
     };
     let _one = support::serial();
-    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let key = Issuer::start(KID);
     let lib = cdylib();
     let stated = row().statement;
     for arm in [
@@ -1811,7 +1811,7 @@ fn executing_driver_defers_refresh_until_its_host_call_returns() {
         slot as life, CancelIn, CancelOut, RefreshIn,
     };
     let _one = support::serial();
-    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let key = Issuer::start(KID);
     let lib = cdylib();
     let stated = row().statement;
     for arm in [
@@ -1960,7 +1960,7 @@ fn executing_driver_defers_refresh_until_its_host_call_returns() {
 fn wide_verified_identity_keeps_its_first_judgment_through_both_doors() {
     use std::sync::atomic::{AtomicU64, Ordering};
     let _one = support::serial();
-    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let key = Issuer::start(KID);
     let lib = cdylib();
     let stated = row().statement;
     let mut c = claims(AUDIENCE);
@@ -2036,7 +2036,7 @@ fn abandoned_wide_oidc_verdicts_release_and_closed_instances_refuse_recall_both_
     use busbar_contract::abi::mechanism::call::DeadlineClass;
     use busbar_contract::abi::mechanism::lifecycle::{slot as life, ReleaseIn, TickIn, TickOut};
     let _one = support::serial();
-    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let key = Issuer::start(KID);
     let lib = cdylib();
     let stated = row().statement;
     let mut c = claims(AUDIENCE);
@@ -2167,7 +2167,7 @@ fn configured_oidc_cases_validate_refresh_close_and_never_echo_credentials_both_
     };
     let _one = support::serial();
     let input: serde_json::Value = serde_json::from_str(include_str!("conformance.json")).unwrap();
-    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let key = Issuer::start(KID);
     let lib = cdylib();
     let stated = row().statement;
     let settings = input["settings"].to_string();
@@ -2493,7 +2493,7 @@ fn configured_oidc_cases_validate_refresh_close_and_never_echo_credentials_both_
             assert_eq!(rotated_crossings() - before, 1);
             counts.push(rotated_crossings() - before);
             assert!(
-                answer.starts_with("Ready lease=false") && !answer.contains("verdict=1 "),
+                answer.starts_with("Ready lease=false") && answer.contains("verdict=2 "),
                 "{answer}"
             );
             answers.push(answer);
@@ -2844,7 +2844,7 @@ fn an_oidc_door_at_another_abi_or_layout_is_refused() {
 #[test]
 fn two_ticketless_short_verifies_keep_independent_identities_and_cleanup_both_ways() {
     let _one = support::serial();
-    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let key = Issuer::start(KID);
     let lib = cdylib();
     let stated = row().statement;
     let mut c = claims(AUDIENCE);
@@ -2946,7 +2946,7 @@ fn prepared_idp_carrier_commits_once_on_the_owned_connection() {
     use busbar_contract::conn::{ConnError, Conns, DeclaredConns, InstanceId, NeedId, OpenDesc};
     use support::CarrierSecurity;
 
-    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let key = Issuer::start(KID);
     let owner = InstanceId(41);
     let other = InstanceId(42);
     for security in [
@@ -3016,7 +3016,7 @@ fn login_sends_no_credentials_without_secure_carrier_facts_both_ways() {
     use support::CarrierSecurity;
 
     let _one = support::serial();
-    let key = Issuer::start(UNUSED_ISSUER, KID);
+    let key = Issuer::start(KID);
     let lib = cdylib();
     let stated = row().statement;
     for security in [CarrierSecurity::Unavailable, CarrierSecurity::Insecure] {

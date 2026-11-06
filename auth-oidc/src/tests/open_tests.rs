@@ -326,3 +326,24 @@ fn a_mistyped_settings_value_is_refused_without_echoing_it() {
         "the unknown key is named: {err}"
     );
 }
+
+#[test]
+fn a_padded_issuer_is_refused_and_a_padded_endpoint_still_loads() {
+    for value in ["https://idp.example/ ", " https://idp.example"] {
+        let config = serde_json::json!({"issuer": value, "audience":"aud"});
+        let error = match crate::open::config(&config.to_string()) {
+            Err(error) => error,
+            Ok(_) => panic!("padded issuer {value:?} accepted"),
+        };
+        assert!(error.contains("settings.issuer"), "{error}");
+        assert!(error.contains("whitespace"), "{error}");
+        for field in ["authorization_endpoint", "token_endpoint"] {
+            let mut config = serde_json::json!({"issuer":"https://idp.example", "audience":"aud"});
+            config[field] = serde_json::json!(value);
+            assert!(
+                crate::open::config(&config.to_string()).is_ok(),
+                "padded {field} {value:?} refused"
+            );
+        }
+    }
+}

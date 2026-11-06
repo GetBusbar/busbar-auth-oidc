@@ -39,9 +39,6 @@ use busbar_plugin_loader::dispatch::{
 mod issuer;
 pub use issuer::Issuer;
 
-/// The `iss` of a key used only for its signature (the tests configure the issuer they check).
-pub const UNUSED_ISSUER: &str = "https://issuer.unused.invalid";
-
 /// The IdP the tests play: its issuer, and where its documents are.
 pub const ISSUER: &str = "https://idp.conformance.example/v2.0";
 pub const DISCOVERY_PATH: &str = "/v2.0/.well-known/openid-configuration";
@@ -466,11 +463,6 @@ impl EnvelopeSink for Recorder {
 }
 
 impl Idp {
-    /// The IdP of `ISSUER`, signing with `key`: its discovery document (naming its JWKS, authorize
-    pub fn new(key: &Issuer) -> Arc<Self> {
-        Self::with_carrier(key, CarrierSecurity::Unavailable)
-    }
-
     /// Explicitly model a carrier whose handshake established peer authentication.
     pub fn secure_carrier(key: &Issuer) -> Arc<Self> {
         Self::with_carrier(key, CarrierSecurity::Secure)

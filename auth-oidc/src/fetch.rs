@@ -144,6 +144,13 @@ pub trait Fetch {
     /// [`failed`]).
     fn get(&mut self, doc: Doc, url: &str) -> Poll<Result<String, String>>;
 
+    /// Whether this op has an exchange of its own in flight to a URL other than `url`: it must
+    /// carry that one on before it makes another request.
+    fn busy_elsewhere(&self, url: &str) -> bool {
+        let _ = url;
+        false
+    }
+
     /// A request to `url` this op would have to make, or wait on, but cannot: it runs on no ticket
     /// and may not pend. Answers the error the op reports (the prefix, then why).
     fn cannot_pend(&mut self, url: &str) -> String {
@@ -239,7 +246,8 @@ pub fn failed(url: &str, why: impl Display) -> String {
 }
 
 /// A GET's answer as the document it carries: a non-2xx status is refused naming the status as
-/// the HTTP client prints it (`404 Not Found`), then the body is [`capped`].
+/// the HTTP client prints it (`404 Not Found`), then the body is capped to
+/// the JWKS reply limit.
 pub fn document(url: &str, status: u16, body: Vec<u8>) -> Result<String, String> {
     document_for(NEED_JWKS, url, status, body)
 }
@@ -276,10 +284,6 @@ fn body_name(need: u32) -> &'static str {
 }
 
 /// `body` as text, refusing anything over `cap` bytes or not UTF-8.
-pub fn capped(url: &str, body: Vec<u8>, cap: usize) -> Result<String, String> {
-    capped_for(NEED_JWKS, url, body, cap)
-}
-
 fn capped_for(need: u32, url: &str, body: Vec<u8>, cap: usize) -> Result<String, String> {
     if need == NEED_TOKEN {
         let body = zeroize::Zeroizing::new(body);
@@ -505,7 +509,16 @@ impl<'h> HostIo<'h> {
                         .iter()
                         .filter(|(name, _)| name.eq_ignore_ascii_case(b"retry-after"))
                         .find_map(|(_, value)| {
-                            let now = u64::try_from(self.wall_now()).unwrap_or(u64::MAX);
+                            let wall = self.wall_now();
+                            // An unreadable clock (`i64::MAX`, fail closed) cannot date an
+                            // HTTP-date hint: only the delay-seconds form is taken then.
+                            if wall == i64::MAX {
+                                let v = value.trim_ascii();
+                                if v.is_empty() || !v.iter().all(u8::is_ascii_digit) {
+                                    return None;
+                                }
+                            }
+                            let now = u64::try_from(wall).unwrap_or(u64::MAX);
                             busbar_contract::abi::auth::retry_after_secs(value, now)
                         })
                 });
@@ -532,6 +545,10 @@ impl<'h> HostIo<'h> {
 }
 
 impl Fetch for HostIo<'_> {
+    fn busy_elsewhere(&self, url: &str) -> bool {
+        self.state.current.as_ref().is_some_and(|(at, _)| at != url)
+    }
+
     fn caller(&self) -> Option<Ticket> {
         (!self.ticket.is_none()).then_some(self.ticket)
     }

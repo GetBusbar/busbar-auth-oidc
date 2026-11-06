@@ -38,7 +38,6 @@ fn read_request(stream: &mut impl std::io::Read) -> String {
 
 /// A running local issuer: its identity, its signing key, and where its JWKS is served.
 pub struct Issuer {
-    issuer: String,
     kid: String,
     key: EcdsaKeyPair,
     rng: ring::rand::SystemRandom,
@@ -48,8 +47,8 @@ pub struct Issuer {
 }
 
 impl Issuer {
-    /// Start an issuer named `issuer` (the `iss` its tokens carry), signing under key id `kid`, with
-    pub fn start(issuer: &str, kid: &str) -> Issuer {
+    /// Start an issuer signing under key id `kid`.
+    pub fn start(kid: &str) -> Issuer {
         let rng = ring::rand::SystemRandom::new();
         let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng)
             .expect("generate an ES256 key");
@@ -106,7 +105,6 @@ impl Issuer {
             }
         });
         Issuer {
-            issuer: issuer.to_string(),
             kid: kid.to_string(),
             key,
             rng,

@@ -114,3 +114,49 @@ fn many_tiny_roles_count_their_serialized_overhead_toward_the_existing_bound() {
     c.put("small-token", &p, 1_700_000_000, c.generation());
     assert!(c.get("small-token", 1_700_000_001).is_some());
 }
+
+#[test]
+fn a_clock_stepped_back_past_the_stored_ttl_is_a_miss() {
+    let c = VerdictCache::default();
+    let t = 1_700_000_000;
+    c.put("cred-a", &principal(Some(300)), t, c.generation());
+    assert!(c.get("cred-a", t - 3000).is_none(), "left would be 3300 s");
+    assert!(c.lock().entries.is_empty(), "and goes");
+}
+
+#[test]
+fn the_fail_closed_clock_misses_without_evicting() {
+    let c = VerdictCache::default();
+    let t = 1_700_000_000;
+    c.put("cred-a", &principal(None), t, c.generation());
+    assert!(c.get("cred-a", i64::MAX).is_none());
+    assert!(c.get("cred-a", t + 1).is_some(), "still held");
+}
+
+#[test]
+fn a_full_cache_drops_expired_entries_before_evicting_a_live_one() {
+    let c = VerdictCache::default();
+    let t = 1_700_000_000;
+    c.put("live", &principal(Some(3000)), t, c.generation());
+    for i in 1..MAX_ENTRIES {
+        c.put(
+            &format!("short-{i}"),
+            &principal(Some(10)),
+            t,
+            c.generation(),
+        );
+    }
+    assert_eq!(c.lock().entries.len(), MAX_ENTRIES);
+    let later = t + 100;
+    c.put("fresh", &principal(Some(300)), later, c.generation());
+    assert_eq!(
+        c.lock().entries.len(),
+        2,
+        "the expired entries were purged, not one live entry evicted"
+    );
+    assert!(
+        c.get("live", later).is_some(),
+        "the oldest live entry survives"
+    );
+    assert!(c.get("fresh", later).is_some());
+}

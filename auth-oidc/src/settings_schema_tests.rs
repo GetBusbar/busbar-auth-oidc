@@ -52,6 +52,8 @@ fn settings_schema_matches_oidc_lifecycle() {
     ]);
     for (key, value, accepted) in [
         ("audience", json!("\u{2003}"), false),
+        ("issuer", json!("https://issuer.example "), false),
+        ("issuer", json!("\u{00A0}https://issuer.example"), false),
         ("role_claim", json!(""), false),
         ("role_claim", Value::Null, false),
         ("client_id", Value::Null, true),
@@ -76,6 +78,32 @@ fn settings_schema_matches_oidc_lifecycle() {
         let mut settings = minimal.clone();
         settings[key] = value;
         check(&[(settings, accepted)]);
+    }
+    // Every guarded string setting refuses a blank or whitespace-only value, whatever the code
+    // point, in the schema and in the lifecycle validator alike.
+    let blanks = [
+        "", " ", "\t", "\u{00A0}", "\u{2003}", "\u{3000}", "\u{1680}", "\u{202F}", "\u{2028}",
+    ];
+    for key in [
+        "issuer",
+        "audience",
+        "jwks_url",
+        "role_claim",
+        "ca_cert_pem",
+        "client_id",
+        "authorization_endpoint",
+        "token_endpoint",
+    ] {
+        for blank in blanks {
+            let mut settings = minimal.clone();
+            settings[key] = json!(blank);
+            check(&[(settings, false)]);
+        }
+    }
+    for blank in blanks {
+        let mut settings = minimal.clone();
+        settings["scopes"] = json!(["profile", blank]);
+        check(&[(settings, false)]);
     }
     let cfg: crate::OidcConfig = serde_json::from_value(minimal).unwrap();
     let schema: Value = serde_json::from_slice(SETTINGS_SCHEMA).unwrap();

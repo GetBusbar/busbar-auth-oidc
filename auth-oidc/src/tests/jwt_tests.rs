@@ -155,3 +155,97 @@ fn a_jose_header_that_is_not_a_json_object_is_refused() {
         assert_eq!(parts.header.alg, ALG_ES256);
     }
 }
+
+fn bare_key(kty: &str, crv: Option<&str>) -> Jwk {
+    Jwk {
+        kty: kty.to_string(),
+        kid: None,
+        n: None,
+        e: None,
+        crv: crv.map(str::to_string),
+        x: None,
+        y: None,
+        key_use: None,
+        alg: None,
+        key_ops: None,
+        decoded: std::sync::OnceLock::new(),
+    }
+}
+
+fn bare_parts(alg: &str, crit: Option<Vec<String>>) -> Parts<'static> {
+    Parts {
+        header: Header {
+            alg: alg.to_string(),
+            kid: None,
+            crit,
+        },
+        payload: Vec::new(),
+        signature: Vec::new(),
+        signing_input: "header.payload",
+    }
+}
+
+#[test]
+fn a_token_with_the_wrong_number_of_segments_is_refused() {
+    for token in ["", "a", "a.b", "a.b.c.d"] {
+        let Err(err) = split(token) else {
+            panic!("refused: {token:?}");
+        };
+        assert_eq!(err, "malformed JWT: expected three dot-separated segments");
+    }
+}
+
+#[test]
+fn an_empty_crit_list_is_not_a_critical_extension() {
+    let err = verify_signature(
+        &bare_parts("ES256", Some(Vec::new())),
+        &bare_key("EC", Some("P-256")),
+    )
+    .unwrap_err();
+    assert!(
+        !err.contains("critical"),
+        "an empty crit names nothing: {err}"
+    );
+    assert!(
+        err.contains("EC coordinate"),
+        "it reaches key material: {err}"
+    );
+    let named = verify_signature(
+        &bare_parts("ES256", Some(vec!["exp".to_string()])),
+        &bare_key("EC", Some("P-256")),
+    )
+    .unwrap_err();
+    assert!(named.contains("critical extension(s) [exp]"), "{named}");
+}
+
+#[test]
+fn an_es256_token_against_an_rsa_key_is_an_alg_key_type_mismatch() {
+    let err = verify_signature(&bare_parts("ES256", None), &bare_key("RSA", None)).unwrap_err();
+    assert_eq!(
+        err,
+        "token alg ES256 but JWKS key kty is RSA (alg/key-type mismatch)"
+    );
+}
+
+#[test]
+fn key_material_that_contradicts_its_kty_is_refused() {
+    let ec_material = || KeyMaterial::Ec { point: vec![4] };
+    let rsa_key = bare_key("RSA", None);
+    rsa_key.decoded.set(ec_material()).unwrap();
+    assert_eq!(
+        verify_signature(&bare_parts("RS256", None), &rsa_key).unwrap_err(),
+        "JWKS key material does not match its kty"
+    );
+    let ec_key = bare_key("EC", Some("P-256"));
+    ec_key
+        .decoded
+        .set(KeyMaterial::Rsa {
+            n: vec![1],
+            e: vec![1],
+        })
+        .unwrap();
+    assert_eq!(
+        verify_signature(&bare_parts("ES256", None), &ec_key).unwrap_err(),
+        "JWKS key material does not match its kty"
+    );
+}

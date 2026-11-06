@@ -222,7 +222,7 @@ pub fn verify_signature(parts: &Parts, key: &Jwk) -> Result<(), String> {
     }
 }
 
-/// Deserialize the token's claims payload as a JSON object.
+/// Deserialize the token's claims payload as JSON (the caller requires an object).
 pub fn claims(parts: &Parts) -> Result<Value, String> {
     serde_json::from_slice(&parts.payload).map_err(busbar_contract::abi::sdk::auth_kit::json_error(
         "malformed JWT claims",

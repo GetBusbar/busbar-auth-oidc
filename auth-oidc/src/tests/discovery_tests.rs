@@ -6,6 +6,8 @@
 use super::*;
 use crate::script::{ready, ticket, Idp, ME};
 use crate::{OidcModule, Step};
+use busbar_contract::abi::sdk::cred::FormBody;
+use busbar_contract::auth::LoginHttpResponse;
 
 const ISSUER: &str = "https://idp.example/v2.0";
 
@@ -17,7 +19,8 @@ fn present_but_nonstring_discovery_endpoints_are_errors() {
             serde_json::json!({"SecretEndpoint":true}),
             serde_json::Value::Null,
         ] {
-            let mut document = serde_json::json!({"issuer":ISSUER});
+            let mut document =
+                serde_json::json!({"issuer":ISSUER,"jwks_uri":"https://idp.example/keys"});
             document[field] = value;
             let idp = Idp::new(document.to_string());
             let module = OidcModule::new(&cfg(None));
@@ -402,4 +405,171 @@ fn a_discovered_jwks_failure_scrubs_userinfo_without_changing_the_fetch_url() {
             assert!(logged.contains("keys?set=1"), "{logged:?}");
         }
     }
+}
+
+/// A scripted op whose `busy_elsewhere` answer is settable.
+struct Busy<'a>(crate::script::Caller<'a>, bool);
+
+impl Fetch for Busy<'_> {
+    fn caller(&self) -> Option<Ticket> {
+        self.0.caller()
+    }
+    fn get(&mut self, doc: Doc, url: &str) -> Poll<Result<String, String>> {
+        self.0.get(doc, url)
+    }
+    fn post(&mut self, url: &str, form: &FormBody) -> Poll<Result<LoginHttpResponse, String>> {
+        self.0.post(url, form)
+    }
+    fn busy_elsewhere(&self, _: &str) -> bool {
+        self.1
+    }
+}
+
+#[test]
+fn an_op_with_its_own_exchange_in_flight_is_not_made_to_refetch_discovery() {
+    let (c, d) = (cfg(None), Discovery::new(Duration::from_secs(60)));
+    let idp = Idp::new(doc());
+    let now = Instant::now();
+    assert!(ready(d.document(&c, now, &mut idp.at_once(Some(ME)))).is_ok());
+    d.expire();
+    assert_eq!(idp.calls(), 1);
+
+    let mut busy = Busy(idp.at_once(Some(ticket(1))), true);
+    assert!(
+        ready(d.document(&c, now, &mut busy)).is_ok(),
+        "the previous document is answered"
+    );
+    assert_eq!(
+        idp.calls(),
+        1,
+        "and no request is made over its own exchange"
+    );
+
+    let mut free = Busy(idp.at_once(Some(ticket(1))), false);
+    assert!(ready(d.document(&c, now, &mut free)).is_ok());
+    assert_eq!(idp.calls(), 2, "an op with nothing in flight refetches");
+}
+
+#[test]
+fn a_document_without_a_usable_jwks_uri_is_refused_unless_jwks_url_is_configured() {
+    let bare = serde_json::json!({ "issuer": ISSUER }).to_string();
+    let url = discovery_url(&cfg(None));
+    let err = check_document(&cfg(None), &url, Ok(bare.clone())).expect_err("no jwks_uri");
+    assert!(err.contains("no jwks_uri"), "{err}");
+    let numeric = serde_json::json!({ "issuer": ISSUER, "jwks_uri": 5 }).to_string();
+    assert!(check_document(&cfg(None), &url, Ok(numeric)).is_err());
+    assert!(check_document(&cfg(Some("https://idp.example/k")), &url, Ok(bare)).is_ok());
+}
+
+#[test]
+fn a_rediscovered_document_without_jwks_uri_keeps_the_previous_good_one() {
+    let (c, d) = (cfg(None), Discovery::new(Duration::from_secs(60)));
+    let idp = Idp::new(doc());
+    let now = Instant::now();
+    assert!(ready(d.document(&c, now, &mut idp.at_once(Some(ME)))).is_ok());
+    d.expire();
+    idp.set_body(serde_json::json!({ "issuer": ISSUER }).to_string());
+    let got = ready(d.document(&c, now, &mut idp.at_once(Some(ME)))).expect("previous kept");
+    assert_eq!(got["jwks_uri"], "https://idp.example/keys");
+}
+
+/// An op whose discovery answer is `body`, delivered only after another op has taken over its
+/// abandoned flight and finished its own fetch.
+struct LateSuccess<'a> {
+    a: crate::script::Caller<'a>,
+    b: crate::script::Caller<'a>,
+    d: &'a Discovery,
+    c: &'a OidcConfig,
+    at: Instant,
+    body: String,
+    taken: bool,
+}
+
+impl Fetch for LateSuccess<'_> {
+    fn caller(&self) -> Option<Ticket> {
+        self.a.caller()
+    }
+
+    fn get(&mut self, _: Doc, _: &str) -> Poll<Result<String, String>> {
+        if !self.taken {
+            self.taken = true;
+            assert_eq!(self.d.document(self.c, self.at, &mut self.b), Step::Pending);
+            assert!(matches!(
+                self.d.document(self.c, self.at, &mut self.b),
+                Step::Ready(Ok(_))
+            ));
+        }
+        Poll::Ready(Ok(self.body.clone()))
+    }
+
+    fn post(&mut self, url: &str, form: &FormBody) -> Poll<Result<LoginHttpResponse, String>> {
+        self.a.post(url, form)
+    }
+}
+
+#[test]
+fn a_late_success_from_an_abandoned_flight_does_not_replace_the_live_document() {
+    let (c, d) = (cfg(None), Discovery::new(Duration::from_secs(60)));
+    let idp = Idp::new(doc());
+    let t0 = Instant::now();
+    let late = t0 + crate::flight::FLIGHT_MAX + Duration::from_secs(1);
+    let mut a = idp.pending(ticket(1));
+    assert_eq!(d.document(&c, t0, &mut a), Step::Pending);
+    let stale = serde_json::json!({ "issuer": ISSUER, "jwks_uri": "https://idp.example/stale" });
+    let mut a = LateSuccess {
+        a,
+        b: idp.pending(ticket(2)),
+        d: &d,
+        c: &c,
+        at: late,
+        body: stale.to_string(),
+        taken: false,
+    };
+    let got = ready(d.document(&c, late, &mut a)).expect("a document");
+    assert_eq!(
+        got["jwks_uri"], "https://idp.example/keys",
+        "the taker's fresh document wins over the late answer"
+    );
+    let held = ready(d.document(&c, late, &mut idp.at_once(Some(ME)))).expect("held");
+    assert_eq!(held["jwks_uri"], "https://idp.example/keys");
+}
+
+#[test]
+fn a_ticketless_caller_meeting_another_op_s_first_discovery_cannot_wait() {
+    let (c, d) = (cfg(None), Discovery::new(Duration::from_secs(60)));
+    let idp = Idp::new(doc());
+    let now = Instant::now();
+    assert_eq!(
+        d.document(&c, now, &mut idp.pending(ticket(1))),
+        Step::Pending
+    );
+    let err = ready(d.document(&c, now, &mut idp.at_once(None))).unwrap_err();
+    assert!(err.contains("cannot pend"), "{err}");
+    assert_eq!(idp.calls(), 1, "it made no request of its own");
+}
+
+#[test]
+fn a_ticketless_caller_is_served_the_previous_document_when_rediscovery_is_due() {
+    let (c, d) = (cfg(None), Discovery::new(Duration::from_secs(60)));
+    let idp = Idp::new(doc());
+    let now = Instant::now();
+    let previous = ready(d.document(&c, now, &mut idp.at_once(Some(ME)))).expect("discovered");
+    d.expire();
+    let served = ready(d.document(&c, now, &mut idp.at_once(None))).expect("previous served");
+    assert!(Arc::ptr_eq(&previous, &served));
+    assert_eq!(idp.calls(), 1, "a ticketless caller cannot claim a refetch");
+}
+
+#[test]
+fn a_cold_op_busy_with_its_own_exchange_still_discovers() {
+    let (c, d) = (cfg(None), Discovery::new(Duration::from_secs(60)));
+    let idp = Idp::new(doc());
+    let now = Instant::now();
+    let mut busy = Busy(idp.pending(ticket(1)), true);
+    assert_eq!(
+        d.document(&c, now, &mut busy),
+        Step::Pending,
+        "with no previous document to serve it must fetch"
+    );
+    assert_eq!(idp.calls(), 1);
 }

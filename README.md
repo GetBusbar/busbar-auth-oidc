@@ -86,7 +86,8 @@ This repo is a same-repo, 2-crate Cargo workspace: `auth-oidc/` (the
 `busbar-auth-oidc` library — the real OIDC logic, no plugin ABI) and
 `auth-oidc-plugin/` (the `busbar-auth-oidc-plugin` cdylib adapter).
 
-`auth-oidc-plugin/src/lib.rs` is a thin adapter: one line,
+`auth-oidc-plugin/src/lib.rs` is a thin adapter: it re-exports the logic
+crate and, inside a small `#[allow(unsafe_code)]` module, invokes
 `busbar_contract::export_door!(busbar_auth_oidc::door::door)`, which emits
 the image's one symbol, `busbar_plugin_door` (the memory-ABI door). The
 module and its settings parsing live in the logic crate.
@@ -116,7 +117,7 @@ every `refresh`. The previous document serves during rediscovery and remains ava
 | `ca_cert_pem` | no | — | An extra root CA (PEM) to trust for the JWKS/discovery HTTPS fetch, in addition to the built-in public (webpki) roots; the OS trust store is not consulted — for a private CA or a test fixture (this is exactly what `tests/e2e.rs` uses to trust its own self-signed local JWKS server). |
 | `client_id` | no | `audience` | The OAuth `client_id` presented on the browser-login authorize URL and token exchange; the login's `id_token` must name it in `aud` (and in `azp` when it carries one, OIDC Core §3.1.3.7). |
 | `client_secret` | no | — | A SECRET REFERENCE (never the secret itself): the host resolves it and lends it at `open`, and the plugin sends it only in the token exchange's form body (sealed by the SDK, wiped after). Absent for a public client. |
-| `scopes` | no | `[]` | Extra OAuth scopes requested at browser login, on top of the always-sent `openid`. A blank entry is refused at load. |
+| `scopes` | no | `[]` | Extra OAuth scopes requested at browser login, on top of the always-sent `openid`. A blank entry is refused at load. Entra ID needs `profile` here: it puts `oid` in an id_token only then, and its `sub` is pairwise per application, so without it login identities would not match bearer identities (`oid`). |
 | `authorization_endpoint` | no | discovered from `issuer` | The IdP authorize endpoint for browser login. When omitted, taken from the issuer's discovery document (fetched at boot when `jwks_url` is omitted too, else on the first browser login), which must name it over https (plain http only to loopback); absent and undiscoverable means browser login is refused (token verification is unaffected). A login the host lends no nonce is refused. |
 | `token_endpoint` | no | discovered from `issuer` | The IdP token endpoint for the browser-login code exchange. Discovered like `authorization_endpoint` when omitted. |
 
@@ -201,11 +202,11 @@ names is `busbar-contract` — the plugin contract, whose `abi::sdk` module
 carries the export macros. `busbar-plugin-loader` is a dev-dependency only,
 for the linked + dropped-in conformance test and the end-to-end test. Both
 are **git dependencies pinned to one busbar commit**: the `rev` in every
-`Cargo.toml` is field 1 of `.busbar-ref`, and CI's `pin` job refuses a
-manifest that disagrees. No sibling checkout of busbar is needed to build
-or test; the live end-to-end test (`tests/e2e.rs`) builds the real `busbar`
-binary from a checkout named by `BUSBAR_CHECKOUT` (CI's `e2e` job provides
-one at `.busbar-ref`).
+`Cargo.toml` must equal field 1 of `.busbar-ref` (busbar-release's heal keeps
+them in step). No sibling checkout of busbar is needed to build or test; the
+live end-to-end test (`tests/e2e.rs`) builds the real `busbar` binary from a
+checkout named by `BUSBAR_CHECKOUT`, which must be a busbar checkout at
+`.busbar-ref`.
 
 ### Pack and sign
 
@@ -238,6 +239,7 @@ identity-providers:
       issuer: "https://login.microsoftonline.com/<tenant-id>/v2.0"
       audience: "<client-id>"
       role_claim: groups
+      scopes: [profile]      # Entra puts `oid` in an id_token only with `profile` (see `scopes`)
     # max_admin_scope:       # per-provider admin ceiling; OMITTED = the most restrictive
                              # (read-only). Never widen an external IdP to `full` casually.
 
