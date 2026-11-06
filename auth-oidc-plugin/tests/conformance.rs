@@ -1153,16 +1153,30 @@ fn refresh_pending(b: &Bound, settings: &str) {
     assert_eq!(done.outcome, Outcome::Ready, "refresh: {:?}", done.error);
 }
 
-fn until_read_held(idp: &Idp) {
+fn until_read_held(b: &Bound) {
     let until = std::time::Instant::now() + Duration::from_secs(10);
-    while !idp.read_is_held() {
+    while !b.idp.read_is_held() {
         assert!(
             std::time::Instant::now() < until,
             "reply never held: {:?}",
-            idp.sent()
+            b.idp.sent()
         );
         std::thread::sleep(Duration::from_millis(1));
     }
+    // The connector publishes the held read before returning Pending. The real caller uses
+    // worker 0; its retirement barrier runs after that crossing and its host-call guards retire.
+    // The held operation stays pending, so refresh now exercises a parked original login.
+    let barrier = b.dispatcher.mint(0).expect("a worker-0 barrier ticket");
+    let retired = b.dispatcher.retirement_barrier(
+        barrier,
+        until.saturating_duration_since(std::time::Instant::now()),
+    );
+    b.dispatcher.recycle(barrier);
+    assert!(
+        retired,
+        "the held read crossing must return Pending within 10s"
+    );
+    assert!(b.idp.read_is_held(), "the original login remains held");
 }
 
 /// Change issuer, audience, client, endpoints, secret and CA selection together. Old operations
@@ -1200,7 +1214,7 @@ fn pending_verify_and_begin_keep_their_opened_configuration_across_refresh() {
                     b.verify(Some(&token), None)
                 }
             });
-            until_read_held(&idp);
+            until_read_held(&b);
             refresh_pending(&b, &replacement_config());
             drop(held);
             call.join().expect("pending operation completes")
@@ -1268,7 +1282,7 @@ fn pending_complete_keeps_its_client_and_token_answer_across_refresh() {
             let held = idp.hold_reads(path);
             let call =
                 scope.spawn(|| b.complete("code", ("state", NONCE), REDIRECT, "verifier", None));
-            until_read_held(&idp);
+            until_read_held(&b);
             refresh_pending(&b, &replacement_config());
             drop(held);
             call.join().expect("pending login completes")
