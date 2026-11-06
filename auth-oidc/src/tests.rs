@@ -2003,7 +2003,8 @@ fn an_idp_5xx_or_429_at_the_token_endpoint_is_an_outage_not_a_decline() {
         ready(m.m.identity_from_token_response(
             &LoginHttpResponse {
                 status,
-                body: r#"{"error":"temporarily_unavailable"}"#.to_string(),
+                // Even a credential-error body is an outage at 5xx/429; at 400 it declines.
+                body: r#"{"error":"invalid_grant"}"#.to_string(),
             },
             0,
             Instant::now(),
