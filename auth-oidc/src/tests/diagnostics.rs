@@ -3,8 +3,10 @@
 
 //! OIDC diagnostic assertions use tracing-subscriber's standard formatter and a local byte buffer.
 use std::io::{self, Write};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Once};
 use tracing_subscriber::{layer::SubscriberExt, Layer};
+
+static TRACING_BASELINE: Once = Once::new();
 
 #[derive(Clone)]
 struct Buffer(Arc<Mutex<Vec<u8>>>);
@@ -38,6 +40,13 @@ impl WarnCapture {
         }
     }
     pub fn subscriber(&self) -> impl tracing::Subscriber + Send + Sync + 'static {
+        // A parallel uncaptured thread can register a callsite first. Keep an unfiltered
+        // global registry so tracing-core cannot cache that thread's disabled decision
+        // through its single-dispatch optimization for this thread's local capture.
+        TRACING_BASELINE.call_once(|| {
+            tracing::subscriber::set_global_default(tracing_subscriber::registry())
+                .expect("diagnostic tests install one unfiltered global tracing baseline");
+        });
         let buffer = Buffer(self.bytes.clone());
         let level = self.level;
         // Captures coexist on parallel test threads. Evaluate the level against
