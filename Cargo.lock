@@ -226,7 +226,7 @@ dependencies = [
 [[package]]
 name = "busbar-contract"
 version = "1.6.0"
-source = "git+https://github.com/GetBusbar/busbar?rev=a2de9cc5dabc538e4c8a5cce748d2fb7e15f00d2#a2de9cc5dabc538e4c8a5cce748d2fb7e15f00d2"
+source = "git+https://github.com/GetBusbar/busbar?rev=24b15da367cced369a6cccfd6adeb2bd2adb38c0#24b15da367cced369a6cccfd6adeb2bd2adb38c0"
 dependencies = [
  "async-trait",
  "aws-lc-sys",
@@ -256,8 +256,8 @@ dependencies = [
 
 [[package]]
 name = "busbar-plugin-loader"
-version = "1.5.0"
-source = "git+https://github.com/GetBusbar/busbar?rev=a2de9cc5dabc538e4c8a5cce748d2fb7e15f00d2#a2de9cc5dabc538e4c8a5cce748d2fb7e15f00d2"
+version = "1.6.0"
+source = "git+https://github.com/GetBusbar/busbar?rev=24b15da367cced369a6cccfd6adeb2bd2adb38c0#24b15da367cced369a6cccfd6adeb2bd2adb38c0"
 dependencies = [
  "arc-swap",
  "busbar-contract",
@@ -274,6 +274,7 @@ dependencies = [
  "tar",
  "tokio",
  "tracing",
+ "windows-sys 0.61.2",
  "zeroize",
 ]
 
