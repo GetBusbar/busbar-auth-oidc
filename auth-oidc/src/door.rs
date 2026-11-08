@@ -168,7 +168,10 @@ fn expire(map: &mut HashMap<Ticket, Reached>, now: u64) {
 
 /// The short-answer cache uses the host's monotonic clock. An unreadable clock permits neither
 /// reuse nor retention of a cached identity.
-fn reached_now(host: Option<&Host>, ticket: Ticket) -> Option<u64> {
+fn reached_now(
+    host: Option<&Host<busbar_contract::plugin::markers::AuthKind>>,
+    ticket: Ticket,
+) -> Option<u64> {
     match host?.connector(ticket).clock_now() {
         Poll::Ready(Ok(reading)) => Some(reading.mono_ns),
         _ => None,
@@ -182,7 +185,10 @@ const WAIT_NS: u64 = FLIGHT_MAX.as_nanos() as u64;
 
 /// When an op waiting on another op's fetch is woken at the latest: [`WAIT_NS`] past the host's
 /// monotonic clock, or why that clock cannot be read.
-fn wait_until(host: Option<&Host>, ticket: Ticket) -> Result<u64, ConnFailure> {
+fn wait_until(
+    host: Option<&Host<busbar_contract::plugin::markers::AuthKind>>,
+    ticket: Ticket,
+) -> Result<u64, ConnFailure> {
     let host = host.ok_or(ConnFailure::Unarmed)?;
     match host.connector(ticket).clock_now() {
         Poll::Ready(Ok(r)) => Ok(r.mono_ns.saturating_add(WAIT_NS)),
@@ -532,7 +538,7 @@ impl Oidc {
     /// The existing ready flow, optionally reporting refusals through the READY envelope.
     fn ready_with(
         &self,
-        host: &Host,
+        host: &Host<busbar_contract::plugin::markers::AuthKind>,
         ticket: Ticket,
         out: Option<&mut Out<'_, OutHead>>,
     ) -> Poll<Result<(), Refusal>> {
@@ -581,7 +587,7 @@ impl Oidc {
     /// READY when it is done or nothing is due.
     fn refresh_ahead<O: AbiOut>(
         &self,
-        host: Option<&Host>,
+        host: Option<&Host<busbar_contract::plugin::markers::AuthKind>>,
         ticket: Ticket,
         opened: Arc<Opened>,
         state: IoState,
@@ -616,6 +622,7 @@ fn text(settings: &[u8]) -> Result<&str, Refusal> {
 }
 
 impl Life for Oidc {
+    type Kind = busbar_contract::plugin::markers::AuthKind;
     const CANCEL: u32 = CANCEL_ABANDONED;
     /// The generic drive slot is not this plugin's: its `Drive` slot replaces it and carries the
     /// tick's key-set refresh on the driver ticket.
@@ -641,7 +648,11 @@ impl Life for Oidc {
     /// READY (after `open`, before any listener binds): discovery, a failure refusing the boot in
     /// 1.5.5's words, then the key set's warm-up ([`OidcModule::ready`]), over the instance's needs
     /// on `ticket`. PENDING while a request is in flight.
-    fn ready(&self, host: &Host, ticket: Ticket) -> Poll<Result<(), Refusal>> {
+    fn ready(
+        &self,
+        host: &Host<busbar_contract::plugin::markers::AuthKind>,
+        ticket: Ticket,
+    ) -> Poll<Result<(), Refusal>> {
         self.ready_with(host, ticket, None)
     }
 
@@ -756,14 +767,14 @@ impl Drop for Parked {
 
 /// The op's requests and module, resumed from what it parked or captured for a fresh call.
 fn resume<'h>(
-    instance: &Instance<'_, Held<Oidc>>,
+    instance: &Instance<'_, Held<Oidc>, busbar_contract::plugin::markers::AuthKind>,
     h: &'h Held<Oidc>,
 ) -> (Arc<Opened>, HostIo<'h>, Parked) {
     resume_after(instance, h, None, instance.resume::<Parked>())
 }
 
 fn resume_after<'h>(
-    instance: &Instance<'_, Held<Oidc>>,
+    instance: &Instance<'_, Held<Oidc>, busbar_contract::plugin::markers::AuthKind>,
     h: &'h Held<Oidc>,
     issued: Option<u32>,
     resumed: Option<Box<Parked>>,
@@ -791,8 +802,8 @@ fn resume_after<'h>(
 /// exchange's wake, or, when `wait` is set, on the wake of the fetch another op is making, with a
 /// backstop timer at that fetch's bound.
 fn pend<O: AbiOut>(
-    instance: &Instance<'_, Held<Oidc>>,
-    host: Option<&Host>,
+    instance: &Instance<'_, Held<Oidc>, busbar_contract::plugin::markers::AuthKind>,
+    host: Option<&Host<busbar_contract::plugin::markers::AuthKind>>,
     io: HostIo<'_>,
     mut parked: Parked,
     out: &mut Out<'_, O>,
@@ -1038,11 +1049,12 @@ fn verify_answer(
 #[derive(Debug)]
 pub struct Verify;
 impl SafeSlot for Verify {
+    type Kind = busbar_contract::plugin::markers::AuthKind;
     type In = VerifyIn;
     type Out = IdentifyOut;
     type State = Held<Oidc>;
     fn call(
-        instance: Instance<'_, Held<Oidc>>,
+        instance: Instance<'_, Held<Oidc>, busbar_contract::plugin::markers::AuthKind>,
         input: Lent<'_, VerifyIn>,
         mut out: Out<'_, IdentifyOut>,
     ) -> Outcome {
@@ -1199,11 +1211,12 @@ impl SafeSlot for Verify {
 #[derive(Debug)]
 pub struct Begin;
 impl SafeSlot for Begin {
+    type Kind = busbar_contract::plugin::markers::AuthKind;
     type In = BeginLoginIn;
     type Out = BeginLoginOut;
     type State = Held<Oidc>;
     fn call(
-        instance: Instance<'_, Held<Oidc>>,
+        instance: Instance<'_, Held<Oidc>, busbar_contract::plugin::markers::AuthKind>,
         input: Lent<'_, BeginLoginIn>,
         mut out: Out<'_, BeginLoginOut>,
     ) -> Outcome {
@@ -1250,11 +1263,12 @@ impl SafeSlot for Begin {
 #[derive(Debug)]
 pub struct Complete;
 impl SafeSlot for Complete {
+    type Kind = busbar_contract::plugin::markers::AuthKind;
     type In = CompleteLoginIn;
     type Out = IdentifyOut;
     type State = Held<Oidc>;
     fn call(
-        instance: Instance<'_, Held<Oidc>>,
+        instance: Instance<'_, Held<Oidc>, busbar_contract::plugin::markers::AuthKind>,
         input: Lent<'_, CompleteLoginIn>,
         mut out: Out<'_, IdentifyOut>,
     ) -> Outcome {
@@ -1378,18 +1392,19 @@ impl SafeSlot for Complete {
 #[derive(Debug)]
 pub struct Ready;
 impl SafeSlot for Ready {
+    type Kind = busbar_contract::plugin::markers::AuthKind;
     type In = ReadyIn;
     type Out = OutHead;
     type State = Held<Oidc>;
     fn call(
-        instance: Instance<'_, Held<Oidc>>,
+        instance: Instance<'_, Held<Oidc>, busbar_contract::plugin::markers::AuthKind>,
         input: Lent<'_, ReadyIn>,
         mut out: Out<'_, OutHead>,
     ) -> Outcome {
         let Some(h) = instance.get() else {
             return Outcome::Fault;
         };
-        let Some(host) = input.host().map(Host::of) else {
+        let Some(host) = input.host().map(|loan| Host::of(instance.host(loan))) else {
             return Outcome::Fault;
         };
         match h
@@ -1411,11 +1426,12 @@ impl SafeSlot for Ready {
 #[derive(Debug)]
 pub struct Tick;
 impl SafeSlot for Tick {
+    type Kind = busbar_contract::plugin::markers::AuthKind;
     type In = TickIn;
     type Out = TickOut;
     type State = Held<Oidc>;
     fn call(
-        instance: Instance<'_, Held<Oidc>>,
+        instance: Instance<'_, Held<Oidc>, busbar_contract::plugin::markers::AuthKind>,
         input: Lent<'_, TickIn>,
         mut out: Out<'_, TickOut>,
     ) -> Outcome {
@@ -1456,11 +1472,12 @@ impl SafeSlot for Tick {
 #[derive(Debug)]
 pub struct Drive;
 impl SafeSlot for Drive {
+    type Kind = busbar_contract::plugin::markers::AuthKind;
     type In = DriveIn;
     type Out = OutHead;
     type State = Held<Oidc>;
     fn call(
-        instance: Instance<'_, Held<Oidc>>,
+        instance: Instance<'_, Held<Oidc>, busbar_contract::plugin::markers::AuthKind>,
         _: Lent<'_, DriveIn>,
         mut out: Out<'_, OutHead>,
     ) -> Outcome {
@@ -1485,10 +1502,15 @@ impl SafeSlot for Drive {
 #[derive(Debug)]
 pub struct NotServed<I, O>(PhantomData<(I, O)>);
 impl<I: AbiIn, O: AbiOut> SafeSlot for NotServed<I, O> {
+    type Kind = busbar_contract::plugin::markers::AuthKind;
     type In = I;
     type Out = O;
     type State = Held<Oidc>;
-    fn call(_: Instance<'_, Held<Oidc>>, _: Lent<'_, I>, _: Out<'_, O>) -> Outcome {
+    fn call(
+        _: Instance<'_, Held<Oidc>, busbar_contract::plugin::markers::AuthKind>,
+        _: Lent<'_, I>,
+        _: Out<'_, O>,
+    ) -> Outcome {
         Outcome::Refused
     }
 }
@@ -1529,7 +1551,7 @@ mod table {
 }
 
 /// This plugin's door: the one a compiled-in build links and the dropped-in image exports.
-pub use table::door;
+pub use table::{door, MACRO_DOOR};
 
 #[cfg(test)]
 #[path = "tests/door_tests.rs"]

@@ -62,21 +62,13 @@ fn load_and_exercise_auth_oidc_plugin_success() {
     let sent = idp.sent();
     assert_eq!(sent.len(), 1, "one JWKS GET, no discovery: {sent:?}");
     assert_eq!(
-        support::strays(
-            &sent,
-            2 * busbar_auth_oidc::fetch::PUBLIC,
-            &support::declared_targets(busbar_auth_oidc::fetch::PUBLIC)
-        ),
+        support::strays(&sent, 2 * 3, &support::declared_targets(3)),
         Vec::<String>::new()
     );
 
     assert_eq!(
         (sent[0].need, sent[0].target.as_str(), sent[0].path.as_str()),
-        (
-            busbar_auth_oidc::fetch::NEED_JWKS + busbar_auth_oidc::fetch::PUBLIC,
-            support::JWKS_URL,
-            "/keys"
-        )
+        (1 + 3, support::JWKS_URL, "/keys")
     );
 
     let forged_token = Issuer::start("test-kid-1").sign(&claims);

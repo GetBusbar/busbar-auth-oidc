@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The **OIDC auth module as a droppable busbar plugin**: the logic crate re-exported whole, and its
-//! door (`busbar_auth_oidc::door::door`, the auth kind's memory ABI) exported as this image's one
+//! door (`busbar_auth_oidc::door`, the auth kind's memory ABI) exported as this image's one
 //! symbol, `busbar_plugin_door` (`export_door!`). Build it, drop the packed tarball into the
 //! engine's plugins folder, define it once under `identity-providers:` (`module: oidc` plus its
 //! `settings:`) and reference that name from `auth.chain`. The logic crate is
@@ -10,10 +10,10 @@
 
 #![deny(unsafe_code)]
 
-pub use busbar_auth_oidc::*;
+pub use busbar_auth_oidc::{door, MACRO_DOOR};
 
 /// The exported door: the macro's `#[no_mangle]` symbol is the one exemption.
 #[allow(unsafe_code)]
 mod exported {
-    busbar_contract::export_door!(busbar_auth_oidc::door::door);
+    busbar_contract::export_door!(busbar_auth_oidc::door);
 }

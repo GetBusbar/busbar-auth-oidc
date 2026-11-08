@@ -262,7 +262,7 @@ fn a_received_retry_hint_survives_a_later_body_timeout_or_reply_cap_failure() {
     let key = Issuer::start(KID);
     let lib = cdylib();
     let stated = row().statement;
-    let over_cap = vec![b'x'; busbar_auth_oidc::fetch::MAX_TOKEN_BYTES + 1];
+    let over_cap = vec![b'x'; (256 * 1024) + 1];
     for arm in [
         Arm::Linked,
         Arm::Dropped {

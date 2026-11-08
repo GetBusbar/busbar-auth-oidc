@@ -25,8 +25,8 @@ use busbar_contract::conn::{
 };
 use busbar_contract::ids::StreamId;
 use busbar_contract::services::{
-    Caller, DiskDest, HookAsk, Later, NestAsk, Ran, Reading, RecordsList, Snapshot, Stored,
-    TrustKeyRef, UNSERVED,
+    Caller, DiskDest, HookAsk, Later, NestAsk, Ran, Reading, RecordsList, Stored, TrustKeyRef,
+    UNSERVED,
 };
 use busbar_contract::transport::{CertFacts, ConnFacts};
 use busbar_plugin_loader::dispatch::kinds::auth::Auth;
@@ -173,18 +173,21 @@ impl busbar_contract::services::HostServices for Clock {
         _counterparty: &str,
         _item: &str,
         _digest: &str,
-    ) -> Stored {
-        Stored::refused(UNSERVED)
+        _later: Later,
+    ) -> Ran {
+        Ran::Now(Stored::refused(UNSERVED))
     }
 
     fn trust_decide(
         &self,
         _caller: &Caller,
+        _ticket: busbar_contract::abi::mechanism::ticket::Ticket,
         _key: TrustKeyRef<'_>,
         _expected: Option<&str>,
         _approve: bool,
-    ) -> Stored {
-        Stored::refused(UNSERVED)
+        _later: Later,
+    ) -> Ran {
+        Ran::Now(Stored::refused(UNSERVED))
     }
 
     fn trust_state(&self, _caller: &Caller, _counterparty: &str) -> Stored {
@@ -229,8 +232,9 @@ impl busbar_contract::services::HostServices for Clock {
         _unit: Option<u64>,
         _ttl_secs: u64,
         _record: &[u8],
-    ) -> Stored {
-        Stored::refused(UNSERVED)
+        _later: Later,
+    ) -> Ran {
+        Ran::Now(Stored::refused(UNSERVED))
     }
 
     fn ticket_take(&self, _caller: &Caller, _unit: Option<u64>) -> Stored {
@@ -337,8 +341,8 @@ impl busbar_contract::services::HostServices for Clock {
         ))
     }
 
-    fn snapshot_read(&self, _caller: &Caller, _scope: u32) -> Snapshot {
-        Snapshot::Refused(UNSERVED)
+    fn snapshot_read(&self, _caller: &Caller, _scope: u32, _later: Later) -> Ran {
+        Ran::Now(Stored::refused(UNSERVED))
     }
 }
 
@@ -953,7 +957,7 @@ pub fn cdylib_path() -> Option<PathBuf> {
 
 /// THE LINKED ROW: the door and the Statement it states.
 pub fn row() -> LinkedRow {
-    LinkedRow::of(busbar_auth_oidc_plugin::door::door).expect("the door states itself")
+    LinkedRow::of(busbar_auth_oidc_plugin::door).expect("the door states itself")
 }
 
 /// Which door.
@@ -984,6 +988,7 @@ pub fn bind_as<K: busbar_plugin_loader::dispatch::Kind>(
             ..Default::default()
         },
         Arc::new(Clock),
+        busbar_contract::services::test_caller_binding(),
     ));
     *idp.wake.lock().unwrap() = Some(dispatcher.conn_waker());
     let conns: Arc<dyn DeclaredConns> = idp.clone();
@@ -997,7 +1002,7 @@ pub fn bind_as<K: busbar_plugin_loader::dispatch::Kind>(
     let plugin = match arm {
         Arm::Linked => load_linked::<K>(&row(), bind),
         Arm::Dropped { lib, stated } => {
-            load_dropped_bytes::<K>(lib, busbar_auth_oidc_plugin::door::NAME, stated, bind)
+            load_dropped_bytes::<K>(lib, "busbar-auth-oidc", stated, bind)
         }
         Arm::File(path) => {
             let stated = busbar_plugin_loader::dispatch::rendering_of_library(path)

@@ -43,6 +43,6 @@ busbar-contract = { workspace = true, features = ["test-seal"] }
 # ring's ECDSA keygen/signing lets the tests mint real ES256 tokens + a matching JWKS fixture with no
 # network — the full signature path is exercised in-process.
 ring = { workspace = true, features = ["std"] }
-# The live Entra example (examples/entra_live_check.rs) drives the module's sans-IO fetches with a
+# The manual live Entra test (src/tests/entra_live_check.rs) drives the module's sans-IO fetches with a
 # real blocking HTTPS client: an example, never the shipped image.
 reqwest = { workspace = true, features = ["blocking"] }

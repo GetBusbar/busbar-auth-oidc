@@ -14,8 +14,8 @@ use std::cell::Cell;
 use std::task::Poll;
 use std::time::Instant;
 
-use busbar_auth_oidc::fetch::Doc;
-use busbar_auth_oidc::{Fetch, OidcModule};
+use crate::fetch::Doc;
+use crate::{Fetch, OidcModule};
 use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::sdk::cred::FormBody;
 use busbar_contract::auth::LoginHttpResponse;
@@ -95,7 +95,7 @@ fn the_scan_counts_an_unwiped_free_and_not_a_wiped_one() {
 #[test]
 fn reading_a_token_response_frees_no_unwiped_copy_of_a_token() {
     let module = OidcModule::new(
-        &busbar_auth_oidc::config(r#"{"issuer":"https://idp.example","audience":"aud"}"#)
+        &crate::open::config(r#"{"issuer":"https://idp.example","audience":"aud"}"#)
             .expect("settings"),
     );
     let canary = std::str::from_utf8(CANARY).expect("ascii");
@@ -157,7 +157,7 @@ fn malformed_jwt_parts_free_no_unwiped_decoded_bytes() {
     ] {
         assert_eq!(
             unwiped_frees(|| {
-                assert!(busbar_auth_oidc::jwt::split(&token).is_err());
+                assert!(crate::jwt::split(&token).is_err());
             }),
             0
         );
@@ -165,7 +165,7 @@ fn malformed_jwt_parts_free_no_unwiped_decoded_bytes() {
     let token = format!("{header}.{payload}AAAA!AAA.c2ln");
     assert_eq!(
         unwiped_frees(|| {
-            assert!(busbar_auth_oidc::jwt::payload(&token).is_none());
+            assert!(crate::jwt::payload(&token).is_none());
         }),
         0
     );
@@ -174,7 +174,7 @@ fn malformed_jwt_parts_free_no_unwiped_decoded_bytes() {
 #[test]
 fn dropping_the_token_request_wipes_code_and_verifier_copies() {
     let module = OidcModule::new(
-        &busbar_auth_oidc::config(r#"{"issuer":"https://idp.example","audience":"aud","token_endpoint":"https://idp.example/token"}"#)
+        &crate::open::config(r#"{"issuer":"https://idp.example","audience":"aud","token_endpoint":"https://idp.example/token"}"#)
             .expect("settings"),
     );
     let canary = std::str::from_utf8(CANARY).expect("ascii");
@@ -188,10 +188,7 @@ fn dropping_the_token_request_wipes_code_and_verifier_copies() {
                 Instant::now(),
                 &mut NoNet,
             );
-            assert!(matches!(
-                request,
-                busbar_auth_oidc::Step::Ready(Ok(Some(_)))
-            ));
+            assert!(matches!(request, crate::Step::Ready(Ok(Some(_)))));
             drop(request);
         }),
         0

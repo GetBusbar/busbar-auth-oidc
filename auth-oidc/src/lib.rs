@@ -10,7 +10,7 @@
 //! never policy. Signature verification runs on `ring`. A browser login is served through the
 //! module's door ([`door::door`]).
 
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 #![deny(missing_docs)]
 
 use busbar_contract::abi::sdk::cred::{Cred, FormBody};
@@ -23,21 +23,20 @@ use token_response::TokenResponse;
 
 #[macro_use]
 mod flight;
-pub mod cache;
-pub mod discovery;
-pub mod door;
-pub mod fetch;
-pub mod jwks;
-pub mod jwt;
+pub(crate) mod cache;
+pub(crate) mod discovery;
+pub(crate) mod door;
+pub(crate) mod fetch;
+pub(crate) mod jwks;
+pub(crate) mod jwt;
 mod open;
 mod token_response;
-pub mod verdicts;
+pub(crate) mod verdicts;
 
-pub use cache::{JwksCache, KeyError};
-pub use discovery::Discovery;
-pub use fetch::Fetch;
-pub use flight::Step;
-pub use open::config;
+pub(crate) use cache::{JwksCache, KeyError};
+pub(crate) use discovery::Discovery;
+pub(crate) use fetch::Fetch;
+pub(crate) use flight::Step;
 
 /// The default role/group claim name — the token claim read into the principal's ROLES when the
 /// operator does not set `role_claim`, and the value the Entra >200-groups overage guard keys on.
@@ -68,7 +67,7 @@ const CLOCK_UNREADABLE: &str =
 /// the plugin's `open`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct OidcConfig {
+pub(crate) struct OidcConfig {
     /// The token `iss` to require, EXACT match. For Entra:
     /// `https://login.microsoftonline.com/<tenant-id>/v2.0`.
     pub issuer: String,
@@ -138,7 +137,7 @@ fn default_ttl_secs() -> u64 {
 /// The pure token VERIFIER: config-derived policy (issuer/audience/role_claim), with the current time
 /// passed to each check rather than held. Separated from the module and JWKS cache so the whole
 /// verify path, signature aside, is unit testable with plain claim maps. Signature verification is [`jwt::verify_signature`].
-pub struct OidcVerifier {
+pub(crate) struct OidcVerifier {
     issuer: String,
     audience: String,
     role_claim: String,
@@ -304,7 +303,7 @@ const UNTRUSTED_MAX: usize = 64;
 /// A FAR-END string (a JWKS key's `kty`/`crv`, a discovery document's `issuer`) or an ATTACKER one
 /// (a token's `alg`, `kid`, `crit`, `iss`) as an error or log line repeats it: escaped and capped
 /// at [`UNTRUSTED_MAX`] characters, then `…`.
-pub fn untrusted(s: &str) -> String {
+pub(crate) fn untrusted(s: &str) -> String {
     let mut shown: String = s
         .chars()
         .take(UNTRUSTED_MAX)
@@ -399,7 +398,7 @@ fn extract_string_list(v: Option<&Value>) -> Vec<String> {
 }
 
 /// The runtime OIDC auth module: a verifier, the JWKS cache and the issuer's discovery document.
-pub struct OidcModule {
+pub(crate) struct OidcModule {
     verifier: OidcVerifier,
     /// The verifier for the browser-login `id_token`: the same issuer and role claim, but the
     /// audience is the OAuth `client_id`. With `client_id` unset it resolves to `audience`, so the
@@ -645,6 +644,7 @@ impl OidcModule {
     /// presented, one that is not a JWT, or a JWT whose (unverified) `iss` is not this provider's
     /// issuer, is not ours (`Pass`, to the next auth in the chain); a JWT naming this provider's
     /// issuer is verified in full, and any failure of the token is a `Reject`.
+    #[cfg(test)]
     pub fn verify(
         &self,
         token: Option<&str>,
@@ -858,7 +858,7 @@ impl OidcModule {
 /// (the code, the code_verifier) are wiped when it drops, and the client secret is sealed in it:
 /// the SDK writes it into the request body and nowhere else.
 #[derive(Debug)]
-pub struct TokenRequest {
+pub(crate) struct TokenRequest {
     /// The token endpoint.
     pub url: String,
     /// The `application/x-www-form-urlencoded` body.
@@ -986,7 +986,7 @@ fn authorize_url(
 /// THE TOKEN REQUEST'S FORM (`url`'s authorization-code grant): `grant_type=authorization_code`,
 /// `code`, `redirect_uri`, `code_verifier`, `client_id`, then the lent client `secret` sealed as
 /// `client_secret`. With no secret lent the field is left out rather than sent empty.
-pub fn token_form(
+pub(crate) fn token_form(
     cfg: &OidcConfig,
     url: &str,
     code: &str,
@@ -1039,7 +1039,7 @@ fn discovered_setting(field: &str) -> Option<&'static str> {
 /// A DISCOVERED ENDPOINT'S SCHEME (OIDC Discovery 1.0 §3, RFC 9700 §4): a `field` URL the issuer's
 /// discovery document names is taken on ANY host, but only over https (plain http only to a
 /// loopback host). WHERE it may go is the destination guard's.
-pub fn discovered_secure(field: &str, setting: &str, url: &str) -> Result<(), String> {
+pub(crate) fn discovered_secure(field: &str, setting: &str, url: &str) -> Result<(), String> {
     let Ok(parsed) = url::Url::parse(url) else {
         return Err(fetch::refusal(
             "?",
@@ -1068,7 +1068,7 @@ pub fn discovered_secure(field: &str, setting: &str, url: &str) -> Result<(), St
 }
 
 /// The configured `jwks_url`, checked. Absent is fine (discovery names it), and so is `https`.
-pub fn check_jwks_url(cfg: &OidcConfig) -> Result<(), String> {
+pub(crate) fn check_jwks_url(cfg: &OidcConfig) -> Result<(), String> {
     let Some(url) = &cfg.jwks_url else {
         return Ok(());
     };
@@ -1107,3 +1107,16 @@ mod script;
 #[cfg(test)]
 #[path = "tests/destination_tests.rs"]
 mod destination_tests;
+
+/// The validated plugin entry and its generated registration descriptor.
+pub use door::{door, MACRO_DOOR};
+
+// The test-only allocator observes wiping; no runtime unsafe exemption.
+#[cfg(test)]
+#[allow(unsafe_code)]
+#[path = "tests/token_wipe.rs"]
+mod token_wipe;
+
+#[cfg(test)]
+#[path = "tests/entra_live_check.rs"]
+mod entra_live_check;

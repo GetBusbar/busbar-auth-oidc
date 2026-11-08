@@ -248,6 +248,7 @@ pub fn failed(url: &str, why: impl Display) -> String {
 /// A GET's answer as the document it carries: a non-2xx status is refused naming the status as
 /// the HTTP client prints it (`404 Not Found`), then the body is capped to
 /// the JWKS reply limit.
+#[cfg(test)]
 pub fn document(url: &str, status: u16, body: Vec<u8>) -> Result<String, String> {
     document_for(NEED_JWKS, url, status, body)
 }
@@ -375,7 +376,7 @@ impl std::fmt::Debug for IoState {
 /// [`Fetch`] over the host's connector, for ONE entry of one op on `ticket`. Its `Debug` names
 /// nothing it holds ([`IoState`]).
 pub struct HostIo<'h> {
-    host: Option<&'h Host>,
+    host: Option<&'h Host<busbar_contract::plugin::markers::AuthKind>>,
     ticket: Ticket,
     state: IoState,
     anchored: bool,
@@ -393,7 +394,12 @@ impl<'h> HostIo<'h> {
     /// The op's requests on `ticket` through `host`'s connector, resumed from `state`, on the
     /// ANCHORED needs when the module's settings name a `ca_cert_pem` (`anchored`), else on the
     /// PUBLIC ones.
-    pub fn new(host: Option<&'h Host>, ticket: Ticket, state: IoState, anchored: bool) -> Self {
+    pub fn new(
+        host: Option<&'h Host<busbar_contract::plugin::markers::AuthKind>>,
+        ticket: Ticket,
+        state: IoState,
+        anchored: bool,
+    ) -> Self {
         Self {
             host,
             ticket,

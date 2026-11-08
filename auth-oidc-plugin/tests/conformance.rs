@@ -529,11 +529,7 @@ fn the_linked_and_the_dropped_in_oidc_module_are_one_module() {
     }
     assert!(!public.idp.sent().is_empty());
     assert_eq!(
-        support::strays(
-            &public.idp.sent(),
-            needs,
-            &support::declared_targets(busbar_auth_oidc::fetch::PUBLIC)
-        ),
+        support::strays(&public.idp.sent(), needs, &support::declared_targets(3)),
         Vec::<String>::new(),
         "every request rides a public-roots need:\n{}",
         p.join("\n")
@@ -577,8 +573,7 @@ fn red_an_unreachable_issuer_and_a_ticketless_call_fail_verify_in_1_5_5_s_words(
     let token = key.sign(&claims(AUDIENCE));
     let lib = cdylib();
     let stated = row().statement;
-    let url =
-        busbar_auth_oidc::fetch::shown(&format!("https://idp.conformance.example{DISCOVERY_PATH}"));
+    let url = format!("https://idp.conformance.example{DISCOVERY_PATH}");
     let mut seen = Vec::new();
     for arm in [
         Arm::Linked,
@@ -698,8 +693,7 @@ fn red_an_oversized_reply_is_cut_off_at_the_cap_not_buffered_whole() {
     open(&b.plugin, &config(AUDIENCE), None).expect("opens");
 
     let refused = b.verify(Some(&token), None);
-    let url =
-        busbar_auth_oidc::fetch::shown(&format!("https://idp.conformance.example{DISCOVERY_PATH}"));
+    let url = format!("https://idp.conformance.example{DISCOVERY_PATH}");
     assert_eq!(
         refused,
         format!(
@@ -744,8 +738,7 @@ fn red_an_oversized_error_reply_names_its_status_and_is_cut_off_at_the_cap() {
     open(&b.plugin, &config(AUDIENCE), None).expect("opens");
 
     let refused = b.verify(Some(&token), None);
-    let url =
-        busbar_auth_oidc::fetch::shown(&format!("https://idp.conformance.example{DISCOVERY_PATH}"));
+    let url = format!("https://idp.conformance.example{DISCOVERY_PATH}");
     assert_eq!(
         refused,
         format!(
@@ -1849,23 +1842,31 @@ fn executing_driver_defers_refresh_until_its_host_call_returns() {
                 std::thread::scope(|scope| {
                     let pending = scope.spawn(|| {
                         if drive {
-                            let driven = &b.plugin.inner.driven;
-                            let seen = driven.answers();
+                            let driven = &b.plugin;
+                            let seen = driven.test_driver_answers();
                             assert_eq!(idp.wake_held_reads(), 1, "one real driver wake");
                             let until = std::time::Instant::now() + Duration::from_secs(5);
-                            while driven.answers() == seen {
+                            while driven.test_driver_answers() == seen {
                                 assert!(
                                     std::time::Instant::now() < until,
                                     "the real drive answers"
                                 );
                                 std::thread::yield_now();
                             }
-                            assert_eq!(driven.answers(), seen + 1, "exactly one drive answered");
+                            assert_eq!(
+                                driven.test_driver_answers(),
+                                seen + 1,
+                                "exactly one drive answered"
+                            );
 
                             let outcome = driven
-                                .answered_after(seen, Duration::ZERO)
+                                .test_driver_answer_after(seen, Duration::ZERO)
                                 .unwrap_or(Outcome::Pending);
-                            assert_eq!(driven.answers(), seen + 1, "the observed answer is stable");
+                            assert_eq!(
+                                driven.test_driver_answers(),
+                                seen + 1,
+                                "the observed answer is stable"
+                            );
                             outcome
                         } else {
                             tick()
@@ -2200,10 +2201,7 @@ fn configured_oidc_cases_validate_refresh_close_and_never_echo_credentials_both_
             );
         }
         let b = bind(&arm, &idp);
-        let crossings = || {
-            use std::sync::atomic::Ordering::SeqCst;
-            b.plugin.inner.crossings.load(SeqCst) - b.plugin.inner.resumes.load(SeqCst)
-        };
+        let crossings = || b.plugin.test_invocations().0 - b.plugin.test_invocations().1;
         let mut answers = Vec::new();
         let mut counts = Vec::new();
         let before = crossings();
@@ -2461,10 +2459,8 @@ fn configured_oidc_cases_validate_refresh_close_and_never_echo_credentials_both_
         answers.push(after);
         let rotated = bind(&arm, &idp);
         let rotated_settings = input["auth"]["rotated_settings"].to_string();
-        let rotated_crossings = || {
-            use std::sync::atomic::Ordering::SeqCst;
-            rotated.plugin.inner.crossings.load(SeqCst) - rotated.plugin.inner.resumes.load(SeqCst)
-        };
+        let rotated_crossings =
+            || rotated.plugin.test_invocations().0 - rotated.plugin.test_invocations().1;
         let before = rotated_crossings();
         open(&rotated.plugin, &rotated_settings, None).expect("rotated open");
         assert_eq!(rotated_crossings() - before, 1);
@@ -2612,7 +2608,10 @@ fn real_oidc_requires_a_connection_table_and_refuses_a_mismatched_linked_stateme
     };
     use std::sync::Arc;
     let _one = support::serial();
-    let d = Dispatcher::new(DispatchConfig::default());
+    let d = Dispatcher::new(
+        DispatchConfig::default(),
+        busbar_contract::services::test_caller_binding(),
+    );
     let bind = |conns| Bind {
         instance: Arc::from("oidc-negative"),
         max_inflight_cap: 64,
@@ -2640,8 +2639,8 @@ fn real_oidc_requires_a_connection_table_and_refuses_a_mismatched_linked_stateme
     load_linked::<Auth>(&row, bind(ConnTable::Probe)).expect("a probe needs no serving table");
     assert_eq!(load_linked::<busbar_plugin_loader::dispatch::kinds::secret::Secret>(&row, bind(ConnTable::Probe)).map(|_| ()).err(), Some(LoadError::ManifestKind { stated: busbar_contract::abi::mechanism::KindCode::Auth, want: <busbar_plugin_loader::dispatch::kinds::secret::Secret as busbar_plugin_loader::dispatch::Kind>::CODE }));
     assert_eq!(load_dropped_bytes::<busbar_plugin_loader::dispatch::kinds::secret::Secret>(&lib, NAME, &row.statement, bind(ConnTable::Probe)).map(|_| ()).err(), Some(LoadError::ManifestKind { stated: busbar_contract::abi::mechanism::KindCode::Auth, want: <busbar_plugin_loader::dispatch::kinds::secret::Secret as busbar_plugin_loader::dispatch::Kind>::CODE }));
-    assert_eq!(load_linked::<busbar_plugin_loader::dispatch::kinds::store::Store>(&row, bind(ConnTable::Probe)).map(|_| ()).err(), Some(LoadError::ManifestKind { stated: busbar_contract::abi::mechanism::KindCode::Auth, want: <busbar_plugin_loader::dispatch::kinds::store::Store as busbar_plugin_loader::dispatch::Kind>::CODE }));
-    assert_eq!(load_dropped_bytes::<busbar_plugin_loader::dispatch::kinds::store::Store>(&lib, NAME, &row.statement, bind(ConnTable::Probe)).map(|_| ()).err(), Some(LoadError::ManifestKind { stated: busbar_contract::abi::mechanism::KindCode::Auth, want: <busbar_plugin_loader::dispatch::kinds::store::Store as busbar_plugin_loader::dispatch::Kind>::CODE }));
+    assert_eq!(load_linked::<busbar_plugin_loader::dispatch::kinds::store_v4::StoreV4>(&row, bind(ConnTable::Probe)).map(|_| ()).err(), Some(LoadError::ManifestKind { stated: busbar_contract::abi::mechanism::KindCode::Auth, want: <busbar_plugin_loader::dispatch::kinds::store_v4::StoreV4 as busbar_plugin_loader::dispatch::Kind>::CODE }));
+    assert_eq!(load_dropped_bytes::<busbar_plugin_loader::dispatch::kinds::store_v4::StoreV4>(&lib, NAME, &row.statement, bind(ConnTable::Probe)).map(|_| ()).err(), Some(LoadError::ManifestKind { stated: busbar_contract::abi::mechanism::KindCode::Auth, want: <busbar_plugin_loader::dispatch::kinds::store_v4::StoreV4 as busbar_plugin_loader::dispatch::Kind>::CODE }));
     assert_eq!(load_linked::<busbar_plugin_loader::dispatch::kinds::transport::Transport>(&row, bind(ConnTable::Probe)).map(|_| ()).err(), Some(LoadError::ManifestKind { stated: busbar_contract::abi::mechanism::KindCode::Auth, want: <busbar_plugin_loader::dispatch::kinds::transport::Transport as busbar_plugin_loader::dispatch::Kind>::CODE }));
     assert_eq!(load_dropped_bytes::<busbar_plugin_loader::dispatch::kinds::transport::Transport>(&lib, NAME, &row.statement, bind(ConnTable::Probe)).map(|_| ()).err(), Some(LoadError::ManifestKind { stated: busbar_contract::abi::mechanism::KindCode::Auth, want: <busbar_plugin_loader::dispatch::kinds::transport::Transport as busbar_plugin_loader::dispatch::Kind>::CODE }));
     assert_eq!(load_linked::<busbar_plugin_loader::dispatch::kinds::export::Export>(&row, bind(ConnTable::Probe)).map(|_| ()).err(), Some(LoadError::ManifestKind { stated: busbar_contract::abi::mechanism::KindCode::Auth, want: <busbar_plugin_loader::dispatch::kinds::export::Export as busbar_plugin_loader::dispatch::Kind>::CODE }));
@@ -2733,7 +2732,10 @@ fn an_oidc_door_at_another_abi_or_layout_is_refused() {
     let actual = row();
     // SAFETY: the actual product's door has static storage and the documented door layout.
     let real = unsafe { Door::read_parts((actual.door)()) };
-    let d = Dispatcher::new(DispatchConfig::default());
+    let d = Dispatcher::new(
+        DispatchConfig::default(),
+        busbar_contract::services::test_caller_binding(),
+    );
     let bind = || Bind {
         instance: Arc::from("oidc-malformed"),
         max_inflight_cap: 64,

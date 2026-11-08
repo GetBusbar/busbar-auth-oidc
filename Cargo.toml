@@ -36,11 +36,11 @@ repository = "https://github.com/GetBusbar/busbar-auth-oidc"
 needless_update = "allow"
 
 [workspace.dependencies]
-busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "24b15da367cced369a6cccfd6adeb2bd2adb38c0" }
-busbar-plugin-loader = { git = "https://github.com/GetBusbar/busbar", rev = "24b15da367cced369a6cccfd6adeb2bd2adb38c0" }
-"busbar-core-connector" = { "features" = ["test-support"], git = "https://github.com/GetBusbar/busbar", rev = "24b15da367cced369a6cccfd6adeb2bd2adb38c0" }
-"busbar-transport-http" = { git = "https://github.com/GetBusbar/busbar-transport-http", rev = "efe040e4482b40876a45de0a557ba50a27280492" }
-"busbar-transport-tcp" = { git = "https://github.com/GetBusbar/busbar-transport-tcp", rev = "c73467f16f1d2cab2801517328d1d5942b7d1530" }
+busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "32ab284dd9935f555bf0988eafa98f82ed737bb1" }
+busbar-plugin-loader = { git = "https://github.com/GetBusbar/busbar", rev = "32ab284dd9935f555bf0988eafa98f82ed737bb1" }
+"busbar-core-connector" = { "features" = ["test-support"], git = "https://github.com/GetBusbar/busbar", rev = "32ab284dd9935f555bf0988eafa98f82ed737bb1" }
+"busbar-transport-http" = { git = "https://github.com/GetBusbar/busbar-transport-http", rev = "a319aed6ec56811b793c06289547b98c20908e40" }
+"busbar-transport-tcp" = { git = "https://github.com/GetBusbar/busbar-transport-tcp", rev = "63b2f8b15e37eeb15116e7b57143a2bce653f48d" }
 # busbar's root [workspace.dependencies], third-party rows, at 1a8a677b84a1667fbb6d7603b3586ad6ffe4f23e
 arc-swap = "1"
 async-trait = "0.1"

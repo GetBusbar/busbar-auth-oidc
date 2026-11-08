@@ -6,8 +6,8 @@
 //! real RS256 signature check, real claim validation. It also verifies that a tampered copy of the
 //! same token is genuinely rejected, so this is not a rubber stamp.
 
-use busbar_auth_oidc::fetch::{document, failed, Doc, Fetch};
-use busbar_auth_oidc::{OidcConfig, OidcModule, Step};
+use crate::fetch::{document, failed, Doc, Fetch};
+use crate::{OidcConfig, OidcModule, Step};
 use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::sdk::cred::FormBody;
 use busbar_contract::auth::{AuthVerdict, LoginHttpResponse};
@@ -36,7 +36,7 @@ impl Fetch for Blocking {
                 .and_then(|r| {
                     let status = r.status().as_u16();
                     let mut body = Vec::new();
-                    r.take(busbar_auth_oidc::fetch::MAX_JWKS_BYTES as u64 + 1)
+                    r.take(crate::fetch::MAX_JWKS_BYTES as u64 + 1)
                         .read_to_end(&mut body)
                         .map_err(|e| failed(url, e))?;
                     document(url, status, body)
@@ -78,7 +78,9 @@ fn env_or_skip(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.is_empty())
 }
 
-fn main() {
+#[test]
+#[ignore = "manual live tenant check; requires Entra credentials"]
+fn live_entra_check() {
     let (Some(tenant), Some(client_id), Some(username), Some(password)) = (
         env_or_skip("ENTRA_TENANT_ID"),
         env_or_skip("ENTRA_CLIENT_ID"),
