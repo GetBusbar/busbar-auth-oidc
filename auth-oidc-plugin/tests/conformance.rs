@@ -567,13 +567,14 @@ fn the_linked_and_the_dropped_in_oidc_module_are_one_module() {
 }
 
 #[test]
-fn red_an_unreachable_issuer_and_a_ticketless_call_fail_verify_in_1_5_5_s_words() {
+fn an_unreachable_issuer_uses_bounded_diagnostics_and_a_ticketless_call_is_refused() {
     let _one = support::serial();
     let key = Issuer::start(KID);
     let token = key.sign(&claims(AUDIENCE));
     let lib = cdylib();
     let stated = row().statement;
-    let url = format!("https://idp.conformance.example{DISCOVERY_PATH}");
+    // The destination display is bounded to 60 characters before the ellipsis.
+    let url = "https://idp.conformance.example/v2.0/.well-known/openid-configur…";
     let mut seen = Vec::new();
     for arm in [
         Arm::Linked,
@@ -693,7 +694,8 @@ fn red_an_oversized_reply_is_cut_off_at_the_cap_not_buffered_whole() {
     open(&b.plugin, &config(AUDIENCE), None).expect("opens");
 
     let refused = b.verify(Some(&token), None);
-    let url = format!("https://idp.conformance.example{DISCOVERY_PATH}");
+    // The destination display is bounded to 60 characters before the ellipsis.
+    let url = "https://idp.conformance.example/v2.0/.well-known/openid-configur…";
     assert_eq!(
         refused,
         format!(
@@ -738,7 +740,8 @@ fn red_an_oversized_error_reply_names_its_status_and_is_cut_off_at_the_cap() {
     open(&b.plugin, &config(AUDIENCE), None).expect("opens");
 
     let refused = b.verify(Some(&token), None);
-    let url = format!("https://idp.conformance.example{DISCOVERY_PATH}");
+    // The destination display is bounded to 60 characters before the ellipsis.
+    let url = "https://idp.conformance.example/v2.0/.well-known/openid-configur…";
     assert_eq!(
         refused,
         format!(

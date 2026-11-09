@@ -115,11 +115,11 @@ fn reading_a_token_response_frees_no_unwiped_copy_of_a_token() {
         ),
         (
             format!(r#"{{"id_token":"{canary}\t","id_token":"{canary}\t"}}"#),
-            r#"Ready(Err("token response: duplicate field `id_token`"))"#,
+            r#"Ready(Err("token response: a field is missing or has the wrong type (line 1, column 42; the decoder's text is withheld)"))"#,
         ),
         (
             format!(r#"{{"id_token":"{canary}\ud800"}}"#),
-            r#"Ready(Err("token response: `id_token` holds an invalid escape"))"#,
+            r#"Ready(Err("token response: a field is missing or has the wrong type (line 1, column 35; the decoder's text is withheld)"))"#,
         ),
         (
             format!(r#"{{"{canary}\u0041":{{"nested":"{canary}\n"}},"id_token":"{canary}\t"}}"#),
