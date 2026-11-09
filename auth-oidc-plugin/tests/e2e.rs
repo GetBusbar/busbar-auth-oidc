@@ -91,6 +91,7 @@ fn busbar_root() -> std::path::PathBuf {
 }
 
 /// Build (once, cached by cargo) and return the real `busbar` and `busbar-plugin-pack` binaries from
+// Nested builds inherit the coordinator's bounded CARGO_BUILD_JOBS budget.
 fn build_real_binaries() -> (std::path::PathBuf, std::path::PathBuf) {
     let root = busbar_root();
     let target = std::path::PathBuf::from(std::env::var_os("CARGO_TARGET_DIR").expect(
@@ -152,7 +153,6 @@ fn build_real_binaries() -> (std::path::PathBuf, std::path::PathBuf) {
         "+1.98.0",
         "build",
         "--locked",
-        "-j2",
         "--release",
         "-p",
         owner["name"].as_str().expect("binary owner package name"),
@@ -177,7 +177,6 @@ fn build_real_binaries() -> (std::path::PathBuf, std::path::PathBuf) {
         "+1.98.0",
         "build",
         "--locked",
-        "-j2",
         "--release",
         "--manifest-path",
         "dist/default/Cargo.toml",
