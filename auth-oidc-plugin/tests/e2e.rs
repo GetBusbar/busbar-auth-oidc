@@ -181,6 +181,8 @@ fn build_real_binaries() -> (std::path::PathBuf, std::path::PathBuf) {
         "--release",
         "--manifest-path",
         "dist/default/Cargo.toml",
+        "--features",
+        "test-harness",
         "--bin",
         "busbar",
         "--features",
