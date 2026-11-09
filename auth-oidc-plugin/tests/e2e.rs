@@ -450,6 +450,8 @@ fn install_oidc_plugin_via_admin_api_and_authenticate() {
 
     drop(child1);
 
+    // Restart validation runs before Store floor admission; pin the installed archive.
+    let archive_pin = busbar_contract::redacted::sha256_hex(&tarball);
     let (data_port2, admin_port2) = free_port_pair();
     let config2 = work.join("config2.yaml");
     std::fs::write(
@@ -459,7 +461,7 @@ fn install_oidc_plugin_via_admin_api_and_authenticate() {
              admin_listen: \"127.0.0.1:{admin_port2}\"\n\
              store: {{ module: memory }}\n\
              advanced:\n  allow_destinations: [\"127.0.0.1\"]\n\
-             plugins:\n  enabled: true\n  dir: {}\n  trust:\n    allow_unsigned: true\n\
+             plugins:\n  enabled: true\n  dir: {}\n  fetch:\n    - url: \"https://plugins.example/{file}\"\n      sha256: \"{archive_pin}\"\n  trust:\n    allow_unsigned: true\n\
              identity-providers:\n  admin-tokens: {{ module: admin-tokens, token: {{ env: BUSBAR_ADMIN_TOKEN }} }}\n\
              \x20 oidc:\n    module: oidc\n    settings:\n      issuer: \"{ISSUER}\"\n      audience: \"{AUDIENCE}\"\n\
              \x20     authorization_endpoint: \"{ISSUER}/authorize\"\n\
