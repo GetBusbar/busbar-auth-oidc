@@ -226,7 +226,7 @@ dependencies = [
 [[package]]
 name = "busbar-contract"
 version = "1.6.0"
-source = "git+https://github.com/GetBusbar/busbar?rev=17e2ae73352280303cb3cd7a33e87c03e4b5100d#17e2ae73352280303cb3cd7a33e87c03e4b5100d"
+source = "git+https://github.com/GetBusbar/busbar?rev=f0f8155028d63b5cd72125cf679aff1912fcca61#f0f8155028d63b5cd72125cf679aff1912fcca61"
 dependencies = [
  "async-trait",
  "aws-lc-sys",
@@ -257,7 +257,7 @@ dependencies = [
 [[package]]
 name = "busbar-plugin-loader"
 version = "1.6.0"
-source = "git+https://github.com/GetBusbar/busbar?rev=17e2ae73352280303cb3cd7a33e87c03e4b5100d#17e2ae73352280303cb3cd7a33e87c03e4b5100d"
+source = "git+https://github.com/GetBusbar/busbar?rev=f0f8155028d63b5cd72125cf679aff1912fcca61#f0f8155028d63b5cd72125cf679aff1912fcca61"
 dependencies = [
  "arc-swap",
  "busbar-contract",
