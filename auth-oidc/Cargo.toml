@@ -46,3 +46,11 @@ ring = { workspace = true, features = ["std"] }
 # The manual live Entra test (src/tests/entra_live_check.rs) drives the module's sans-IO fetches with a
 # real blocking HTTPS client: an example, never the shipped image.
 reqwest = { workspace = true, features = ["blocking"] }
+
+# Owner test sources consumed only by the assembly test harness.
+[package.metadata.busbar.test-sources]
+root = "tests/root/mod.rs"
+common = "tests/common/mod.rs"
+
+[package.metadata.busbar.test-contexts]
+migration_table_auth = [{ path = "tests/root/migration_table.rs" }]
