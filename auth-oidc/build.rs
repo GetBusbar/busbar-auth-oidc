@@ -32,6 +32,7 @@ fn export_test_source(relative: &str, macro_name: &str, output_name: &str) -> st
 }
 
 fn main() -> std::io::Result<()> {
+    export_context_source()?;
     export_test_source(
         "tests/root/mod.rs",
         "__busbar_root_tests",
@@ -42,4 +43,23 @@ fn main() -> std::io::Result<()> {
         "__busbar_common_tests",
         "common_test_source.rs",
     )
+}
+
+fn export_context_source() -> std::io::Result<()> {
+    use std::path::PathBuf;
+    let manifest = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("manifest dir"))
+        .canonicalize()?;
+    let source = manifest.join("tests/root/migration_table.rs");
+    if source.canonicalize()? != source {
+        return Err(std::io::Error::other(
+            "test source must remain in its owner",
+        ));
+    }
+    let output = PathBuf::from(std::env::var_os("OUT_DIR").expect("output dir"));
+    std::fs::write(output.join("context_test_source.rs"), format!(
+        "#[doc(hidden)]\n#[macro_export]\nmacro_rules! __busbar_context_tests {{\n    (migration_table_auth, \"busbar-auth-oidc\") => {{ include!({source:?}); }};\n}}\n"
+    ))?;
+    println!("cargo::rerun-if-changed={}", source.display());
+    println!("cargo::rerun-if-changed=build.rs");
+    Ok(())
 }
