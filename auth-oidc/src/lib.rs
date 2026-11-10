@@ -1120,3 +1120,5 @@ mod token_wipe;
 #[cfg(test)]
 #[path = "tests/entra_live_check.rs"]
 mod entra_live_check;
+
+include!(concat!(env!("OUT_DIR"), "/root_test_source.rs"));
