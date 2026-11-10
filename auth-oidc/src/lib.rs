@@ -1122,3 +1122,5 @@ mod token_wipe;
 mod entra_live_check;
 
 include!(concat!(env!("OUT_DIR"), "/root_test_source.rs"));
+
+include!(concat!(env!("OUT_DIR"), "/common_test_source.rs"));

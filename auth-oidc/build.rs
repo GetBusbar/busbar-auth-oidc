@@ -3,22 +3,22 @@
 
 /// Export source-only test support to the composition root without a runtime dependency.
 /// The caller includes OUT_DIR/root_test_source.rs from the owner library's crate root.
-fn export_root_test_source() -> std::io::Result<()> {
+fn export_test_source(relative: &str, macro_name: &str, output_name: &str) -> std::io::Result<()> {
     use std::path::PathBuf;
     let manifest = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("manifest dir"))
         .canonicalize()?;
-    let source = manifest.join("tests/root/mod.rs");
+    let source = manifest.join(relative);
     if source.canonicalize()? != source {
         return Err(std::io::Error::other(
-            "root test source must be the owner's own tests/root/mod.rs, without symlink escapes",
+            "test source must be the owner's own declared path, without symlink escapes",
         ));
     }
     let package = std::env::var("CARGO_PKG_NAME").expect("package name");
     let output = PathBuf::from(std::env::var_os("OUT_DIR").expect("output dir"));
     std::fs::write(
-        output.join("root_test_source.rs"),
+        output.join(output_name),
         format!(
-            "#[doc(hidden)]\n#[macro_export]\nmacro_rules! __busbar_root_tests {{\n    \
+            "#[doc(hidden)]\n#[macro_export]\nmacro_rules! {macro_name} {{\n    \
              ($module:ident, {package:?}) => {{\n        \
              #[path = {source:?}]\n        pub(crate) mod $module;\n    }};\n}}\n"
         ),
@@ -32,5 +32,14 @@ fn export_root_test_source() -> std::io::Result<()> {
 }
 
 fn main() -> std::io::Result<()> {
-    export_root_test_source()
+    export_test_source(
+        "tests/root/mod.rs",
+        "__busbar_root_tests",
+        "root_test_source.rs",
+    )?;
+    export_test_source(
+        "tests/common/mod.rs",
+        "__busbar_common_tests",
+        "common_test_source.rs",
+    )
 }
