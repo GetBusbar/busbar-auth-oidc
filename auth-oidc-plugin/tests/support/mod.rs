@@ -997,7 +997,13 @@ pub fn bind_as<K: busbar_plugin_loader::dispatch::Kind>(
         max_inflight_cap: 64,
         sink: Arc::new(Recorder(idp.clone())),
         dispatcher: dispatcher.adopter(),
-        conns: ConnTable::Host(conns),
+        conns: ConnTable::Host(
+            busbar_contract::conn::admissions::AdmissionAuthority::issue(
+                &busbar_contract::caps::KernelSeal::acquire_for_kernel(),
+                conns,
+                busbar_contract::secret_ref::Sugars::default(),
+            ),
+        ),
     };
     let plugin = match arm {
         Arm::Linked => load_linked::<K>(&row(), bind),
