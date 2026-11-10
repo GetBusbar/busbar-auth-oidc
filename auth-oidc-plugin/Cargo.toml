@@ -50,3 +50,6 @@ base64 = { workspace = true }
 # HTTP against a spawned real `busbar` binary (admin API install/restart + a real bearer-token
 # data-plane request).
 reqwest = { workspace = true, features = ["json", "blocking"] }
+
+[package.metadata.busbar.test-artifacts]
+cdylib = ["BUSBAR_TEST_OIDC_CDYLIB", "BUSBAR_AUTH_TEST_OIDC_PLUGIN"]
