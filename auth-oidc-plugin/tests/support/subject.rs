@@ -9,7 +9,8 @@ fn busbar_root() -> std::path::PathBuf {
         .expect("BUSBAR_CHECKOUT names an existing busbar checkout")
 }
 
-/// Build (once, cached by cargo) and return the real `busbar` and `busbar-plugin-pack` binaries from
+/// Build the real debug-profile subjects for e2e, avoiding release LTO in the bounded preparation
+/// worker. Cargo still checks source freshness before every runtime test.
 // Nested builds inherit the coordinator's bounded CARGO_BUILD_JOBS budget.
 pub fn build_real_binaries() -> (std::path::PathBuf, std::path::PathBuf) {
     let root = busbar_root();
@@ -72,7 +73,6 @@ pub fn build_real_binaries() -> (std::path::PathBuf, std::path::PathBuf) {
         "+1.98.0",
         "build",
         "--locked",
-        "--release",
         "-p",
         owner["name"].as_str().expect("binary owner package name"),
         "--bin",
@@ -96,15 +96,12 @@ pub fn build_real_binaries() -> (std::path::PathBuf, std::path::PathBuf) {
         "+1.98.0",
         "build",
         "--locked",
-        "--release",
         "--manifest-path",
         "dist/default/Cargo.toml",
         "--features",
         "test-harness",
         "--bin",
         "busbar",
-        "--features",
-        "test-harness",
     ]
     .into_iter()
     .map(str::to_owned)
@@ -121,7 +118,7 @@ pub fn build_real_binaries() -> (std::path::PathBuf, std::path::PathBuf) {
         );
     }
     (
-        target.join("release/busbar"),
-        target.join("release/busbar-plugin-pack"),
+        target.join("debug/busbar"),
+        target.join("debug/busbar-plugin-pack"),
     )
 }
