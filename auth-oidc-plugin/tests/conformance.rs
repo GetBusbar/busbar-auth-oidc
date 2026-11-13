@@ -2162,6 +2162,68 @@ fn abandoned_wide_oidc_verdicts_release_and_closed_instances_refuse_recall_both_
     }
 }
 
+/// `conformance.json` with its runtime placeholders filled in. The fixture carries no signed
+/// token and no key: `tokens` names each credential by its claims and signer, minted here under
+/// `key` (`"issuer"`) or a stranger key that publishes the same `kid` but is never served
+/// (`"stranger"`), once per run so every case, far end and `never_echoed` entry naming a token sees
+/// the same bytes. `{"token": name}` becomes that minted token, `{"jwks": "issuer"}` becomes
+/// `key`'s served JWKS, and a far end's object body is answered as its JSON text.
+fn minted_fixture(key: &Issuer) -> serde_json::Value {
+    use serde_json::Value;
+    fn fill(value: &mut Value, key: &Issuer, tokens: &std::collections::HashMap<String, String>) {
+        let replacement = match &*value {
+            Value::Object(m) if m.len() == 1 && m.contains_key("token") => {
+                let name = m["token"]
+                    .as_str()
+                    .expect("a token placeholder names a token");
+                Some(
+                    tokens
+                        .get(name)
+                        .unwrap_or_else(|| panic!("conformance.json names no token {name:?}"))
+                        .clone(),
+                )
+            }
+            Value::Object(m) if m.len() == 1 && m.contains_key("jwks") => {
+                assert_eq!(m["jwks"], "issuer", "the one served JWKS is the issuer's");
+                Some(key.jwks().to_owned())
+            }
+            _ => None,
+        };
+        if let Some(text) = replacement {
+            *value = Value::String(text);
+            return;
+        }
+        match value {
+            Value::Object(m) => m.values_mut().for_each(|v| fill(v, key, tokens)),
+            Value::Array(a) => a.iter_mut().for_each(|v| fill(v, key, tokens)),
+            _ => {}
+        }
+    }
+    let mut input: Value = serde_json::from_str(include_str!("conformance.json")).unwrap();
+    let stranger = Issuer::start(KID);
+    let tokens = input["tokens"]
+        .as_object()
+        .expect("conformance.json states its tokens")
+        .iter()
+        .map(|(name, spec)| {
+            let signer = match spec["signer"].as_str() {
+                Some("issuer") => key,
+                Some("stranger") => &stranger,
+                other => panic!("token {name:?} has an unknown signer {other:?}"),
+            };
+            (name.clone(), signer.sign(&spec["claims"]))
+        })
+        .collect();
+    fill(&mut input["far_ends"], key, &tokens);
+    fill(&mut input["auth"], key, &tokens);
+    for far in input["far_ends"].as_array_mut().unwrap() {
+        if far["body"].is_object() {
+            far["body"] = Value::String(far["body"].to_string());
+        }
+    }
+    input
+}
+
 /// The JSON cases run through each actual door at their stated request timestamps.
 #[test]
 fn configured_oidc_cases_validate_refresh_close_and_never_echo_credentials_both_ways() {
@@ -2170,8 +2232,8 @@ fn configured_oidc_cases_validate_refresh_close_and_never_echo_credentials_both_
         slot as life, RefreshIn, TickIn, TickOut, ValidateIn,
     };
     let _one = support::serial();
-    let input: serde_json::Value = serde_json::from_str(include_str!("conformance.json")).unwrap();
     let key = Issuer::start(KID);
+    let input = minted_fixture(&key);
     let lib = cdylib();
     let stated = row().statement;
     let settings = input["settings"].to_string();

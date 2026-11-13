@@ -8,16 +8,68 @@
     "ca_cert_pem": "-----BEGIN CERTIFICATE-----\nY29uZm9ybWFuY2UtaXNzdWVyLWNlcnRpZmljYXRl\n-----END CERTIFICATE-----\n",
     "role_claim": "roles"
   },
+  "tokens": {
+    "bearer": {
+      "signer": "issuer",
+      "claims": {
+        "iss": "https://idp.conformance.example/v2.0",
+        "aud": "api://busbar-conformance",
+        "sub": "conformance-subject",
+        "name": "Conformance Caller",
+        "roles": [
+          "Gateway.User"
+        ],
+        "exp": 4102444800,
+        "nbf": 0
+      }
+    },
+    "bearer_signed_by_stranger": {
+      "signer": "stranger",
+      "claims": {
+        "iss": "https://idp.conformance.example/v2.0",
+        "aud": "api://busbar-conformance",
+        "sub": "conformance-subject",
+        "name": "Conformance Caller",
+        "roles": [
+          "Gateway.User"
+        ],
+        "exp": 4102444800,
+        "nbf": 0
+      }
+    },
+    "login_id_token": {
+      "signer": "issuer",
+      "claims": {
+        "iss": "https://idp.conformance.example/v2.0",
+        "aud": "api://busbar-conformance",
+        "sub": "conformance-subject",
+        "name": "Conformance Caller",
+        "roles": [
+          "Gateway.User"
+        ],
+        "exp": 4102444800,
+        "nbf": 0,
+        "nonce": "conformance-nonce"
+      }
+    }
+  },
   "far_ends": [
     {
       "url": "https://idp.conformance.example/keys",
       "status": 200,
-      "body": "{\"keys\": [{\"kty\": \"EC\", \"crv\": \"P-256\", \"kid\": \"conformance-kid\", \"use\": \"sig\", \"alg\": \"ES256\", \"x\": \"35NosjwW9xbeXTuYv2WoAbR5AKBQA2S_iJiwiXQfsmg\", \"y\": \"jQWucxLZlwh0H-h3ZuOCXTnJztG4du5srRclX4PMiBc\"}]}"
+      "body": {
+        "jwks": "issuer"
+      }
     },
     {
       "url": "https://idp.conformance.example/token",
       "status": 200,
-      "body": "{\"id_token\": \"eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImNvbmZvcm1hbmNlLWtpZCJ9.eyJpc3MiOiJodHRwczovL2lkcC5jb25mb3JtYW5jZS5leGFtcGxlL3YyLjAiLCJhdWQiOiJhcGk6Ly9idXNiYXItY29uZm9ybWFuY2UiLCJzdWIiOiJjb25mb3JtYW5jZS1zdWJqZWN0IiwibmFtZSI6IkNvbmZvcm1hbmNlIENhbGxlciIsInJvbGVzIjpbIkdhdGV3YXkuVXNlciJdLCJleHAiOjQxMDI0NDQ4MDAsIm5iZiI6MCwibm9uY2UiOiJjb25mb3JtYW5jZS1ub25jZSJ9.EY5eez7GWVAt0QVy2tkXfw0tOl9zvoO-kMTC5oMhYGYV4GI735VdAa4I06aFJCO-Q9wybufsQtB0NMepQv0nAQ\", \"token_type\": \"Bearer\"}"
+      "body": {
+        "id_token": {
+          "token": "login_id_token"
+        },
+        "token_type": "Bearer"
+      }
     }
   ],
   "auth": {
@@ -40,12 +92,16 @@
     },
     "cases": [
       {
-        "credential": "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImNvbmZvcm1hbmNlLWtpZCJ9.eyJpc3MiOiJodHRwczovL2lkcC5jb25mb3JtYW5jZS5leGFtcGxlL3YyLjAiLCJhdWQiOiJhcGk6Ly9idXNiYXItY29uZm9ybWFuY2UiLCJzdWIiOiJjb25mb3JtYW5jZS1zdWJqZWN0IiwibmFtZSI6IkNvbmZvcm1hbmNlIENhbGxlciIsInJvbGVzIjpbIkdhdGV3YXkuVXNlciJdLCJleHAiOjQxMDI0NDQ4MDAsIm5iZiI6MH0.KppCE8tyokmC1OPBAmeymOMmpIzHEhadwypCgYOB4J-O5Va5YsEEq1an7snxheNXcTeWT341LFzm6aNgKWdEgA",
+        "credential": {
+          "token": "bearer"
+        },
         "verdict": "identity:oidc-v2:aHR0cHM6Ly9pZHAuY29uZm9ybWFuY2UuZXhhbXBsZS92Mi4w:conformance-subject",
         "timestamp": 1800000000
       },
       {
-        "credential": "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImNvbmZvcm1hbmNlLWtpZCJ9.eyJpc3MiOiJodHRwczovL2lkcC5jb25mb3JtYW5jZS5leGFtcGxlL3YyLjAiLCJhdWQiOiJhcGk6Ly9idXNiYXItY29uZm9ybWFuY2UiLCJzdWIiOiJjb25mb3JtYW5jZS1zdWJqZWN0IiwibmFtZSI6IkNvbmZvcm1hbmNlIENhbGxlciIsInJvbGVzIjpbIkdhdGV3YXkuVXNlciJdLCJleHAiOjQxMDI0NDQ4MDAsIm5iZiI6MH0.HhuGlZQK203seqdPO6QOb7cOnZ1vB6rWMoLpshIlcGJJPcAMYh7xmwx0YfLvya7V217bN1Qj8CHseabA61h_Vw",
+        "credential": {
+          "token": "bearer_signed_by_stranger"
+        },
         "verdict": "reject",
         "timestamp": 1800000000
       },
@@ -61,8 +117,12 @@
       }
     ],
     "never_echoed": [
-      "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImNvbmZvcm1hbmNlLWtpZCJ9.eyJpc3MiOiJodHRwczovL2lkcC5jb25mb3JtYW5jZS5leGFtcGxlL3YyLjAiLCJhdWQiOiJhcGk6Ly9idXNiYXItY29uZm9ybWFuY2UiLCJzdWIiOiJjb25mb3JtYW5jZS1zdWJqZWN0IiwibmFtZSI6IkNvbmZvcm1hbmNlIENhbGxlciIsInJvbGVzIjpbIkdhdGV3YXkuVXNlciJdLCJleHAiOjQxMDI0NDQ4MDAsIm5iZiI6MH0.KppCE8tyokmC1OPBAmeymOMmpIzHEhadwypCgYOB4J-O5Va5YsEEq1an7snxheNXcTeWT341LFzm6aNgKWdEgA",
-      "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6ImNvbmZvcm1hbmNlLWtpZCJ9.eyJpc3MiOiJodHRwczovL2lkcC5jb25mb3JtYW5jZS5leGFtcGxlL3YyLjAiLCJhdWQiOiJhcGk6Ly9idXNiYXItY29uZm9ybWFuY2UiLCJzdWIiOiJjb25mb3JtYW5jZS1zdWJqZWN0IiwibmFtZSI6IkNvbmZvcm1hbmNlIENhbGxlciIsInJvbGVzIjpbIkdhdGV3YXkuVXNlciJdLCJleHAiOjQxMDI0NDQ4MDAsIm5iZiI6MCwibm9uY2UiOiJjb25mb3JtYW5jZS1ub25jZSJ9.EY5eez7GWVAt0QVy2tkXfw0tOl9zvoO-kMTC5oMhYGYV4GI735VdAa4I06aFJCO-Q9wybufsQtB0NMepQv0nAQ"
+      {
+        "token": "bearer"
+      },
+      {
+        "token": "login_id_token"
+      }
     ]
   }
 }
